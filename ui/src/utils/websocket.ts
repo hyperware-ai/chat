@@ -25,6 +25,10 @@ export class ChatWebSocket {
         console.log('WebSocket connected');
         this.reconnectAttempts = 0;
         this.startHeartbeat();
+        
+        // Send initial heartbeat to trigger chat sync from backend
+        console.log('Sending initial heartbeat to trigger chat sync');
+        this.send({ Heartbeat: null });
       };
 
       this.ws.onmessage = (event) => {
@@ -96,7 +100,7 @@ export class ChatWebSocket {
   private startHeartbeat() {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
-      this.send({ Heartbeat: {} });
+      this.send({ Heartbeat: null });
     }, 30000); // Send heartbeat every 30 seconds
   }
 

@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { ChatMessage } from '../../types/chat';
 import MessageMenu from './MessageMenu';
 import './Message.css';
-import { addReaction, removeReaction } from '../../../../target/ui/caller-utils';
+import { add_reaction, remove_reaction } from '../../../../target/ui/caller-utils';
 import { useChatStore } from '../../store/chat';
 
 interface MessageProps {
@@ -53,12 +53,12 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       );
       
       if (existingReaction) {
-        await removeReaction(JSON.stringify({ 
+        await remove_reaction(JSON.stringify({ 
           message_id: message.id, 
           emoji 
         }));
       } else {
-        await addReaction(JSON.stringify({ 
+        await add_reaction(JSON.stringify({ 
           message_id: message.id, 
           emoji 
         }));
@@ -93,7 +93,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       // Check if this part is a URL
       if (part.match(urlRegex)) {
         // Check if it's an image URL
-        if (imageRegex.test(part) && settings?.showImages) {
+        if (imageRegex.test(part) && settings?.show_images) {
           return (
             <div key={index} style={{ margin: '8px 0' }}>
               <a href={part} target="_blank" rel="noopener noreferrer">
@@ -143,7 +143,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       // Regular text
       return <span key={index}>{part}</span>;
     });
-  }, [message.content, settings?.showImages, isOwn]);
+  }, [message.content, settings?.show_images, isOwn]);
 
   return (
     <>
@@ -152,12 +152,12 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
         className={`message ${isOwn ? 'own' : 'other'}`}
         onContextMenu={handleLongPress}
       >
-        {message.replyTo && (
+        {message.reply_to && (
           <div 
             className="reply-to"
             onClick={() => {
               // Scroll to the original message
-              const element = document.getElementById(`message-${message.replyTo}`);
+              const element = document.getElementById(`message-${message.reply_to}`);
               if (element) {
                 element.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 // Add a highlight animation
@@ -169,18 +169,18 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
           >
             <div className="reply-to-label">↩ Reply</div>
             <div className="reply-to-content">
-              {activeChat?.messages.find(m => m.id === message.replyTo)?.content || 'Message not found'}
+              {activeChat?.messages.find(m => m.id === message.reply_to)?.content || 'Message not found'}
             </div>
           </div>
         )}
         
         <div className="message-content">
           {/* If this is a file/image message with file info, show it specially */}
-          {message.fileInfo && message.messageType === 'Image' && settings?.showImages ? (
+          {message.file_info && message.message_type === 'Image' && settings?.show_images ? (
             <div>
               <img 
-                src={message.fileInfo.url} 
-                alt={message.fileInfo.filename}
+                src={message.file_info.url} 
+                alt={message.file_info.filename}
                 style={{ 
                   maxWidth: '100%', 
                   maxHeight: '300px',
@@ -189,13 +189,13 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
                   marginBottom: '8px'
                 }}
               />
-              <div style={{ fontSize: '12px', opacity: 0.8 }}>{message.fileInfo.filename}</div>
+              <div style={{ fontSize: '12px', opacity: 0.8 }}>{message.file_info.filename}</div>
             </div>
-          ) : message.fileInfo && message.messageType === 'File' ? (
+          ) : message.file_info && message.message_type === 'File' ? (
             <div>
-              <div style={{ marginBottom: '8px' }}>📎 {message.fileInfo.filename}</div>
+              <div style={{ marginBottom: '8px' }}>📎 {message.file_info.filename}</div>
               <div style={{ fontSize: '12px', opacity: 0.8 }}>
-                {(message.fileInfo.size / 1024).toFixed(1)} KB
+                {(message.file_info.size / 1024).toFixed(1)} KB
               </div>
             </div>
           ) : (

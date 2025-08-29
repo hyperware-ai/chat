@@ -41,12 +41,12 @@ const ChatListItem: React.FC<ChatListItemProps> = ({ chat }) => {
       <div className="chat-info">
         <div className="chat-header">
           <span className="chat-name">{chat.counterparty}</span>
-          <span className="chat-time">{formatTime(chat.lastActivity)}</span>
+          <span className="chat-time">{formatTime(chat.last_activity)}</span>
         </div>
         <div className="chat-preview">
           <span className="last-message">{getLastMessage()}</span>
-          {chat.unreadCount > 0 && (
-            <span className="unread-badge">{chat.unreadCount}</span>
+          {chat.unread_count > 0 && (
+            <span className="unread-badge">{chat.unread_count}</span>
           )}
         </div>
       </div>

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { ChatMessage } from '../../types/chat';
 import { useChatStore } from '../../store/chat';
-import { addReaction, forwardMessage } from '../../../../target/ui/caller-utils';
+import { add_reaction, forward_message } from '../../../../target/ui/caller-utils';
 import './MessageMenu.css';
 
 interface MessageMenuProps {
@@ -46,7 +46,7 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   
   const handleAddReaction = async (emoji: string) => {
     try {
-      await addReaction(JSON.stringify({ 
+      await add_reaction(JSON.stringify({ 
         message_id: message.id, 
         emoji 
       }));
@@ -59,7 +59,7 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   
   const handleForward = async (toChatId: string) => {
     try {
-      await forwardMessage(JSON.stringify({ 
+      await forward_message(JSON.stringify({ 
         message_id: message.id, 
         to_chat_id: toChatId 
       }));

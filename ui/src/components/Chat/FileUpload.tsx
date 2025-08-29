@@ -1,7 +1,7 @@
 import React from 'react';
 import './FileUpload.css';
 import { useChatStore } from '../../store/chat';
-import { uploadFile } from '../../../../target/ui/caller-utils';
+import { upload_file } from '../../../../target/ui/caller-utils';
 
 interface FileUploadProps {
   onClose: () => void;
@@ -30,7 +30,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onClose }) => {
                 reply_to: null
               });
               
-              await uploadFile(requestBody);
+              await upload_file(requestBody);
               await loadChats(); // Refresh to show new message
             }
           };

@@ -15,8 +15,8 @@ const ProfileButton: React.FC<ProfileButtonProps> = ({ onClick }) => {
 
   return (
     <button className="profile-button" onClick={onClick}>
-      {profile?.profilePic ? (
-        <img src={profile.profilePic} alt={profile.name} className="profile-pic" />
+      {profile?.profile_pic ? (
+        <img src={profile.profile_pic} alt={profile.name} className="profile-pic" />
       ) : (
         <div className="profile-initial">{getInitial()}</div>
       )}

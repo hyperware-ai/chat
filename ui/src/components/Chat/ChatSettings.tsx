@@ -52,7 +52,7 @@ const ChatSettings: React.FC<ChatSettingsProps> = ({ chat, onClose }) => {
             <label>
               <input
                 type="checkbox"
-                checked={chat.isBlocked}
+                checked={chat.is_blocked}
                 onChange={handleBlockToggle}
               />
               <span>Block User</span>

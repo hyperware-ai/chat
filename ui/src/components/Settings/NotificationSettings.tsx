@@ -18,8 +18,8 @@ const NotificationSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.notifyChats}
-            onChange={() => handleToggle('notifyChats')}
+            checked={settings.notify_chats}
+            onChange={() => handleToggle('notify_chats')}
           />
           <span>Notify for new chat messages</span>
         </label>
@@ -29,8 +29,8 @@ const NotificationSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.notifyGroups}
-            onChange={() => handleToggle('notifyGroups')}
+            checked={settings.notify_groups}
+            onChange={() => handleToggle('notify_groups')}
           />
           <span>Notify for group messages</span>
         </label>
@@ -40,8 +40,8 @@ const NotificationSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.notifyCalls}
-            onChange={() => handleToggle('notifyCalls')}
+            checked={settings.notify_calls}
+            onChange={() => handleToggle('notify_calls')}
           />
           <span>Notify for incoming calls</span>
         </label>

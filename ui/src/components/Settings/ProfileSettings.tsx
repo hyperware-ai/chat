@@ -6,12 +6,12 @@ import './ProfileSettings.css';
 const ProfileSettings: React.FC = () => {
   const { profile, updateProfile } = useChatStore();
   const [name, setName] = useState(profile?.name || '');
-  const [profilePic, setProfilePic] = useState(profile?.profilePic || '');
+  const [profilePic, setProfilePic] = useState(profile?.profile_pic || '');
 
   const handleSave = async () => {
     await updateProfile({
       name,
-      profilePic: profilePic || null,
+      profile_pic: profilePic || null,
     });
   };
 

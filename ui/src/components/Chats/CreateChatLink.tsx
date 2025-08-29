@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { createChatLink } from '../../../../target/ui/caller-utils';
+import { create_chat_link } from '../../../../target/ui/caller-utils';
 import './CreateChatLink.css';
 
 interface CreateChatLinkProps {
@@ -16,7 +16,7 @@ export const CreateChatLink: React.FC<CreateChatLinkProps> = ({ onClose }) => {
     setLoading(true);
     setError(null);
     try {
-      const link = await createChatLink(JSON.stringify({ single_use: singleUse }));
+      const link = await create_chat_link(JSON.stringify({ single_use: singleUse }));
       const fullLink = `${window.location.origin}/public/join-${link}`;
       setGeneratedLink(fullLink);
     } catch (err) {

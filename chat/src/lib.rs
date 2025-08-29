@@ -8,19 +8,26 @@ use hyperware_process_lib::{
     println,
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
-    vfs::{create_file, open_file, FileType, VfsAction, VfsResponse, vfs_request},
+    vfs::{create_file},
     LazyLoadBlob,
-    Request,
-    hyperapp::{send, SaveOptions},
+    Address,
+    hyperapp::SaveOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::{HashMap, HashSet};
 
-// CORE TYPES
+// Import generated RPC functions from caller-utils
+use caller_utils::app::{
+    receive_chat_creation_remote_rpc,
+    receive_message_remote_rpc,
+    receive_message_ack_remote_rpc,
+};
+
+// Define types locally with proper camelCase serialization
+// These will generate the correct caller-utils
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub id: String,
     pub sender: String,
@@ -49,7 +56,6 @@ pub enum MessageType {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct FileInfo {
     pub filename: String,
     pub mime_type: String,
@@ -66,7 +72,6 @@ pub enum MessageStatus {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct Chat {
     pub id: String,
     pub counterparty: String,
@@ -78,7 +83,6 @@ pub struct Chat {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct ChatKey {
     pub key: String,
     pub user_name: String,
@@ -88,14 +92,12 @@ pub struct ChatKey {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct UserProfile {
     pub name: String,
     pub profile_pic: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub show_images: bool,
     pub show_profile_pics: bool,
@@ -255,7 +257,7 @@ impl AppState {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            
+
             let welcome_chat = Chat {
                 id: "system:welcome".to_string(),
                 counterparty: "System".to_string(),
@@ -275,7 +277,7 @@ impl AppState {
                 is_blocked: false,
                 notify: false,
             };
-            
+
             self.chats.insert("system:welcome".to_string(), welcome_chat);
         }
 
@@ -313,17 +315,11 @@ impl AppState {
 
         self.chats.insert(chat_id, chat.clone());
 
-        // Notify the counterparty about the chat creation
-        let body = serde_json::json!({"ReceiveChatCreation": our().node});
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        // Notify the counterparty about the chat creation using generated RPC
+        let target = Address::from((req.counterparty.as_str(), OUR_PROCESS_ID));
 
-        let target = (req.counterparty.as_str(), OUR_PROCESS_ID);
-        let request = Request::to(target)
-            .body(body_bytes)
-            .expects_response(5); // 5 second timeout
-
-        // Send notification asynchronously (don't block on response)
-        let _ = send::<Result<(), String>>(request).await;
+        // Send notification asynchronously using generated RPC method
+        let _ = receive_chat_creation_remote_rpc(&target, our().node).await;
 
         Ok(chat)
     }
@@ -420,28 +416,32 @@ impl AppState {
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
 
-        // Send to counterparty via P2P
+        // Send to counterparty via P2P using generated RPC
         let counterparty = chat.counterparty.clone();
         let msg_to_send = message.clone();
 
-        // Create the request body with the message
-        let body = serde_json::json!({"ReceiveMessage": msg_to_send});
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
-        // Send to the counterparty node using tuple format for Address
-        // Format: (node, process, package, publisher)
-        let target = (counterparty.as_str(), OUR_PROCESS_ID);
-        let request = Request::to(target)
-            .body(body_bytes)
-            .expects_response(5); // 5 second timeout
-
-        // Try to send and queue if it fails
-        match send::<Result<(), String>>(request).await {
+        // Try to send using generated RPC method and queue if it fails
+        // Convert via JSON to handle camelCase serialization
+        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
+        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+        match receive_message_remote_rpc(&target, msg_for_rpc).await {
             Ok(_) => {
                 // Message sent successfully, update status to Sent
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
                         msg.status = MessageStatus::Sent;
+                    }
+                    
+                    // Send ChatUpdate with the updated message status
+                    for &channel_id in self.ws_connections.keys() {
+                        println!("Sending ChatUpdate after message sent successfully");
+                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                            mime: Some("application/json".to_string()),
+                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        });
                     }
                 }
             }
@@ -623,19 +623,26 @@ impl AppState {
             let counterparty = chat.counterparty.clone();
             let msg_to_send = forwarded_message.clone();
 
-            let body = serde_json::json!({"ReceiveMessage": msg_to_send});
-            let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
-            let target = (counterparty.as_str(), OUR_PROCESS_ID);
-            let request = Request::to(target)
-                .body(body_bytes)
-                .expects_response(5);
-
-            match send::<Result<(), String>>(request).await {
+            // Send using generated RPC method
+            // Convert via JSON to handle camelCase serialization
+            let msg_json = serde_json::to_value(&msg_to_send).unwrap();
+            let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+            match receive_message_remote_rpc(&target, msg_for_rpc).await {
                 Ok(_) => {
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
                         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == forwarded_message.id) {
                             msg.status = MessageStatus::Sent;
+                        }
+                        
+                        // Send ChatUpdate with the updated message status
+                        for &channel_id in self.ws_connections.keys() {
+                            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                                mime: Some("application/json".to_string()),
+                                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                            });
                         }
                     }
                 }
@@ -849,14 +856,14 @@ impl AppState {
         // Decode base64 data
         let file_data = base64::decode(&req.data)
             .map_err(|e| format!("Failed to decode base64: {}", e))?;
-        
+
         // Store file in VFS
         let vfs_path = format!("/chat/files/{}/{}", req.chat_id.replace(":", "_"), req.filename);
         let file = create_file(&vfs_path, Some(5))
             .map_err(|e| format!("Failed to create VFS file: {}", e))?;
         file.write(&file_data)
             .map_err(|e| format!("Failed to write to VFS: {}", e))?;
-        
+
         // For images and small files, still use data URL for quick display
         // For larger files, we could serve them from VFS endpoint
         let file_url = if req.mime_type.starts_with("image/") && file_data.len() < 500_000 {
@@ -903,22 +910,30 @@ impl AppState {
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
 
-        // Send to counterparty
+        // Send to counterparty using generated RPC
         let counterparty = chat.counterparty.clone();
         let msg_to_send = message.clone();
-        let body = serde_json::json!({"ReceiveMessage": msg_to_send});
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
 
-        let target = (counterparty.as_str(), OUR_PROCESS_ID);
-        let request = Request::to(target)
-            .body(body_bytes)
-            .expects_response(5);
+        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
-        match send::<Result<(), String>>(request).await {
+        // Send using generated RPC method
+        // Convert our local type to the generated type via JSON serialization
+        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
+        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+        match receive_message_remote_rpc(&target, msg_for_rpc).await {
             Ok(_) => {
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
                         msg.status = MessageStatus::Sent;
+                    }
+                    
+                    // Send ChatUpdate with the updated message status
+                    for &channel_id in self.ws_connections.keys() {
+                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                            mime: Some("application/json".to_string()),
+                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        });
                     }
                 }
             }
@@ -927,16 +942,16 @@ impl AppState {
                     .entry(counterparty.clone())
                     .or_insert_with(Vec::new)
                     .push(msg_to_send);
+                
+                // Still broadcast NewMessage for failed sends
+                for &channel_id in self.ws_connections.keys() {
+                    let msg = WsServerMessage::NewMessage(message.clone());
+                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                        mime: Some("application/json".to_string()),
+                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
+                    });
+                }
             }
-        }
-
-        // Broadcast to WebSocket connections
-        for &channel_id in self.ws_connections.keys() {
-            let msg = WsServerMessage::NewMessage(message.clone());
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-            });
         }
 
         Ok(message)
@@ -1001,22 +1016,30 @@ impl AppState {
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
 
-        // Send to counterparty
+        // Send to counterparty using generated RPC
         let counterparty = chat.counterparty.clone();
         let msg_to_send = message.clone();
-        let body = serde_json::json!({"ReceiveMessage": msg_to_send});
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
 
-        let target = (counterparty.as_str(), OUR_PROCESS_ID);
-        let request = Request::to(target)
-            .body(body_bytes)
-            .expects_response(5);
+        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
-        match send::<Result<(), String>>(request).await {
+        // Send using generated RPC method
+        // Convert our local type to the generated type via JSON serialization
+        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
+        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+        match receive_message_remote_rpc(&target, msg_for_rpc).await {
             Ok(_) => {
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
                         msg.status = MessageStatus::Sent;
+                    }
+                    
+                    // Send ChatUpdate with the updated message status
+                    for &channel_id in self.ws_connections.keys() {
+                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                            mime: Some("application/json".to_string()),
+                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        });
                     }
                 }
             }
@@ -1025,16 +1048,16 @@ impl AppState {
                     .entry(counterparty.clone())
                     .or_insert_with(Vec::new)
                     .push(msg_to_send);
+                
+                // Still broadcast NewMessage for failed sends
+                for &channel_id in self.ws_connections.keys() {
+                    let msg = WsServerMessage::NewMessage(message.clone());
+                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                        mime: Some("application/json".to_string()),
+                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
+                    });
+                }
             }
-        }
-
-        // Broadcast to WebSocket connections
-        for &channel_id in self.ws_connections.keys() {
-            let msg = WsServerMessage::NewMessage(message.clone());
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-            });
         }
 
         Ok(message)
@@ -1132,46 +1155,49 @@ impl AppState {
             });
         }
 
-        // Send acknowledgment back to sender
+        // Send acknowledgment back to sender using generated RPC
         let sender = message.sender.clone();
         let msg_id = message.id.clone();
-        let ack_body = serde_json::json!({"MessageAck": msg_id});
-        let ack_bytes = serde_json::to_vec(&ack_body).unwrap_or_default();
 
-        let target = (sender.as_str(), OUR_PROCESS_ID);
-        let request = Request::to(target)
-            .body(ack_bytes)
-            .expects_response(2);
+        let target = Address::from((sender.as_str(), OUR_PROCESS_ID));
 
-        // Send acknowledgment asynchronously (don't wait for response)
-        let _ = send::<Result<(), String>>(request).await;
+        // Send acknowledgment using generated RPC method
+        let _ = receive_message_ack_remote_rpc(&target, msg_id).await;
 
         Ok(())
     }
 
+    // Remote handler for receiving message acknowledgments
     #[remote]
-    async fn message_ack(&mut self, message_id: String) -> Result<(), String> {
+    async fn receive_message_ack(&mut self, message_id: String) -> Result<(), String> {
         println!("Received ACK for message {}", message_id);
-        // Update message status to Delivered
+        // This ACK is from the remote node confirming they received our message
+        // We need to find OUR sent message and update its status to Delivered
+
+        // Look through all chats to find the message we sent
         for chat in self.chats.values_mut() {
-            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                println!("Updating message {} status to Delivered", message_id);
+            // Only look for messages where WE are the sender
+            if let Some(message) = chat.messages.iter_mut()
+                .find(|m| m.id == message_id && m.sender == our().node) {
+
+                println!("Updating sent message {} status to Delivered", message_id);
                 message.status = MessageStatus::Delivered;
 
-                // Notify WebSocket connections
+                // Send ChatUpdate with the delivered status
                 for &channel_id in self.ws_connections.keys() {
-                    println!("Sending MessageAck to channel {}", channel_id);
-                    let msg = WsServerMessage::MessageAck { message_id: message_id.clone() };
+                    println!("Sending ChatUpdate for delivered message to channel {}", channel_id);
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                     send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
                         mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
+                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
                     });
                 }
                 return Ok(());
             }
         }
-        println!("Message {} not found for ACK", message_id);
-        Err("Message not found".to_string())
+        println!("Sent message {} not found for ACK", message_id);
+        // Not an error - might be an ACK for a message we don't have anymore
+        Ok(())
     }
 
     // PUBLIC BROWSER CHAT ENDPOINTS
@@ -1239,21 +1265,25 @@ impl AppState {
                 if let Ok(payload) = String::from_utf8(blob.bytes.clone()) {
                     match serde_json::from_str::<WsClientMessage>(&payload) {
                         Ok(msg) => {
+                            println!("WebSocket: Received message from channel {}: {:?}", channel_id, msg);
                             // Initialize connection if not already present
                             if !self.ws_connections.contains_key(&channel_id) && !self.browser_connections.values().any(|&ch| ch == channel_id) {
-                                println!("WebSocket: New connection from channel {}", channel_id);
+                                println!("WebSocket: New connection from channel {}, initializing...", channel_id);
                                 self.ws_connections.insert(channel_id, our().node.clone());
-                                
+
                                 // Send all existing chats to the new connection
+                                println!("WebSocket: Sending {} chats to new connection", self.chats.len());
                                 for chat in self.chats.values() {
+                                    println!("WebSocket: Sending chat {} with {} messages", chat.id, chat.messages.len());
                                     let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                                     send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
                                         mime: Some("application/json".to_string()),
                                         bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
                                     });
                                 }
+                                println!("WebSocket: Initial chat sync complete for channel {}", channel_id);
                             }
-                            
+
                             // Check if this is a browser chat authentication
                             if let WsClientMessage::AuthWithKey { .. } = &msg {
                                 self.handle_browser_message(channel_id, msg);
@@ -1299,7 +1329,7 @@ impl AppState {
             format!("{}:{}", node2, node1)
         }
     }
-    
+
     async fn process_delivery_queue(&mut self) {
         // Process queued messages for each node
         let queue_snapshot = self.delivery_queue.clone();
@@ -1307,18 +1337,15 @@ impl AppState {
         for (node, messages) in queue_snapshot {
             // Check if node is now online
             if self.online_nodes.contains(&node) {
-                // Try to deliver all queued messages
+                // Try to deliver all queued messages using generated RPC
                 for msg in messages {
-                    let body = serde_json::json!({"ReceiveMessage": msg});
-                    let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+                    let target = Address::from((node.as_str(), OUR_PROCESS_ID));
 
-                    let target = (node.as_str(), OUR_PROCESS_ID);
-                    let request = Request::to(target)
-                        .body(body_bytes)
-                        .expects_response(5);
-
-                    // Try to send
-                    if let Ok(_) = send::<Result<(), String>>(request).await {
+                    // Try to send using generated RPC method
+                    // Convert via JSON to handle camelCase serialization
+                    let msg_json = serde_json::to_value(&msg).unwrap();
+                    let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+                    if let Ok(_) = receive_message_remote_rpc(&target, msg_for_rpc).await {
                         // Remove from queue if successful
                         if let Some(queue) = self.delivery_queue.get_mut(&node) {
                             queue.retain(|m| m.id != msg.id);
@@ -1556,32 +1583,32 @@ mod base64 {
     pub fn decode(input: &str) -> Result<Vec<u8>, String> {
         // Remove any whitespace
         let input = input.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-        
+
         // Base64 character set
         const BASE64_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        
+
         let mut output = Vec::new();
         let mut buffer = 0u32;
         let mut bits_collected = 0;
-        
+
         for c in input.chars() {
             if c == '=' {
                 break; // Padding character, we're done
             }
-            
+
             let value = BASE64_CHARS.find(c)
                 .ok_or_else(|| format!("Invalid base64 character: {}", c))? as u32;
-            
+
             buffer = (buffer << 6) | value;
             bits_collected += 6;
-            
+
             while bits_collected >= 8 {
                 bits_collected -= 8;
                 output.push((buffer >> bits_collected) as u8);
                 buffer &= (1 << bits_collected) - 1;
             }
         }
-        
+
         Ok(output)
     }
 }

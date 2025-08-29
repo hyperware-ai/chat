@@ -15,7 +15,7 @@ const GeneralSettings: React.FC = () => {
   const handleSTTKeyChange = (value: string) => {
     updateSettings({
       ...settings,
-      sttApiKey: value || null,
+      stt_api_key: value || null,
     });
   };
 
@@ -25,8 +25,8 @@ const GeneralSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.showImages}
-            onChange={() => handleToggle('showImages')}
+            checked={settings.show_images}
+            onChange={() => handleToggle('show_images')}
           />
           <span>Show images in chats</span>
         </label>
@@ -36,8 +36,8 @@ const GeneralSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.showProfilePics}
-            onChange={() => handleToggle('showProfilePics')}
+            checked={settings.show_profile_pics}
+            onChange={() => handleToggle('show_profile_pics')}
           />
           <span>Show profile pictures</span>
         </label>
@@ -47,8 +47,8 @@ const GeneralSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.combineChatsGroups}
-            onChange={() => handleToggle('combineChatsGroups')}
+            checked={settings.combine_chats_groups}
+            onChange={() => handleToggle('combine_chats_groups')}
           />
           <span>Combine Chats & Groups tabs</span>
         </label>
@@ -58,8 +58,8 @@ const GeneralSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.allowBrowserChats}
-            onChange={() => handleToggle('allowBrowserChats')}
+            checked={settings.allow_browser_chats}
+            onChange={() => handleToggle('allow_browser_chats')}
           />
           <span>Allow browser chats</span>
         </label>
@@ -69,19 +69,19 @@ const GeneralSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.sttEnabled}
-            onChange={() => handleToggle('sttEnabled')}
+            checked={settings.stt_enabled}
+            onChange={() => handleToggle('stt_enabled')}
           />
           <span>Enable Speech-to-Text for voice notes</span>
         </label>
       </div>
       
-      {settings.sttEnabled && (
+      {settings.stt_enabled && (
         <div className="setting-item">
           <label>STT API Key:</label>
           <input
             type="text"
-            value={settings.sttApiKey || ''}
+            value={settings.stt_api_key || ''}
             onChange={(e) => handleSTTKeyChange(e.target.value)}
             placeholder="Enter your STT API key"
           />

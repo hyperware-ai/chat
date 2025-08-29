@@ -16,7 +16,7 @@ export interface WsClientMessage {
   UpdateStatus?: { status: string };
   AuthWithKey?: { chat_key: string };
   BrowserMessage?: { content: string };
-  Heartbeat?: {};
+  Heartbeat?: null;
 }
 
 import type { ChatMessage, Chat, UserProfile } from '../../../target/ui/caller-utils';
@@ -29,6 +29,6 @@ export interface WsServerMessage {
   ProfileUpdate?: { node: string; profile: UserProfile };
   AuthSuccess?: { chat_id: string; history: ChatMessage[] };
   AuthFailed?: { reason: string };
-  Heartbeat?: {};
+  Heartbeat?: null;
   Error?: { message: string };
 }
