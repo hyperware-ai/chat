@@ -1,0 +1,50 @@
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 15px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-color);
+  height: var(--header-height);
+}
+
+.back-button {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: var(--primary-color);
+  padding: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.chat-header-info {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.chat-header-name {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.voice-call-button {
+  background: none;
+  border: none;
+  font-size: 24px;
+  padding: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}

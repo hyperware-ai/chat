@@ -1,0 +1,281 @@
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0;
+  text-align: center;
+  width: 100%;
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 768px) {
+  #root {
+    padding: 1rem;
+    width: 90%;
+  }
+}
+
+@media (min-width: 1024px) {
+  #root {
+    width: 75%;
+  }
+}
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+.card {
+  padding: 1em;
+}
+
+.read-the-docs {
+  color: #888;
+}
+
+.message-list {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0.5em;
+  text-align: left;
+}
+
+.message-list li {
+  margin-bottom: 1em;
+  padding: 1em;
+  border-radius: 0.5em;
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  overflow-wrap: break-word;
+  width: 90%;
+}
+
+.signed-message {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+}
+
+.message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+}
+
+.message-text {
+  font-weight: 500;
+}
+
+.message-signature {
+  font-family: monospace;
+  font-size: 0.85em;
+  color: #666;
+  background-color: #efefef;
+  padding: 0.5em;
+  border-radius: 0.3em;
+  border: 1px solid #ddd;
+  overflow-x: auto;
+}
+
+.verification {
+  display: flex;
+  align-items: center;
+  gap: 1em;
+  margin-top: 0.5em;
+}
+
+.verify-button {
+  background-color: #4b9ad8;
+  border: none;
+  color: white;
+  padding: 0.5em 1em;
+  border-radius: 0.3em;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.verify-button:hover {
+  background-color: #357abd;
+}
+
+.verification-result {
+  font-size: 1.2em;
+  font-weight: bold;
+  padding: 0.2em 0.5em;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.verification-result.verified {
+  color: white;
+  background-color: #4caf50;
+}
+
+.verification-result.failed {
+  color: white;
+  background-color: #f44336;
+}
+
+.node-not-connected {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(255, 255, 255, 0.9);
+  z-index: 1000;
+}
+
+.input-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+}
+
+.input-row > button {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  padding: 0.5em 1.2em;
+  background-color: #4b9ad8;
+  color: white;
+  font-weight: 600;
+}
+
+.input-row > button:hover {
+  background-color: #357abd;
+}
+
+.input-row > input {
+  border: 1px solid #ccc;
+  padding: 0.5em 0.8em;
+  font-size: 1em;
+  border-radius: 0.25em;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  width: 100%;
+}
+
+/* Voice App Styles */
+.splash-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 1rem;
+  max-width: 600px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 100vh;
+  justify-content: center;
+}
+
+@media (min-width: 768px) {
+  .splash-container {
+    gap: 2rem;
+    padding: 1rem;
+  }
+}
+
+.action-section {
+  width: 100%;
+  padding: 1.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-bg);
+  box-sizing: border-box;
+  color: var(--text-color);
+}
+
+@media (min-width: 768px) {
+  .action-section {
+    padding: 2rem;
+  }
+}
+
+.action-section h2 {
+  margin-top: 0;
+}
+
+.role-select {
+  width: 100%;
+  padding: 0.5rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  font-size: 1rem;
+  background: var(--input-bg);
+  color: var(--text-color);
+}
+
+.primary-button {
+  width: 100%;
+  padding: 0.75rem;
+  background-color: var(--button-primary);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  min-height: 44px; /* iOS touch target minimum */
+}
+
+.primary-button:hover {
+  background-color: var(--button-primary-hover);
+}
+
+.primary-button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+.join-input {
+  width: 100%;
+  padding: 0.5rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  font-size: 1rem;
+  background: var(--input-bg);
+  color: var(--text-color);
+}
+
+/* Import shared call screen styles - these styles have been moved to shared/styles/call-screen.css */
+/* Keeping App-specific styles below */

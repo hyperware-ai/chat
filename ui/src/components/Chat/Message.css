@@ -1,0 +1,123 @@
+.message {
+  max-width: 75%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.message.own {
+  align-self: flex-end;
+}
+
+.message.other {
+  align-self: flex-start;
+}
+
+.reply-to {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border-left: 3px solid var(--primary-color);
+}
+
+.message.own .reply-to {
+  background: rgba(255, 255, 255, 0.15);
+  border-left-color: rgba(255, 255, 255, 0.5);
+}
+
+.reply-to-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+  font-weight: 500;
+}
+
+.message.own .reply-to-label {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.reply-to-content {
+  font-size: 13px;
+  color: var(--text-primary);
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.message.own .reply-to-content {
+  color: white;
+  opacity: 0.9;
+}
+
+.message-content {
+  padding: 10px 14px;
+  border-radius: 18px;
+  font-size: 16px;
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+
+.message.own .message-content {
+  background: var(--message-own);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.message.other .message-content {
+  background: var(--message-other);
+  color: var(--text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+.message-footer {
+  display: flex;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.message.own .message-footer {
+  justify-content: flex-end;
+}
+
+.message-time {
+  opacity: 0.7;
+}
+
+.message-status {
+  opacity: 0.7;
+}
+
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 0 8px;
+}
+
+.reaction {
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.reaction:hover {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+.reaction.reacted {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}

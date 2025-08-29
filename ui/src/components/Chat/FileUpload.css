@@ -1,0 +1,42 @@
+.file-upload-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: flex-end;
+  z-index: 1000;
+}
+
+.file-upload-menu {
+  background: var(--background);
+  width: 100%;
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.upload-option {
+  padding: 15px;
+  background: var(--surface);
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.upload-option:active {
+  background: var(--border-color);
+}
+
+.upload-option label {
+  display: block;
+  width: 100%;
+  cursor: pointer;
+}

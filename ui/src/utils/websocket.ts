@@ -1,0 +1,113 @@
+import { WsClientMessage, WsServerMessage } from '../types/chat';
+
+export class ChatWebSocket {
+  private ws: WebSocket | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private onMessageCallback: ((msg: WsServerMessage) => void) | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+
+  connect(onMessage: (msg: WsServerMessage) => void) {
+    this.onMessageCallback = onMessage;
+
+    // Determine WebSocket URL with BASE_URL
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const BASE_URL = import.meta.env.BASE_URL || '';
+    const wsUrl = `${protocol}//${host}${BASE_URL}/ws`;
+
+    try {
+      this.ws = new WebSocket(wsUrl);
+
+      this.ws.onopen = () => {
+        console.log('WebSocket connected');
+        this.reconnectAttempts = 0;
+        this.startHeartbeat();
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (this.onMessageCallback) {
+            this.onMessageCallback(message);
+          }
+        } catch (error) {
+          console.error('Failed to parse WebSocket message:', error);
+        }
+      };
+
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      this.ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        this.stopHeartbeat();
+        this.handleReconnect();
+      };
+    } catch (error) {
+      console.error('Failed to connect WebSocket:', error);
+      this.handleReconnect();
+    }
+  }
+
+  send(message: WsClientMessage) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    } else {
+      console.warn('WebSocket not connected, queuing message');
+      // Could implement message queuing here
+    }
+  }
+
+  disconnect() {
+    this.stopHeartbeat();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+
+  private handleReconnect() {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('Max reconnection attempts reached');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+
+    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+    this.reconnectTimer = setTimeout(() => {
+      if (this.onMessageCallback) {
+        this.connect(this.onMessageCallback);
+      }
+    }, delay);
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      this.send({ Heartbeat: {} });
+    }, 30000); // Send heartbeat every 30 seconds
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  get isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+}
