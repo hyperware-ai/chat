@@ -162,7 +162,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       });
       const message = await api.sendMessage(requestBody);
       
-      // Update local state
+      // Update local state with the message from API (which has the correct status)
       set(state => ({
         chats: state.chats.map(chat => 
           chat.id === chatId 
@@ -174,13 +174,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           : state.activeChat,
       }));
       
-      // Send via WebSocket if connected
-      const ws = get().wsConnection;
-      if (ws) {
-        ws.send({
-          SendMessage: { chat_id: chatId, content, reply_to: replyTo }
-        });
-      }
+      // Don't send via WebSocket - the HTTP endpoint already handles P2P messaging
     } catch (error) {
       set({ error: 'Failed to send message' });
     }
@@ -335,22 +329,50 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       });
     } else if (message.NewMessage) {
       const newMsg = message.NewMessage;
-      set(state => ({
-        chats: state.chats.map(chat => {
-          // Find the chat this message belongs to
-          const isRelevantChat = chat.counterparty === newMsg.sender || 
-                                chat.id.includes(newMsg.sender);
-          if (isRelevantChat) {
-            return {
-              ...chat,
-              messages: [...chat.messages, newMsg],
-              lastActivity: newMsg.timestamp,
-              unreadCount: chat.id !== state.activeChat?.id ? chat.unreadCount + 1 : chat.unreadCount
-            };
+      const our = (window as any).our;
+      
+      // Only add the message if we didn't send it (prevents duplicates)
+      if (newMsg.sender !== our?.node) {
+        set(state => {
+          const updatedChats = state.chats.map(chat => {
+            // Find the chat this message belongs to
+            const isRelevantChat = chat.counterparty === newMsg.sender || 
+                                  chat.id.includes(newMsg.sender);
+            if (isRelevantChat) {
+              // Check if message already exists to prevent duplicates
+              const messageExists = chat.messages.some(m => m.id === newMsg.id);
+              if (!messageExists) {
+                return {
+                  ...chat,
+                  messages: [...chat.messages, newMsg],
+                  lastActivity: newMsg.timestamp,
+                  unreadCount: chat.id !== state.activeChat?.id ? chat.unreadCount + 1 : chat.unreadCount
+                };
+              }
+            }
+            return chat;
+          });
+          
+          // Also update activeChat if it's the same chat
+          let updatedActiveChat = state.activeChat;
+          if (state.activeChat && (state.activeChat.counterparty === newMsg.sender || 
+                                   state.activeChat.id.includes(newMsg.sender))) {
+            const messageExists = state.activeChat.messages.some(m => m.id === newMsg.id);
+            if (!messageExists) {
+              updatedActiveChat = {
+                ...state.activeChat,
+                messages: [...state.activeChat.messages, newMsg],
+                lastActivity: newMsg.timestamp
+              };
+            }
           }
-          return chat;
-        })
-      }));
+          
+          return {
+            chats: updatedChats,
+            activeChat: updatedActiveChat
+          };
+        });
+      }
     } else if (message.MessageAck) {
       const { message_id } = message.MessageAck;
       set(state => ({
@@ -359,7 +381,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messages: chat.messages.map(msg => 
             msg.id === message_id ? { ...msg, status: 'Delivered' as const } : msg
           )
-        }))
+        })),
+        activeChat: state.activeChat ? {
+          ...state.activeChat,
+          messages: state.activeChat.messages.map(msg =>
+            msg.id === message_id ? { ...msg, status: 'Delivered' as const } : msg
+          )
+        } : null
       }));
     } else if (message.StatusUpdate) {
       // Handle status updates

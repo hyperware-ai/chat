@@ -45,7 +45,7 @@ const MessageList: React.FC<MessageListProps> = ({ messages }) => {
             )}
             <Message 
               message={message} 
-              isOwn={message.sender !== 'browser' && !message.sender.includes('Guest')}
+              isOwn={message.sender === (window as any).our?.node}
             />
           </React.Fragment>
         );

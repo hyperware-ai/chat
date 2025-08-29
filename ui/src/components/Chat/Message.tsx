@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { ChatMessage } from '../../types/chat';
 import MessageMenu from './MessageMenu';
 import './Message.css';
@@ -13,7 +13,7 @@ interface MessageProps {
 const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
-  const { activeChat, loadChats } = useChatStore();
+  const { activeChat, loadChats, settings } = useChatStore();
 
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp * 1000);
@@ -82,14 +82,91 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
     return grouped;
   };
 
+  // Parse message content for links and images
+  const renderMessageContent = useMemo(() => {
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const imageRegex = /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i;
+    
+    const parts = message.content.split(urlRegex);
+    
+    return parts.map((part, index) => {
+      // Check if this part is a URL
+      if (part.match(urlRegex)) {
+        // Check if it's an image URL
+        if (imageRegex.test(part) && settings?.showImages) {
+          return (
+            <div key={index} style={{ margin: '8px 0' }}>
+              <a href={part} target="_blank" rel="noopener noreferrer">
+                <img 
+                  src={part} 
+                  alt="Image" 
+                  style={{ 
+                    maxWidth: '100%', 
+                    maxHeight: '300px',
+                    borderRadius: '8px',
+                    display: 'block'
+                  }}
+                  onError={(e) => {
+                    // If image fails to load, show as link instead
+                    const target = e.target as HTMLImageElement;
+                    target.style.display = 'none';
+                    const link = document.createElement('a');
+                    link.href = part;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = part;
+                    link.style.color = isOwn ? '#ffffff' : '#4da6ff';
+                    link.style.textDecoration = 'underline';
+                    target.parentNode?.replaceChild(link, target);
+                  }}
+                />
+              </a>
+            </div>
+          );
+        }
+        // Regular link
+        return (
+          <a 
+            key={index}
+            href={part} 
+            target="_blank" 
+            rel="noopener noreferrer"
+            style={{ 
+              color: isOwn ? '#ffffff' : '#4da6ff',  // Brighter blue for better visibility
+              textDecoration: 'underline'
+            }}
+          >
+            {part}
+          </a>
+        );
+      }
+      // Regular text
+      return <span key={index}>{part}</span>;
+    });
+  }, [message.content, settings?.showImages, isOwn]);
+
   return (
     <>
       <div 
+        id={`message-${message.id}`}
         className={`message ${isOwn ? 'own' : 'other'}`}
         onContextMenu={handleLongPress}
       >
         {message.replyTo && (
-          <div className="reply-to">
+          <div 
+            className="reply-to"
+            onClick={() => {
+              // Scroll to the original message
+              const element = document.getElementById(`message-${message.replyTo}`);
+              if (element) {
+                element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // Add a highlight animation
+                element.classList.add('highlight');
+                setTimeout(() => element.classList.remove('highlight'), 2000);
+              }
+            }}
+            style={{ cursor: 'pointer' }}
+          >
             <div className="reply-to-label">↩ Reply</div>
             <div className="reply-to-content">
               {activeChat?.messages.find(m => m.id === message.replyTo)?.content || 'Message not found'}
@@ -98,7 +175,32 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
         )}
         
         <div className="message-content">
-          {message.content}
+          {/* If this is a file/image message with file info, show it specially */}
+          {message.fileInfo && message.messageType === 'Image' && settings?.showImages ? (
+            <div>
+              <img 
+                src={message.fileInfo.url} 
+                alt={message.fileInfo.filename}
+                style={{ 
+                  maxWidth: '100%', 
+                  maxHeight: '300px',
+                  borderRadius: '8px',
+                  display: 'block',
+                  marginBottom: '8px'
+                }}
+              />
+              <div style={{ fontSize: '12px', opacity: 0.8 }}>{message.fileInfo.filename}</div>
+            </div>
+          ) : message.fileInfo && message.messageType === 'File' ? (
+            <div>
+              <div style={{ marginBottom: '8px' }}>📎 {message.fileInfo.filename}</div>
+              <div style={{ fontSize: '12px', opacity: 0.8 }}>
+                {(message.fileInfo.size / 1024).toFixed(1)} KB
+              </div>
+            </div>
+          ) : (
+            renderMessageContent
+          )}
         </div>
         
         <div className="message-footer">

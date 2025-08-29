@@ -8,6 +8,7 @@ use hyperware_process_lib::{
     println,
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
+    vfs::{create_file, open_file, FileType, VfsAction, VfsResponse, vfs_request},
     LazyLoadBlob,
     Request,
     hyperapp::{send, SaveOptions},
@@ -293,7 +294,8 @@ impl AppState {
         let req: CreateChatRequest = serde_json::from_str(&request_body)
             .map_err(|e| format!("Invalid request: {}", e))?;
 
-        let chat_id = format!("{}:{}", our().node, req.counterparty);
+        // Normalize chat ID to always be alphabetically sorted
+        let chat_id = Self::normalize_chat_id(&our().node, &req.counterparty);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -436,20 +438,11 @@ impl AppState {
         // Try to send and queue if it fails
         match send::<Result<(), String>>(request).await {
             Ok(_) => {
-                // Message sent successfully, update status
+                // Message sent successfully, update status to Sent
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
                         msg.status = MessageStatus::Sent;
                     }
-                }
-                
-                // Notify WebSocket connections about status update
-                for &channel_id in self.ws_connections.keys() {
-                    let msg = WsServerMessage::MessageAck { message_id: message.id.clone() };
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                    });
                 }
             }
             Err(_) => {
@@ -468,13 +461,11 @@ impl AppState {
             }
         }
 
-        // Broadcast the new message to all WebSocket connections
-        for &channel_id in self.ws_connections.keys() {
-            let msg = WsServerMessage::NewMessage(message.clone());
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-            });
+        // Return the message with updated status
+        if let Some(chat) = self.chats.get(&req.chat_id) {
+            if let Some(updated_msg) = chat.messages.iter().find(|m| m.id == message.id) {
+                return Ok(updated_msg.clone());
+            }
         }
 
         Ok(message)
@@ -855,13 +846,31 @@ impl AppState {
             MessageType::File
         };
 
-        // Use data URL for file storage
-        let file_url = format!("data:{};base64,{}", req.mime_type, req.data);
+        // Decode base64 data
+        let file_data = base64::decode(&req.data)
+            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+        
+        // Store file in VFS
+        let vfs_path = format!("/chat/files/{}/{}", req.chat_id.replace(":", "_"), req.filename);
+        let file = create_file(&vfs_path, Some(5))
+            .map_err(|e| format!("Failed to create VFS file: {}", e))?;
+        file.write(&file_data)
+            .map_err(|e| format!("Failed to write to VFS: {}", e))?;
+        
+        // For images and small files, still use data URL for quick display
+        // For larger files, we could serve them from VFS endpoint
+        let file_url = if req.mime_type.starts_with("image/") && file_data.len() < 500_000 {
+            // Use data URL for small images
+            format!("data:{};base64,{}", req.mime_type, req.data)
+        } else {
+            // Use VFS path for larger files (would need a serving endpoint)
+            format!("/vfs{}", vfs_path)
+        };
 
         let file_info = FileInfo {
             filename: req.filename.clone(),
             mime_type: req.mime_type,
-            size: req.data.len() as u64,
+            size: file_data.len() as u64,
             url: file_url,
         };
 
@@ -1037,8 +1046,8 @@ impl AppState {
     async fn receive_chat_creation(&mut self, counterparty: String) -> Result<(), String> {
         println!("receive_chat_creation: Got request from {}", counterparty);
 
-        // Create the corresponding chat on this node
-        let chat_id = format!("{}:{}", counterparty, our().node);
+        // Normalize chat ID to always be alphabetically sorted
+        let chat_id = Self::normalize_chat_id(&counterparty, &our().node);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1079,8 +1088,8 @@ impl AppState {
 
     #[remote]
     async fn receive_message(&mut self, message: ChatMessage) -> Result<(), String> {
-        // Find or create chat for this message
-        let chat_id = format!("{}:{}", message.sender, our().node);
+        // Find or create chat for this message - normalize the ID
+        let chat_id = Self::normalize_chat_id(&message.sender, &our().node);
         let is_new_chat = !self.chats.contains_key(&chat_id);
 
         let chat = self.chats.entry(chat_id.clone()).or_insert_with(|| {
@@ -1142,13 +1151,16 @@ impl AppState {
 
     #[remote]
     async fn message_ack(&mut self, message_id: String) -> Result<(), String> {
+        println!("Received ACK for message {}", message_id);
         // Update message status to Delivered
         for chat in self.chats.values_mut() {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                println!("Updating message {} status to Delivered", message_id);
                 message.status = MessageStatus::Delivered;
 
                 // Notify WebSocket connections
                 for &channel_id in self.ws_connections.keys() {
+                    println!("Sending MessageAck to channel {}", channel_id);
                     let msg = WsServerMessage::MessageAck { message_id: message_id.clone() };
                     send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
                         mime: Some("application/json".to_string()),
@@ -1158,6 +1170,7 @@ impl AppState {
                 return Ok(());
             }
         }
+        println!("Message {} not found for ACK", message_id);
         Err("Message not found".to_string())
     }
 
@@ -1277,6 +1290,16 @@ impl AppState {
 
 // Helper methods implementation
 impl AppState {
+    // Normalize chat ID to prevent duplicates
+    // Always returns the ID in alphabetical order: "nodeA:nodeB"
+    fn normalize_chat_id(node1: &str, node2: &str) -> String {
+        if node1 < node2 {
+            format!("{}:{}", node1, node2)
+        } else {
+            format!("{}:{}", node2, node1)
+        }
+    }
+    
     async fn process_delivery_queue(&mut self) {
         // Process queued messages for each node
         let queue_snapshot = self.delivery_queue.clone();
@@ -1525,5 +1548,40 @@ mod rand {
             .unwrap()
             .as_nanos() as u32;
         T::from(timestamp)
+    }
+}
+
+// Simple base64 decoder
+mod base64 {
+    pub fn decode(input: &str) -> Result<Vec<u8>, String> {
+        // Remove any whitespace
+        let input = input.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        
+        // Base64 character set
+        const BASE64_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        
+        let mut output = Vec::new();
+        let mut buffer = 0u32;
+        let mut bits_collected = 0;
+        
+        for c in input.chars() {
+            if c == '=' {
+                break; // Padding character, we're done
+            }
+            
+            let value = BASE64_CHARS.find(c)
+                .ok_or_else(|| format!("Invalid base64 character: {}", c))? as u32;
+            
+            buffer = (buffer << 6) | value;
+            bits_collected += 6;
+            
+            while bits_collected >= 8 {
+                bits_collected -= 8;
+                output.push((buffer >> bits_collected) as u8);
+                buffer &= (1 << bits_collected) - 1;
+            }
+        }
+        
+        Ok(output)
     }
 }
