@@ -519,59 +519,49 @@ impl AppState {
 
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
+        
+        // Immediately update status to Sent (backend has received the message)
+        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+            msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
+        }
+        
+        // Send ChatUpdate immediately to show Sent status
+        for &channel_id in self.ws_connections.keys() {
+            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                mime: Some("application/json".to_string()),
+                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+            });
+        }
 
         // Send to counterparty via P2P using generated RPC
         let counterparty = chat.counterparty.clone();
         let msg_to_send = message.clone();
+        let message_id_clone = message.id.clone();
+        let delivery_queue = self.delivery_queue.clone();
 
         let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
-        // Try to send using generated RPC method and queue if it fails
-        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
-        match receive_message_remote_rpc(&target, msg_for_rpc).await {
-            Ok(_) => {
-                println!("Message {} sent successfully to {}, updating status", message.id, counterparty);
-                // Message sent successfully, update status to Sent
-                if let Some(chat) = self.chats.get_mut(&req.chat_id) {
-                    println!("Found chat {}, looking for message {}", chat.id, message.id);
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        println!("Found message, updating status from {:?} to Sent", msg.status);
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-                    } else {
-                        println!("WARNING: Message {} not found in chat {}", message.id, chat.id);
-                    }
-
-                    // Send ChatUpdate with the updated message status
-                    for &channel_id in self.ws_connections.keys() {
-                        println!("Sending ChatUpdate after message sent successfully to channel {}", channel_id);
-                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        });
-                    }
-                } else {
-                    println!("WARNING: Chat {} not found when trying to update message status", req.chat_id);
+        // Spawn task to attempt delivery without blocking
+        spawn(async move {
+            // Try to send using generated RPC method and queue if it fails
+            let msg_json = serde_json::to_value(&msg_to_send).unwrap();
+            let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+            match receive_message_remote_rpc(&target, msg_for_rpc).await {
+                Ok(_) => {
+                    println!("Message {} sent successfully to {}", message_id_clone, counterparty);
+                    // Message delivered successfully, counterparty will send ACK
                 }
-            }
-            Err(_) => {
-                // Failed to send, add to delivery queue
-                {
-                    let mut queue = self.delivery_queue.lock().unwrap();
+                Err(_) => {
+                    println!("Failed to send message {} to {}, adding to delivery queue", message_id_clone, counterparty);
+                    // Failed to send immediately, add to delivery queue
+                    let mut queue = delivery_queue.lock().unwrap();
                     queue.entry(counterparty.clone())
                         .or_insert_with(Vec::new)
                         .push(msg_to_send);
                 }
-
-                // Update status to failed
-                if let Some(chat) = self.chats.get_mut(&req.chat_id) {
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Failed);
-                    }
-                }
             }
-        }
+        });
 
         // Return the message with updated status
         if let Some(chat) = self.chats.get(&req.chat_id) {
@@ -1595,7 +1585,7 @@ impl AppState {
                     sender,
                     content,
                     timestamp,
-                    status: MessageStatus::Sent,
+                    status: MessageStatus::Sending,
                     reply_to,
                     reactions: Vec::new(),
                     message_type: MessageType::Text,
@@ -1630,6 +1620,18 @@ impl AppState {
                                 .push(message.clone());
                         }
                     }
+                    
+                    // Update status to Sent now that BE has received and processed it
+                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
+                    }
+                    
+                    // Send ChatUpdate with the updated status
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                        mime: Some("application/json".to_string()),
+                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                    });
                 }
 
                 // Send acknowledgment

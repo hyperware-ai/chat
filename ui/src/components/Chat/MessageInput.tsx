@@ -6,9 +6,10 @@ import './MessageInput.css';
 
 interface MessageInputProps {
   chatId: string;
+  onSendMessage?: () => void;
 }
 
-const MessageInput: React.FC<MessageInputProps> = ({ chatId }) => {
+const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) => {
   const [message, setMessage] = useState('');
   const [showFileUpload, setShowFileUpload] = useState(false);
   const [showVoiceNote, setShowVoiceNote] = useState(false);
@@ -29,6 +30,7 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId }) => {
       setMessage('');
       setReplyingTo(null); // Clear reply after sending
       inputRef.current?.focus();
+      onSendMessage?.(); // Call callback when message is sent
     }
   };
 

@@ -480,9 +480,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ...chat,
           messages: chat.messages.map(msg => {
             if (msg.id === message_id) {
-              // Update to next status: Sending -> Sent -> Delivered
+              // MessageAck means BE has received the message, so status should be Sent
               const oldStatus = msg.status;
-              const newStatus: MessageStatus = msg.status === 'Sending' ? 'Sent' : 'Delivered';
+              const newStatus: MessageStatus = 'Sent';
               console.log(`[WS] Updating message ${message_id} status from ${oldStatus} to ${newStatus}`);
               return { ...msg, status: newStatus };
             }

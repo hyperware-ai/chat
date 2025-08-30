@@ -10,6 +10,7 @@ const ChatView: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [swipeX, setSwipeX] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
+  const [showOfflineTooltip, setShowOfflineTooltip] = useState(false);
   const startXRef = useRef(0);
   const startYRef = useRef(0);
   const chatViewRef = useRef<HTMLDivElement>(null);
@@ -17,12 +18,35 @@ const ChatView: React.FC = () => {
   useEffect(() => {
     if (activeChat) {
       markChatAsRead(activeChat.id);
+      
+      // Check if this is a new chat with no messages or only "Sent" messages
+      // This indicates the node might be offline
+      const hasOnlySentMessages = activeChat.messages.length > 0 && 
+        activeChat.messages.every(msg => 
+          msg.sender !== activeChat.counterparty && 
+          (msg.status === 'Sent' || msg.status === 'Sending')
+        );
+      
+      const isNewChat = activeChat.messages.length === 0 || 
+        (activeChat.messages.length === 1 && activeChat.messages[0].sender === 'System');
+      
+      if (isNewChat || hasOnlySentMessages) {
+        setShowOfflineTooltip(true);
+        // Auto-hide after 5 seconds
+        const timer = setTimeout(() => setShowOfflineTooltip(false), 5000);
+        return () => clearTimeout(timer);
+      }
     }
   }, [activeChat, markChatAsRead]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeChat?.messages]);
+  
+  // Hide tooltip when user sends a message or taps
+  const handleUserInteraction = () => {
+    setShowOfflineTooltip(false);
+  };
 
   // Swipe handlers for navigation
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -78,6 +102,7 @@ const ChatView: React.FC = () => {
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
+      onClick={handleUserInteraction}
       style={{
         transform: `translateX(${swipeX}px)`,
         transition: isSwiping ? 'none' : 'transform 0.3s ease-out',
@@ -86,12 +111,21 @@ const ChatView: React.FC = () => {
     >
       <ChatHeader chat={activeChat} />
       
+      {showOfflineTooltip && (
+        <div className="offline-tooltip" onClick={handleUserInteraction}>
+          <div className="offline-tooltip-content">
+            {activeChat.counterparty} is either offline or doesn't have chat installed. 
+            Sent messages will be delivered as soon as they're online.
+          </div>
+        </div>
+      )}
+      
       <div className="messages-container">
         <MessageList messages={activeChat.messages} />
         <div ref={messagesEndRef} />
       </div>
       
-      <MessageInput chatId={activeChat.id} />
+      <MessageInput chatId={activeChat.id} onSendMessage={handleUserInteraction} />
     </div>
   );
 };
