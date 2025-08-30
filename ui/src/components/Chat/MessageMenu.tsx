@@ -70,20 +70,46 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
     }
   };
 
+  // Calculate position to keep menu on screen
+  const menuStyle = React.useMemo(() => {
+    const menuHeight = isOwn ? 240 : 180; // Approximate menu height
+    const menuWidth = 150; // Approximate menu width
+    const padding = 10;
+    
+    let top = position.y;
+    let left = position.x;
+    
+    // Check if menu would go off bottom of screen
+    if (top + menuHeight > window.innerHeight - padding) {
+      top = window.innerHeight - menuHeight - padding;
+    }
+    
+    // Check if menu would go off right side of screen
+    if (left + menuWidth > window.innerWidth - padding) {
+      left = window.innerWidth - menuWidth - padding;
+    }
+    
+    // Ensure menu doesn't go off top or left
+    top = Math.max(padding, top);
+    left = Math.max(padding, left);
+    
+    return { top, left };
+  }, [position, isOwn]);
+
   return (
     <>
       <div className="menu-overlay" onClick={onClose} />
       <div 
         className="message-menu"
-        style={{
-          top: position.y,
-          left: position.x,
-        }}
+        style={menuStyle}
       >
         <button onClick={handleReply}>Reply</button>
         <button onClick={() => setShowForwardPicker(!showForwardPicker)}>Forward</button>
         <button onClick={handleCopy}>Copy</button>
-        <button onClick={() => setShowEmojiPicker(!showEmojiPicker)}>React</button>
+        <button onClick={() => {
+          setShowEmojiPicker(!showEmojiPicker);
+          setShowForwardPicker(false);
+        }}>React</button>
         {isOwn && <button onClick={handleEdit}>Edit</button>}
         {isOwn && <button onClick={handleDelete}>Delete</button>}
         

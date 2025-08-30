@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ChatMessage } from '../../types/chat';
 import MessageMenu from './MessageMenu';
 import './Message.css';
@@ -13,7 +13,12 @@ interface MessageProps {
 const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
-  const { activeChat, loadChats, settings } = useChatStore();
+  const [swipeX, setSwipeX] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const { activeChat, loadChats, settings, setReplyingTo } = useChatStore();
+  const messageRef = useRef<HTMLDivElement>(null);
+  const startXRef = useRef(0);
+  const startYRef = useRef(0);
 
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp * 1000);
@@ -43,6 +48,49 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
     const rect = (e.target as HTMLElement).getBoundingClientRect();
     setMenuPosition({ x: rect.left, y: rect.top });
     setShowMenu(true);
+  };
+
+  // Swipe handlers for swipe-to-reply
+  const handleTouchStart = (e: React.TouchEvent) => {
+    startXRef.current = e.touches[0].clientX;
+    startYRef.current = e.touches[0].clientY;
+    setIsSwiping(false);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    const currentX = e.touches[0].clientX;
+    const currentY = e.touches[0].clientY;
+    const deltaX = currentX - startXRef.current;
+    const deltaY = Math.abs(currentY - startYRef.current);
+    
+    // Only trigger swipe if horizontal movement is greater than vertical
+    if (Math.abs(deltaX) > 10 && deltaY < 50) {
+      setIsSwiping(true);
+      // Limit swipe distance
+      const limitedDeltaX = Math.min(Math.max(deltaX, -80), 80);
+      setSwipeX(limitedDeltaX);
+      
+      // Add haptic feedback when reaching threshold
+      if (Math.abs(limitedDeltaX) >= 60 && 'vibrate' in navigator) {
+        navigator.vibrate(10);
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (Math.abs(swipeX) >= 60) {
+      // Trigger reply action
+      setReplyingTo(message);
+      // Add visual feedback
+      if (messageRef.current) {
+        messageRef.current.classList.add('reply-triggered');
+        setTimeout(() => {
+          messageRef.current?.classList.remove('reply-triggered');
+        }, 300);
+      }
+    }
+    setSwipeX(0);
+    setIsSwiping(false);
   };
 
   const handleReaction = async (emoji: string) => {
@@ -148,9 +196,17 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   return (
     <>
       <div 
+        ref={messageRef}
         id={`message-${message.id}`}
-        className={`message ${isOwn ? 'own' : 'other'}`}
+        className={`message ${isOwn ? 'own' : 'other'} ${isSwiping ? 'swiping' : ''}`}
         onContextMenu={handleLongPress}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        style={{
+          transform: `translateX(${swipeX}px)`,
+          transition: isSwiping ? 'none' : 'transform 0.2s ease-out'
+        }}
       >
         {message.reply_to && (
           <div 

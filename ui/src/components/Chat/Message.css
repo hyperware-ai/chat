@@ -144,3 +144,25 @@
     background-color: transparent;
   }
 }
+
+/* Swipe to reply styles */
+.message.swiping {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.message.reply-triggered {
+  animation: reply-feedback 0.3s ease-out;
+}
+
+@keyframes reply-feedback {
+  0% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(10px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
