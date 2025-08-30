@@ -9,7 +9,6 @@ base64 = "0.21"
 
 [dependencies.caller-utils]
 path = "../target/caller-utils"
-optional = true
 
 [dependencies.hyperprocess_macro]
 git = "https://github.com/hyperware-ai/hyperprocess-macro"

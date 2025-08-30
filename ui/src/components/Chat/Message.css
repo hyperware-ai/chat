@@ -2,7 +2,9 @@
   max-width: 75%;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
+  position: relative;
+  margin-bottom: 8px;
 }
 
 .message.own {
@@ -53,11 +55,13 @@
 }
 
 .message-content {
-  padding: 10px 14px;
+  padding: 8px 60px 18px 12px; /* Extra right padding for time, bottom for footer overlay */
   border-radius: 18px;
   font-size: 16px;
   line-height: 1.4;
   word-wrap: break-word;
+  position: relative;
+  min-width: 100px; /* Ensure minimum width for short messages to prevent emoji-time overlap */
 }
 
 .message.own .message-content {
@@ -67,6 +71,7 @@
 }
 
 .message.other .message-content {
+  padding: 8px 50px 18px 12px; /* Less right padding for other's messages (no status icon) */
   background: var(--message-other, #e5e5ea);
   color: var(--text-primary);
   border-bottom-left-radius: 4px;
@@ -81,41 +86,56 @@
 }
 
 .message-footer {
+  position: absolute;
+  bottom: 2px;
+  right: 10px;
   display: flex;
-  gap: 6px;
-  padding: 0 8px;
-  font-size: 11px;
-  color: var(--text-secondary);
+  gap: 4px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.7);
+  z-index: 1;
+  white-space: nowrap; /* Keep time on single line */
 }
 
-.message.own .message-footer {
-  justify-content: flex-end;
+.message.other .message-footer {
+  color: var(--text-secondary);
+  opacity: 0.7;
 }
 
 .message-time {
-  opacity: 0.7;
+  opacity: 0.8;
 }
 
 .message-status {
-  opacity: 0.7;
+  opacity: 0.8;
 }
 
 .message-reactions {
+  position: absolute;
+  bottom: -8px;
+  left: 8px;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-  padding: 0 8px;
+  gap: 2px;
+  z-index: 2;
 }
 
 .reaction {
-  padding: 2px 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  background: var(--surface);
-  font-size: 12px;
+  padding: 1px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.95);
+  font-size: 11px;
   cursor: pointer;
   transition: all 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+@media (prefers-color-scheme: dark) {
+  .reaction {
+    background: rgba(50, 50, 50, 0.95);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
 }
 
 .reaction:hover {

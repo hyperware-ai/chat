@@ -23,6 +23,7 @@ use caller_utils::app::{
     receive_chat_creation_remote_rpc,
     receive_message_remote_rpc,
     receive_message_ack_remote_rpc,
+    receive_reaction_remote_rpc,
 };
 
 // Define types locally with proper camelCase serialization
@@ -646,7 +647,7 @@ impl AppState {
             .as_secs();
 
         let reaction = MessageReaction {
-            emoji: req.emoji,
+            emoji: req.emoji.clone(),
             user: our().node.clone(),
             timestamp,
         };
@@ -657,6 +658,28 @@ impl AppState {
                 // Check if user already reacted with this emoji
                 if !message.reactions.iter().any(|r| r.user == reaction.user && r.emoji == reaction.emoji) {
                     message.reactions.push(reaction.clone());
+
+                    // Send reaction to counterparty
+                    // If it's their message, they need to see our reaction
+                    // If it's our message, they still need to see we reacted to our own message
+                    let target_node = if message.sender != our().node {
+                        message.sender.clone()
+                    } else {
+                        // It's our message, send to the counterparty of the chat
+                        chat.counterparty.clone()
+                    };
+                    
+                    let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
+                    let msg_id = req.message_id.clone();
+                    let emoji = req.emoji.clone();
+                    let user = our().node.clone();
+                    
+                    spawn(async move {
+                        match receive_reaction_remote_rpc(&target, msg_id, emoji, user).await {
+                            Ok(_) => println!("Successfully sent reaction to counterparty"),
+                            Err(e) => println!("Failed to send reaction to counterparty: {:?}", e),
+                        }
+                    });
 
                     // Notify WebSocket connections
                     for &channel_id in self.ws_connections.keys() {
@@ -1285,6 +1308,46 @@ impl AppState {
         // Send acknowledgment using generated RPC method
         let _ = receive_message_ack_remote_rpc(&target, msg_id).await;
 
+        Ok(())
+    }
+
+    // Remote handler for receiving reactions
+    #[remote]
+    async fn receive_reaction(&mut self, message_id: String, emoji: String, user: String) -> Result<(), String> {
+        println!("Received reaction {} from {} for message {}", emoji, user, message_id);
+        
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+            
+        let reaction = MessageReaction {
+            emoji: emoji.clone(),
+            user: user.clone(),
+            timestamp,
+        };
+        
+        // Find the message and add the reaction
+        for chat in self.chats.values_mut() {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                // Check if user already reacted with this emoji
+                if !message.reactions.iter().any(|r| r.user == reaction.user && r.emoji == reaction.emoji) {
+                    message.reactions.push(reaction);
+                    
+                    // Send ChatUpdate to WebSocket connections
+                    for &channel_id in self.ws_connections.keys() {
+                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                            mime: Some("application/json".to_string()),
+                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        });
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        
+        // Not an error - might be a reaction for a message we don't have
         Ok(())
     }
 

@@ -16,7 +16,7 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showForwardPicker, setShowForwardPicker] = useState(false);
   
-  const commonEmojis = ['👍', '❤️', '😂', '😮', '😢', '😡', '👎', '🎉', '🔥', '💯'];
+  const commonEmojis = ['👍', '❤️', '😂', '😮', '😢', '😡', '👎', '⚡', '🔥', '💯'];
 
   const handleReply = () => {
     // Set the message as the one being replied to
@@ -99,49 +99,68 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   return (
     <>
       <div className="menu-overlay" onClick={onClose} />
-      <div 
-        className="message-menu"
-        style={menuStyle}
-      >
-        <button onClick={handleReply}>Reply</button>
-        <button onClick={() => setShowForwardPicker(!showForwardPicker)}>Forward</button>
-        <button onClick={handleCopy}>Copy</button>
-        <button onClick={() => {
-          setShowEmojiPicker(!showEmojiPicker);
-          setShowForwardPicker(false);
-        }}>React</button>
-        {isOwn && <button onClick={handleEdit}>Edit</button>}
-        {isOwn && <button onClick={handleDelete}>Delete</button>}
-        
-        {showEmojiPicker && (
-          <div className="emoji-picker">
-            {commonEmojis.map(emoji => (
-              <button 
-                key={emoji} 
-                className="emoji-option"
-                onClick={() => handleAddReaction(emoji)}
-              >
-                {emoji}
-              </button>
-            ))}
-          </div>
-        )}
-        
-        {showForwardPicker && (
-          <div className="forward-picker">
-            <div className="forward-header">Forward to:</div>
-            {chats.map(chat => (
-              <button 
-                key={chat.id}
-                className="forward-option"
-                onClick={() => handleForward(chat.id)}
-              >
-                {chat.counterparty}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      
+      {/* Emoji tray - shown when React is clicked, replaces menu */}
+      {showEmojiPicker ? (
+        <div 
+          className="emoji-tray"
+          style={{
+            position: 'fixed',
+            top: position.y,
+            left: position.x,
+            transform: 'translateY(-50%)'
+          }}
+        >
+          {commonEmojis.map(emoji => (
+            <button 
+              key={emoji} 
+              className="emoji-tray-option"
+              onClick={() => handleAddReaction(emoji)}
+            >
+              {emoji}
+            </button>
+          ))}
+          <button 
+            className="emoji-tray-more"
+            onClick={() => {
+              // TODO: Open full emoji picker
+              alert('Full emoji picker coming soon!');
+            }}
+          >
+            ➕
+          </button>
+        </div>
+      ) : (
+        <div 
+          className="message-menu"
+          style={menuStyle}
+        >
+          <button onClick={handleReply}>Reply</button>
+          <button onClick={() => setShowForwardPicker(!showForwardPicker)}>Forward</button>
+          <button onClick={handleCopy}>Copy</button>
+          <button onClick={() => {
+            setShowEmojiPicker(true);
+            setShowForwardPicker(false);
+          }}>React</button>
+          {isOwn && <button onClick={handleEdit}>Edit</button>}
+          {isOwn && <button onClick={handleDelete}>Delete</button>}
+          
+          {showForwardPicker && (
+            <div className="forward-picker">
+              <div className="forward-header">Forward to:</div>
+              {chats.map(chat => (
+                <button 
+                  key={chat.id}
+                  className="forward-option"
+                  onClick={() => handleForward(chat.id)}
+                >
+                  {chat.counterparty}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 };
