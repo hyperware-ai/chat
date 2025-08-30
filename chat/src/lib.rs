@@ -239,6 +239,38 @@ impl Default for UserProfile {
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
 
+// Helper function to enforce one-way status transitions
+fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> MessageStatus {
+    use MessageStatus::*;
+    
+    // Define valid transitions
+    match (current, &new) {
+        // From Sending, can go to Sent, Delivered, or Failed
+        (Sending, Sent) | (Sending, Delivered) | (Sending, Failed) => new,
+        
+        // From Sent, can only go to Delivered or Failed
+        (Sent, Delivered) | (Sent, Failed) => new,
+        
+        // From Delivered, cannot change (terminal state)
+        (Delivered, _) => {
+            println!("WARNING: Attempted invalid status transition from Delivered to {:?}", new);
+            current.clone()
+        }
+        
+        // From Failed, cannot change (terminal state)
+        (Failed, _) => {
+            println!("WARNING: Attempted invalid status transition from Failed to {:?}", new);
+            current.clone()
+        }
+        
+        // Any backwards transition is invalid
+        _ => {
+            println!("WARNING: Attempted invalid status transition from {:?} to {:?}", current, new);
+            current.clone()
+        }
+    }
+}
+
 // HYPERPROCESS IMPLEMENTATION
 
 #[hyperprocess(
@@ -337,6 +369,7 @@ impl AppState {
                                         queue.remove(&node);
                                     }
                                 }
+                                // Note: Status update will happen when the ACK is received
                             }
                             Err(e) => {
                                 // Don't attempt more messages to this node if we get Offline or Timeout
@@ -382,11 +415,17 @@ impl AppState {
 
         self.chats.insert(chat_id, chat.clone());
 
-        // Notify the counterparty about the chat creation using generated RPC
+        // Notify the counterparty about the chat creation asynchronously
         let target = Address::from((req.counterparty.as_str(), OUR_PROCESS_ID));
-
-        // Send notification asynchronously using generated RPC method
-        let _ = receive_chat_creation_remote_rpc(&target, our().node).await;
+        let our_node = our().node.clone();
+        
+        // Spawn task to notify counterparty without blocking
+        spawn(async move {
+            match receive_chat_creation_remote_rpc(&target, our_node).await {
+                Ok(_) => println!("Successfully notified counterparty about chat creation"),
+                Err(e) => println!("Failed to notify counterparty about chat creation: {:?}", e),
+            }
+        });
 
         Ok(chat)
     }
@@ -495,21 +534,28 @@ impl AppState {
         let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
         match receive_message_remote_rpc(&target, msg_for_rpc).await {
             Ok(_) => {
+                println!("Message {} sent successfully to {}, updating status", message.id, counterparty);
                 // Message sent successfully, update status to Sent
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
+                    println!("Found chat {}, looking for message {}", chat.id, message.id);
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = MessageStatus::Sent;
+                        println!("Found message, updating status from {:?} to Sent", msg.status);
+                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
+                    } else {
+                        println!("WARNING: Message {} not found in chat {}", message.id, chat.id);
                     }
                     
                     // Send ChatUpdate with the updated message status
                     for &channel_id in self.ws_connections.keys() {
-                        println!("Sending ChatUpdate after message sent successfully");
+                        println!("Sending ChatUpdate after message sent successfully to channel {}", channel_id);
                         let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                         send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
                             mime: Some("application/json".to_string()),
                             bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
                         });
                     }
+                } else {
+                    println!("WARNING: Chat {} not found when trying to update message status", req.chat_id);
                 }
             }
             Err(_) => {
@@ -524,7 +570,7 @@ impl AppState {
                 // Update status to failed
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = MessageStatus::Failed;
+                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Failed);
                     }
                 }
             }
@@ -702,7 +748,7 @@ impl AppState {
                 Ok(_) => {
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
                         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == forwarded_message.id) {
-                            msg.status = MessageStatus::Sent;
+                            msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
                         }
                         
                         // Send ChatUpdate with the updated message status
@@ -725,7 +771,7 @@ impl AppState {
 
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
                         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == forwarded_message.id) {
-                            msg.status = MessageStatus::Failed;
+                            msg.status = safe_update_message_status(&msg.status, MessageStatus::Failed);
                         }
                     }
                 }
@@ -995,7 +1041,7 @@ impl AppState {
             Ok(_) => {
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = MessageStatus::Sent;
+                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
                     }
                     
                     // Send ChatUpdate with the updated message status
@@ -1103,7 +1149,7 @@ impl AppState {
             Ok(_) => {
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = MessageStatus::Sent;
+                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
                     }
                     
                     // Send ChatUpdate with the updated message status
@@ -1204,7 +1250,7 @@ impl AppState {
 
         // Update message status to Delivered
         let mut updated_message = message.clone();
-        updated_message.status = MessageStatus::Delivered;
+        updated_message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
 
         // Add message to chat
         chat.messages.push(updated_message.clone());
@@ -1256,7 +1302,7 @@ impl AppState {
                 .find(|m| m.id == message_id && m.sender == our().node) {
 
                 println!("Updating sent message {} status to Delivered", message_id);
-                message.status = MessageStatus::Delivered;
+                message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
 
                 // Send ChatUpdate with the delivered status
                 for &channel_id in self.ws_connections.keys() {
@@ -1450,7 +1496,7 @@ impl AppState {
                         // Update message status in our chat
                         for chat in self.chats.values_mut() {
                             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg.id) {
-                                message.status = MessageStatus::Sent;
+                                message.status = safe_update_message_status(&message.status, MessageStatus::Sent);
                                 
                                 // Send ChatUpdate to WebSocket connections
                                 for &channel_id in self.ws_connections.keys() {
@@ -1540,7 +1586,7 @@ impl AppState {
                 // Update message status
                 for chat in self.chats.values_mut() {
                     if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                        message.status = MessageStatus::Delivered;
+                        message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
                         break;
                     }
                 }
