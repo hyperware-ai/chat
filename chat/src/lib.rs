@@ -13,7 +13,7 @@ use hyperware_process_lib::{
     Address,
     hyperapp::{SaveOptions, spawn, sleep},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -25,9 +25,6 @@ use caller_utils::app::{
     receive_message_ack_remote_rpc,
     receive_reaction_remote_rpc,
 };
-
-// Define types locally with proper camelCase serialization
-// These will generate the correct caller-utils
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ChatMessage {
@@ -201,7 +198,7 @@ pub struct AppState {
     pub chats: HashMap<String, Chat>,
     pub chat_keys: HashMap<String, ChatKey>,
     pub settings: Settings,
-    #[serde(skip, default = "default_delivery_queue")]
+    #[serde(with = "arc_mutex_serde")]
     pub delivery_queue: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     pub online_nodes: HashSet<String>,
     pub ws_connections: HashMap<u32, String>, // channel_id -> node/browser_id
@@ -243,27 +240,27 @@ const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
 // Helper function to enforce one-way status transitions
 fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> MessageStatus {
     use MessageStatus::*;
-    
+
     // Define valid transitions
     match (current, &new) {
         // From Sending, can go to Sent, Delivered, or Failed
         (Sending, Sent) | (Sending, Delivered) | (Sending, Failed) => new,
-        
+
         // From Sent, can only go to Delivered or Failed
         (Sent, Delivered) | (Sent, Failed) => new,
-        
+
         // From Delivered, cannot change (terminal state)
         (Delivered, _) => {
             println!("WARNING: Attempted invalid status transition from Delivered to {:?}", new);
             current.clone()
         }
-        
+
         // From Failed, cannot change (terminal state)
         (Failed, _) => {
             println!("WARNING: Attempted invalid status transition from Failed to {:?}", new);
             current.clone()
         }
-        
+
         // Any backwards transition is invalid
         _ => {
             println!("WARNING: Attempted invalid status transition from {:?} to {:?}", current, new);
@@ -284,7 +281,7 @@ fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> Me
         },
         Binding::Ws {
             path: "/ws",
-            config: WsBindingConfig::default(), // authenticated: false for browser support
+            config: WsBindingConfig::default(),
         },
         Binding::Http {
             path: "/public",
@@ -338,27 +335,27 @@ impl AppState {
 
         // Clone the delivery queue Arc for the spawn task
         let delivery_queue = self.delivery_queue.clone();
-        
+
         // Spawn a task to periodically process the delivery queue
         spawn(async move {
             loop {
                 // Wait 30 seconds between delivery attempts
                 let _ = sleep(30000).await;
-                
+
                 // Process the delivery queue
                 let queue_snapshot = {
                     let queue = delivery_queue.lock().unwrap();
                     queue.clone()
                 };
-                
+
                 for (node, messages) in queue_snapshot {
                     if let Some(msg) = messages.first() {
                         let target = Address::from((node.as_str(), OUR_PROCESS_ID));
-                        
+
                         // Try to send using generated RPC method
                         let msg_json = serde_json::to_value(&msg).unwrap();
                         let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
-                        
+
                         match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
                             Ok(_) => {
                                 println!("Successfully delivered queued message {} to {}", msg.id, node);
@@ -419,7 +416,7 @@ impl AppState {
         // Notify the counterparty about the chat creation asynchronously
         let target = Address::from((req.counterparty.as_str(), OUR_PROCESS_ID));
         let our_node = our().node.clone();
-        
+
         // Spawn task to notify counterparty without blocking
         spawn(async move {
             match receive_chat_creation_remote_rpc(&target, our_node).await {
@@ -530,7 +527,6 @@ impl AppState {
         let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
         // Try to send using generated RPC method and queue if it fails
-        // Convert via JSON to handle camelCase serialization
         let msg_json = serde_json::to_value(&msg_to_send).unwrap();
         let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
         match receive_message_remote_rpc(&target, msg_for_rpc).await {
@@ -545,7 +541,7 @@ impl AppState {
                     } else {
                         println!("WARNING: Message {} not found in chat {}", message.id, chat.id);
                     }
-                    
+
                     // Send ChatUpdate with the updated message status
                     for &channel_id in self.ws_connections.keys() {
                         println!("Sending ChatUpdate after message sent successfully to channel {}", channel_id);
@@ -668,12 +664,12 @@ impl AppState {
                         // It's our message, send to the counterparty of the chat
                         chat.counterparty.clone()
                     };
-                    
+
                     let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
                     let msg_id = req.message_id.clone();
                     let emoji = req.emoji.clone();
                     let user = our().node.clone();
-                    
+
                     spawn(async move {
                         match receive_reaction_remote_rpc(&target, msg_id, emoji, user).await {
                             Ok(_) => println!("Successfully sent reaction to counterparty"),
@@ -764,7 +760,6 @@ impl AppState {
             let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
             // Send using generated RPC method
-            // Convert via JSON to handle camelCase serialization
             let msg_json = serde_json::to_value(&msg_to_send).unwrap();
             let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
             match receive_message_remote_rpc(&target, msg_for_rpc).await {
@@ -773,7 +768,7 @@ impl AppState {
                         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == forwarded_message.id) {
                             msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
                         }
-                        
+
                         // Send ChatUpdate with the updated message status
                         for &channel_id in self.ws_connections.keys() {
                             let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -1066,7 +1061,7 @@ impl AppState {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
                         msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
                     }
-                    
+
                     // Send ChatUpdate with the updated message status
                     for &channel_id in self.ws_connections.keys() {
                         let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -1084,7 +1079,7 @@ impl AppState {
                         .or_insert_with(Vec::new)
                         .push(msg_to_send);
                 }
-                
+
                 // Still broadcast NewMessage for failed sends
                 for &channel_id in self.ws_connections.keys() {
                     let msg = WsServerMessage::NewMessage(message.clone());
@@ -1174,7 +1169,7 @@ impl AppState {
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
                         msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
                     }
-                    
+
                     // Send ChatUpdate with the updated message status
                     for &channel_id in self.ws_connections.keys() {
                         let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -1192,7 +1187,7 @@ impl AppState {
                         .or_insert_with(Vec::new)
                         .push(msg_to_send);
                 }
-                
+
                 // Still broadcast NewMessage for failed sends
                 for &channel_id in self.ws_connections.keys() {
                     let msg = WsServerMessage::NewMessage(message.clone());
@@ -1315,25 +1310,25 @@ impl AppState {
     #[remote]
     async fn receive_reaction(&mut self, message_id: String, emoji: String, user: String) -> Result<(), String> {
         println!("Received reaction {} from {} for message {}", emoji, user, message_id);
-        
+
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-            
+
         let reaction = MessageReaction {
             emoji: emoji.clone(),
             user: user.clone(),
             timestamp,
         };
-        
+
         // Find the message and add the reaction
         for chat in self.chats.values_mut() {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
                 // Check if user already reacted with this emoji
                 if !message.reactions.iter().any(|r| r.user == reaction.user && r.emoji == reaction.emoji) {
                     message.reactions.push(reaction);
-                    
+
                     // Send ChatUpdate to WebSocket connections
                     for &channel_id in self.ws_connections.keys() {
                         let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -1346,7 +1341,7 @@ impl AppState {
                 }
             }
         }
-        
+
         // Not an error - might be a reaction for a message we don't have
         Ok(())
     }
@@ -1520,7 +1515,7 @@ impl AppState {
             queue.len()
         };
         println!("Processing delivery queue with {} nodes", queue_len);
-        
+
         // Process queued messages for each node
         let nodes_to_process: Vec<String> = {
             let queue = self.delivery_queue.lock().unwrap();
@@ -1533,15 +1528,14 @@ impl AppState {
                 let queue = self.delivery_queue.lock().unwrap();
                 queue.get(&node).and_then(|messages| messages.first().cloned())
             };
-            
+
             if let Some(msg) = msg_to_send {
                 let target = Address::from((node.as_str(), OUR_PROCESS_ID));
-                
+
                 // Try to send using generated RPC method
-                // Convert via JSON to handle camelCase serialization
                 let msg_json = serde_json::to_value(&msg).unwrap();
                 let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
-                
+
                 match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
                     Ok(_) => {
                         println!("Successfully delivered queued message {} to {}", msg.id, node);
@@ -1555,12 +1549,12 @@ impl AppState {
                                 }
                             }
                         }
-                        
+
                         // Update message status in our chat
                         for chat in self.chats.values_mut() {
                             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg.id) {
                                 message.status = safe_update_message_status(&message.status, MessageStatus::Sent);
-                                
+
                                 // Send ChatUpdate to WebSocket connections
                                 for &channel_id in self.ws_connections.keys() {
                                     let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -1834,5 +1828,30 @@ mod base64 {
         }
 
         Ok(output)
+    }
+}
+
+mod arc_mutex_serde {
+    use super::*;
+
+    pub fn serialize<S, T>(val: &Arc<Mutex<T>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize,
+    {
+        use serde::ser::Error;
+        match val.lock() {
+            Ok(guard) => guard.serialize(serializer),
+            Err(_) => Err(Error::custom("mutex poisoned")),
+        }
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Arc<Mutex<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        let data = T::deserialize(deserializer)?;
+        Ok(Arc::new(Mutex::new(data)))
     }
 }
