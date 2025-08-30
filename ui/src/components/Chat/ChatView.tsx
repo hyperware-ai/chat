@@ -18,22 +18,22 @@ const ChatView: React.FC = () => {
   useEffect(() => {
     if (activeChat) {
       markChatAsRead(activeChat.id);
-      
+
       // Check if this is a new chat with no messages or only "Sent" messages
       // This indicates the node might be offline
-      const hasOnlySentMessages = activeChat.messages.length > 0 && 
-        activeChat.messages.every(msg => 
-          msg.sender !== activeChat.counterparty && 
+      const hasOnlySentMessages = activeChat.messages.length > 0 &&
+        activeChat.messages.every(msg =>
+          msg.sender !== activeChat.counterparty &&
           (msg.status === 'Sent' || msg.status === 'Sending')
         );
-      
-      const isNewChat = activeChat.messages.length === 0 || 
+
+      const isNewChat = activeChat.messages.length === 0 ||
         (activeChat.messages.length === 1 && activeChat.messages[0].sender === 'System');
-      
+
       if (isNewChat || hasOnlySentMessages) {
         setShowOfflineTooltip(true);
-        // Auto-hide after 5 seconds
-        const timer = setTimeout(() => setShowOfflineTooltip(false), 5000);
+        // Auto-hide after 10 seconds
+        const timer = setTimeout(() => setShowOfflineTooltip(false), 10000);
         return () => clearTimeout(timer);
       }
     }
@@ -42,7 +42,7 @@ const ChatView: React.FC = () => {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeChat?.messages]);
-  
+
   // Hide tooltip when user sends a message or taps
   const handleUserInteraction = () => {
     setShowOfflineTooltip(false);
@@ -60,12 +60,12 @@ const ChatView: React.FC = () => {
 
   const handleTouchMove = (e: React.TouchEvent) => {
     if (startXRef.current === 0) return;
-    
+
     const currentX = e.touches[0].clientX;
     const currentY = e.touches[0].clientY;
     const deltaX = currentX - startXRef.current;
     const deltaY = Math.abs(currentY - startYRef.current);
-    
+
     // Only trigger swipe if horizontal movement is greater than vertical
     // and swiping right from left edge
     if (deltaX > 10 && deltaY < 50 && startXRef.current < 30) {
@@ -73,7 +73,7 @@ const ChatView: React.FC = () => {
       // Limit swipe distance
       const limitedDeltaX = Math.min(deltaX, window.innerWidth * 0.8);
       setSwipeX(limitedDeltaX);
-      
+
       // Add haptic feedback when reaching threshold
       if (limitedDeltaX >= window.innerWidth * 0.3 && 'vibrate' in navigator) {
         navigator.vibrate(10);
@@ -96,7 +96,7 @@ const ChatView: React.FC = () => {
   }
 
   return (
-    <div 
+    <div
       ref={chatViewRef}
       className={`chat-view ${isSwiping ? 'swiping' : ''}`}
       onTouchStart={handleTouchStart}
@@ -110,21 +110,24 @@ const ChatView: React.FC = () => {
       }}
     >
       <ChatHeader chat={activeChat} />
-      
+
       {showOfflineTooltip && (
         <div className="offline-tooltip" onClick={handleUserInteraction}>
-          <div className="offline-tooltip-content">
-            {activeChat.counterparty} is either offline or doesn't have chat installed. 
-            Sent messages will be delivered as soon as they're online.
+          <div className="offline-tooltip-content" style={{ textAlign: 'center' }}>
+            Users can be messaged whether they are online or not. Messages display their delivery status:
+            <br />
+            • ✓ Attempting to deliver message
+            <br />
+            • ✓✓ Message successfully delivered
           </div>
         </div>
       )}
-      
+
       <div className="messages-container">
         <MessageList messages={activeChat.messages} />
         <div ref={messagesEndRef} />
       </div>
-      
+
       <MessageInput chatId={activeChat.id} onSendMessage={handleUserInteraction} />
     </div>
   );
