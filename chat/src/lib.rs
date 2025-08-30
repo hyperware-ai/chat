@@ -8,7 +8,7 @@ use hyperware_process_lib::{
     println,
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
-    vfs::{create_file},
+    vfs,
     LazyLoadBlob,
     Address,
     hyperapp::{SaveOptions, spawn, sleep},
@@ -301,6 +301,17 @@ impl AppState {
         if self.profile.name == "User" {
             let our_node = our().node.clone();
             self.profile.name = our_node.split('.').next().unwrap_or("User").to_string();
+        }
+        
+        // Create VFS drive for storing chat files
+        let package_id = our().package_id();
+        match vfs::create_drive(package_id, "files", Some(5)) {
+            Ok(drive_path) => {
+                println!("Created files drive at: {}", drive_path);
+            }
+            Err(e) => {
+                println!("Failed to create files drive (may already exist): {:?}", e);
+            }
         }
 
         // Add a welcome chat if no chats exist
@@ -983,21 +994,27 @@ impl AppState {
             .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
         // Store file in VFS
-        let vfs_path = format!("/chat/files/{}/{}", req.chat_id.replace(":", "_"), req.filename);
-        let file = create_file(&vfs_path, Some(5))
-            .map_err(|e| format!("Failed to create VFS file: {}", e))?;
+        let package_id = our().package_id();
+        let safe_filename = req.filename.replace("/", "_").replace("..", "_");
+        let vfs_path = format!("/{}/files/{}/{}", 
+            package_id, 
+            req.chat_id.replace(":", "_"), 
+            safe_filename
+        );
+        
+        // Create directory if it doesn't exist
+        let dir_path = format!("/{}/files/{}", package_id, req.chat_id.replace(":", "_"));
+        let _ = vfs::open_dir(&dir_path, true, Some(5)); // Create directory if it doesn't exist
+        
+        // Create and write file
+        let file = vfs::create_file(&vfs_path, Some(5))
+            .map_err(|e| format!("Failed to create VFS file: {:?}", e))?;
         file.write(&file_data)
-            .map_err(|e| format!("Failed to write to VFS: {}", e))?;
+            .map_err(|e| format!("Failed to write to VFS: {:?}", e))?;
 
-        // For images and small files, still use data URL for quick display
-        // For larger files, we could serve them from VFS endpoint
-        let file_url = if req.mime_type.starts_with("image/") && file_data.len() < 500_000 {
-            // Use data URL for small images
-            format!("data:{};base64,{}", req.mime_type, req.data)
-        } else {
-            // Use VFS path for larger files (would need a serving endpoint)
-            format!("/vfs{}", vfs_path)
-        };
+        // Always use data URL for now - simpler implementation
+        // In production, you'd want to serve large files from VFS
+        let file_url = format!("data:{};base64,{}", req.mime_type, req.data);
 
         let file_info = FileInfo {
             filename: req.filename.clone(),
@@ -1083,7 +1100,6 @@ impl AppState {
 
         Ok(message)
     }
-
     #[http]
     async fn send_voice_note(&mut self, request_body: String) -> Result<ChatMessage, String> {
         #[derive(Deserialize)]
@@ -1382,7 +1398,6 @@ impl AppState {
         // Serve the browser chat HTML for join links
         Ok(include_str!("../../ui/public/browser-chat.html").to_string())
     }
-
     // SEARCH
 
     #[http]

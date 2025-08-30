@@ -249,10 +249,20 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
             </div>
           ) : message.file_info && message.message_type === 'File' ? (
             <div>
-              <div style={{ marginBottom: '8px' }}>📎 {message.file_info.filename}</div>
-              <div style={{ fontSize: '12px', opacity: 0.8 }}>
-                {(message.file_info.size / 1024).toFixed(1)} KB
-              </div>
+              <a 
+                href={message.file_info.url}
+                download={message.file_info.filename}
+                style={{ 
+                  color: isOwn ? '#ffffff' : '#4da6ff',
+                  textDecoration: 'none',
+                  display: 'inline-block'
+                }}
+              >
+                <div style={{ marginBottom: '8px' }}>📎 {message.file_info.filename}</div>
+                <div style={{ fontSize: '12px', opacity: 0.8 }}>
+                  {(message.file_info.size / 1024).toFixed(1)} KB - Click to download
+                </div>
+              </a>
             </div>
           ) : (
             renderMessageContent
