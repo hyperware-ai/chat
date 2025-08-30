@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
+use flate2::Compression;
+use std::io::{Write, Read};
 
 // Import generated RPC functions from caller-utils
 use caller_utils::app::{
@@ -107,6 +111,7 @@ pub struct Settings {
     pub allow_browser_chats: bool,
     pub stt_enabled: bool,
     pub stt_api_key: Option<String>,
+    pub max_file_size_mb: u64,
 }
 
 impl Default for Settings {
@@ -121,6 +126,7 @@ impl Default for Settings {
             allow_browser_chats: true,
             stt_enabled: false,
             stt_api_key: None,
+            max_file_size_mb: 10, // Default 10MB limit
         }
     }
 }
@@ -269,6 +275,29 @@ fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> Me
     }
 }
 
+// Helper functions for compression
+fn compress_data(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).map_err(|e| format!("Compression error: {}", e))?;
+    encoder.finish().map_err(|e| format!("Compression finish error: {}", e))
+}
+
+fn decompress_data(compressed: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = GzDecoder::new(compressed);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed).map_err(|e| format!("Decompression error: {}", e))?;
+    Ok(decompressed)
+}
+
+// Helper functions for base64 encoding/decoding (wrapper around base64 0.21)
+fn base64_encode(data: &[u8]) -> String {
+    ::base64::encode(data)
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
+    ::base64::decode(input)
+}
+
 // HYPERPROCESS IMPLEMENTATION
 
 #[hyperprocess(
@@ -286,6 +315,10 @@ fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> Me
         Binding::Http {
             path: "/public",
             config: HttpBindingConfig::new(false, false, false, None)
+        },
+        Binding::Http {
+            path: "/files/*",
+            config: HttpBindingConfig::default(),
         }
     ],
     save_config = SaveOptions::OnDiff,
@@ -975,6 +1008,16 @@ impl AppState {
         let req: UploadFileRequest = serde_json::from_str(&request_body)
             .map_err(|e| format!("Invalid request: {}", e))?;
 
+        // Decode base64 data
+        let file_data = base64_decode(&req.data)
+            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+        // Check file size limit
+        let file_size_mb = (file_data.len() as u64) / (1024 * 1024);
+        if file_size_mb > self.settings.max_file_size_mb {
+            return Err(format!("File size exceeds limit of {} MB", self.settings.max_file_size_mb));
+        }
+
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -989,38 +1032,47 @@ impl AppState {
             MessageType::File
         };
 
-        // Decode base64 data
-        let file_data = base64::decode(&req.data)
-            .map_err(|e| format!("Failed to decode base64: {}", e))?;
-
         // Store file in VFS
         let package_id = our().package_id();
-        let safe_filename = req.filename.replace("/", "_").replace("..", "_");
+        let _safe_filename = req.filename.replace("/", "_").replace("..", "_");
+        let file_id = format!("{}_{}", timestamp, rand::random::<u32>());
         let vfs_path = format!("/{}/files/{}/{}", 
             package_id, 
             req.chat_id.replace(":", "_"), 
-            safe_filename
+            file_id
         );
         
         // Create directory if it doesn't exist
         let dir_path = format!("/{}/files/{}", package_id, req.chat_id.replace(":", "_"));
-        let _ = vfs::open_dir(&dir_path, true, Some(5)); // Create directory if it doesn't exist
+        let _ = vfs::open_dir(&dir_path, true, Some(5));
         
-        // Create and write file
+        // Create and write original file to VFS
         let file = vfs::create_file(&vfs_path, Some(5))
             .map_err(|e| format!("Failed to create VFS file: {:?}", e))?;
         file.write(&file_data)
             .map_err(|e| format!("Failed to write to VFS: {:?}", e))?;
 
-        // Always use data URL for now - simpler implementation
-        // In production, you'd want to serve large files from VFS
-        let file_url = format!("data:{};base64,{}", req.mime_type, req.data);
+        // For images, use data URL (they're usually small enough)
+        // For other files, compress and send, or provide download link
+        let (file_url, compressed_data) = if message_type == MessageType::Image {
+            // Images: use data URL for easy inline display
+            (format!("data:{};base64,{}", req.mime_type, req.data), None)
+        } else {
+            // Files: compress and prepare for sending
+            let compressed = compress_data(&file_data)?;
+            let compressed_b64 = base64_encode(&compressed);
+            
+            // Store compressed data for sending to counterparty
+            // But locally, we'll serve from VFS
+            let local_url = format!("/files/{}/{}", req.chat_id.replace(":", "_"), file_id);
+            (local_url, Some(compressed_b64))
+        };
 
         let file_info = FileInfo {
             filename: req.filename.clone(),
-            mime_type: req.mime_type,
+            mime_type: req.mime_type.clone(),
             size: file_data.len() as u64,
-            url: file_url,
+            url: file_url.clone(),
         };
 
         let message = ChatMessage {
@@ -1031,7 +1083,7 @@ impl AppState {
             status: MessageStatus::Sending,
             reply_to: req.reply_to,
             reactions: Vec::new(),
-            message_type,
+            message_type: message_type.clone(),
             file_info: Some(file_info),
         };
 
@@ -1054,7 +1106,16 @@ impl AppState {
 
         // Send to counterparty using generated RPC
         let counterparty = chat.counterparty.clone();
-        let msg_to_send = message.clone();
+        let mut msg_to_send = message.clone();
+        
+        // For files (not images), replace URL with compressed data for transmission
+        if message_type == MessageType::File {
+            if let Some(compressed) = compressed_data {
+                if let Some(ref mut file_info) = msg_to_send.file_info {
+                    file_info.url = format!("compressed:{}", compressed);
+                }
+            }
+        }
 
         let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
@@ -1275,6 +1336,84 @@ impl AppState {
         // Update message status to Delivered
         let mut updated_message = message.clone();
         updated_message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
+        
+        // If message has a file, save it to our VFS
+        if let Some(ref mut file_info) = updated_message.file_info {
+            let is_image = updated_message.message_type == MessageType::Image;
+            let original_url = file_info.url.clone();
+            
+            let file_data = if file_info.url.starts_with("compressed:") {
+                // Handle compressed file data
+                let compressed_b64 = &file_info.url[11..]; // Skip "compressed:" prefix
+                
+                // Decode base64
+                let compressed_data = match base64_decode(compressed_b64) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        println!("Failed to decode compressed file: {}", e);
+                        vec![]
+                    }
+                };
+                
+                // Decompress
+                match decompress_data(&compressed_data) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        println!("Failed to decompress file: {}", e);
+                        vec![]
+                    }
+                }
+            } else if file_info.url.starts_with("data:") {
+                // Handle data URL (for images)
+                if let Some(comma_pos) = file_info.url.find(',') {
+                    let base64_data = &file_info.url[comma_pos + 1..];
+                    
+                    // Decode base64
+                    match base64_decode(base64_data) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            println!("Failed to decode file data: {}", e);
+                            vec![]
+                        }
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+            
+            if !file_data.is_empty() {
+                // Save to VFS
+                let package_id = our().package_id();
+                let file_id = format!("{}_{}", updated_message.timestamp, rand::random::<u32>());
+                let vfs_path = format!("/{}/files/{}/{}", 
+                    package_id, 
+                    chat_id.replace(":", "_"), 
+                    file_id
+                );
+                
+                // Create directory if it doesn't exist
+                let dir_path = format!("/{}/files/{}", package_id, chat_id.replace(":", "_"));
+                let _ = vfs::open_dir(&dir_path, true, Some(5));
+                
+                // Create and write file
+                if let Ok(file) = vfs::create_file(&vfs_path, Some(5)) {
+                    let _ = file.write(&file_data);
+                    println!("Saved received file {} to VFS at {}", file_info.filename, vfs_path);
+                    
+                    // For images, keep the data URL for inline display
+                    // For files, update to local VFS path
+                    if is_image {
+                        // Keep the original data URL for images
+                        file_info.url = original_url;
+                    } else {
+                        // Update the file URL to point to our local VFS path
+                        file_info.url = format!("/files/{}/{}", chat_id.replace(":", "_"), file_id);
+                    }
+                }
+            }
+        }
 
         // Add message to chat
         chat.messages.push(updated_message.clone());
@@ -1397,6 +1536,33 @@ impl AppState {
     async fn serve_join_link(&self) -> Result<String, String> {
         // Serve the browser chat HTML for join links
         Ok(include_str!("../../ui/public/browser-chat.html").to_string())
+    }
+
+    #[http(path = "/files/*")]
+    async fn serve_file(&self, path_segments: Vec<String>) -> Result<(String, Vec<u8>), String> {
+        // Extract path from segments (should be /files/chat_id/file_id)
+        if path_segments.len() < 3 {
+            return Err("Invalid file path".to_string());
+        }
+        
+        let chat_id = &path_segments[1];
+        let file_id = &path_segments[2];
+        
+        // Build VFS path
+        let package_id = our().package_id();
+        let vfs_path = format!("/{}/files/{}/{}", package_id, chat_id, file_id);
+        
+        // Read file from VFS
+        let file = vfs::open_file(&vfs_path, false, Some(5))
+            .map_err(|e| format!("Failed to open file: {:?}", e))?;
+        
+        let file_data = file.read()
+            .map_err(|e| format!("Failed to read file: {:?}", e))?;
+        
+        // Try to determine MIME type from file content or default to application/octet-stream
+        let mime_type = "application/octet-stream".to_string();
+        
+        Ok((mime_type, file_data))
     }
     // SEARCH
 

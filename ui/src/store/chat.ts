@@ -68,6 +68,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     allow_browser_chats: true,
     stt_enabled: false,
     stt_api_key: null,
+    max_file_size_mb: 10,
   },
   chatKeys: [],
   wsConnection: null,

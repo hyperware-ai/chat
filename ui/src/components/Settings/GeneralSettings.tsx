@@ -19,6 +19,14 @@ const GeneralSettings: React.FC = () => {
     });
   };
 
+  const handleFileSizeChange = (value: string) => {
+    const sizeInMB = parseInt(value) || 10;
+    updateSettings({
+      ...settings,
+      max_file_size_mb: Math.max(1, Math.min(100, sizeInMB)), // Limit between 1-100 MB
+    });
+  };
+
   return (
     <div className="general-settings">
       <div className="setting-item">
@@ -87,6 +95,21 @@ const GeneralSettings: React.FC = () => {
           />
         </div>
       )}
+      
+      <div className="setting-item">
+        <label>Max file size (MB):</label>
+        <input
+          type="number"
+          min="1"
+          max="100"
+          value={settings.max_file_size_mb || 10}
+          onChange={(e) => handleFileSizeChange(e.target.value)}
+          style={{ width: '80px' }}
+        />
+        <span style={{ marginLeft: '10px', fontSize: '0.9em', color: '#666' }}>
+          (1-100 MB)
+        </span>
+      </div>
     </div>
   );
 };

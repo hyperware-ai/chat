@@ -960,6 +960,7 @@ dependencies = [
  "anyhow",
  "base64 0.21.7",
  "caller-utils",
+ "flate2",
  "hyperprocess_macro",
  "hyperware_process_lib",
  "process_macros",

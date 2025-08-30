@@ -8,13 +8,21 @@ interface FileUploadProps {
 }
 
 const FileUpload: React.FC<FileUploadProps> = ({ onClose }) => {
-  const { activeChat, loadChats } = useChatStore();
+  const { activeChat, loadChats, settings } = useChatStore();
   
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0 && activeChat) {
+      const maxSizeBytes = (settings.max_file_size_mb || 10) * 1024 * 1024;
+      
       for (const file of Array.from(files)) {
         try {
+          // Check file size
+          if (file.size > maxSizeBytes) {
+            alert(`File "${file.name}" exceeds the ${settings.max_file_size_mb || 10}MB size limit`);
+            continue;
+          }
+          
           // Read file as base64
           const reader = new FileReader();
           reader.onload = async (event) => {
