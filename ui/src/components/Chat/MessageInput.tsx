@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useChatStore } from '../../store/chat';
 import FileUpload from './FileUpload';
 import VoiceNote from './VoiceNote';
@@ -14,6 +14,13 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId }) => {
   const [showVoiceNote, setShowVoiceNote] = useState(false);
   const { sendMessage, replyingTo, setReplyingTo } = useChatStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  
+  // Focus input when replying
+  useEffect(() => {
+    if (replyingTo) {
+      inputRef.current?.focus();
+    }
+  }, [replyingTo]);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();

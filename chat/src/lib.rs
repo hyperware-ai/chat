@@ -11,11 +11,12 @@ use hyperware_process_lib::{
     vfs::{create_file},
     LazyLoadBlob,
     Address,
-    hyperapp::SaveOptions,
+    hyperapp::{SaveOptions, spawn, sleep},
 };
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 // Import generated RPC functions from caller-utils
 use caller_utils::app::{
@@ -193,17 +194,38 @@ pub enum WsServerMessage {
 
 // APP STATE
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AppState {
     pub profile: UserProfile,
     pub chats: HashMap<String, Chat>,
     pub chat_keys: HashMap<String, ChatKey>,
     pub settings: Settings,
-    pub delivery_queue: HashMap<String, Vec<ChatMessage>>,
+    #[serde(skip, default = "default_delivery_queue")]
+    pub delivery_queue: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     pub online_nodes: HashSet<String>,
     pub ws_connections: HashMap<u32, String>, // channel_id -> node/browser_id
     pub browser_connections: HashMap<String, u32>, // chat_key -> channel_id
     pub last_heartbeat: HashMap<u32, u64>, // channel_id -> timestamp
+}
+
+fn default_delivery_queue() -> Arc<Mutex<HashMap<String, Vec<ChatMessage>>>> {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        AppState {
+            profile: UserProfile::default(),
+            chats: HashMap::new(),
+            chat_keys: HashMap::new(),
+            settings: Settings::default(),
+            delivery_queue: default_delivery_queue(),
+            online_nodes: HashSet::new(),
+            ws_connections: HashMap::new(),
+            browser_connections: HashMap::new(),
+            last_heartbeat: HashMap::new(),
+        }
+    }
 }
 
 impl Default for UserProfile {
@@ -280,6 +302,51 @@ impl AppState {
 
             self.chats.insert("system:welcome".to_string(), welcome_chat);
         }
+
+        // Clone the delivery queue Arc for the spawn task
+        let delivery_queue = self.delivery_queue.clone();
+        
+        // Spawn a task to periodically process the delivery queue
+        spawn(async move {
+            loop {
+                // Wait 30 seconds between delivery attempts
+                let _ = sleep(30000).await;
+                
+                // Process the delivery queue
+                let queue_snapshot = {
+                    let queue = delivery_queue.lock().unwrap();
+                    queue.clone()
+                };
+                
+                for (node, messages) in queue_snapshot {
+                    if let Some(msg) = messages.first() {
+                        let target = Address::from((node.as_str(), OUR_PROCESS_ID));
+                        
+                        // Try to send using generated RPC method
+                        let msg_json = serde_json::to_value(&msg).unwrap();
+                        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+                        
+                        match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
+                            Ok(_) => {
+                                println!("Successfully delivered queued message {} to {}", msg.id, node);
+                                // Remove from queue if successful
+                                let mut queue = delivery_queue.lock().unwrap();
+                                if let Some(node_queue) = queue.get_mut(&node) {
+                                    node_queue.retain(|m| m.id != msg.id);
+                                    if node_queue.is_empty() {
+                                        queue.remove(&node);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Don't attempt more messages to this node if we get Offline or Timeout
+                                println!("Failed to deliver queued message to {}: {:?}", node, e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
 
         println!("Chat app initialized on node: {} with {} chats", our().node, self.chats.len());
     }
@@ -447,10 +514,12 @@ impl AppState {
             }
             Err(_) => {
                 // Failed to send, add to delivery queue
-                self.delivery_queue
-                    .entry(counterparty.clone())
-                    .or_insert_with(Vec::new)
-                    .push(msg_to_send);
+                {
+                    let mut queue = self.delivery_queue.lock().unwrap();
+                    queue.entry(counterparty.clone())
+                        .or_insert_with(Vec::new)
+                        .push(msg_to_send);
+                }
 
                 // Update status to failed
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
@@ -647,10 +716,12 @@ impl AppState {
                     }
                 }
                 Err(_) => {
-                    self.delivery_queue
-                        .entry(counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(msg_to_send);
+                    {
+                        let mut queue = self.delivery_queue.lock().unwrap();
+                        queue.entry(counterparty.clone())
+                            .or_insert_with(Vec::new)
+                            .push(msg_to_send);
+                    }
 
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
                         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == forwarded_message.id) {
@@ -938,10 +1009,12 @@ impl AppState {
                 }
             }
             Err(_) => {
-                self.delivery_queue
-                    .entry(counterparty.clone())
-                    .or_insert_with(Vec::new)
-                    .push(msg_to_send);
+                {
+                    let mut queue = self.delivery_queue.lock().unwrap();
+                    queue.entry(counterparty.clone())
+                        .or_insert_with(Vec::new)
+                        .push(msg_to_send);
+                }
                 
                 // Still broadcast NewMessage for failed sends
                 for &channel_id in self.ws_connections.keys() {
@@ -1044,10 +1117,12 @@ impl AppState {
                 }
             }
             Err(_) => {
-                self.delivery_queue
-                    .entry(counterparty.clone())
-                    .or_insert_with(Vec::new)
-                    .push(msg_to_send);
+                {
+                    let mut queue = self.delivery_queue.lock().unwrap();
+                    queue.entry(counterparty.clone())
+                        .or_insert_with(Vec::new)
+                        .push(msg_to_send);
+                }
                 
                 // Still broadcast NewMessage for failed sends
                 for &channel_id in self.ws_connections.keys() {
@@ -1331,31 +1406,68 @@ impl AppState {
     }
 
     async fn process_delivery_queue(&mut self) {
+        let queue_len = {
+            let queue = self.delivery_queue.lock().unwrap();
+            queue.len()
+        };
+        println!("Processing delivery queue with {} nodes", queue_len);
+        
         // Process queued messages for each node
-        let queue_snapshot = self.delivery_queue.clone();
+        let nodes_to_process: Vec<String> = {
+            let queue = self.delivery_queue.lock().unwrap();
+            queue.keys().cloned().collect()
+        };
 
-        for (node, messages) in queue_snapshot {
-            // Check if node is now online
-            if self.online_nodes.contains(&node) {
-                // Try to deliver all queued messages using generated RPC
-                for msg in messages {
-                    let target = Address::from((node.as_str(), OUR_PROCESS_ID));
-
-                    // Try to send using generated RPC method
-                    // Convert via JSON to handle camelCase serialization
-                    let msg_json = serde_json::to_value(&msg).unwrap();
-                    let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
-                    if let Ok(_) = receive_message_remote_rpc(&target, msg_for_rpc).await {
+        for node in nodes_to_process {
+            // Get the first message for this node
+            let msg_to_send = {
+                let queue = self.delivery_queue.lock().unwrap();
+                queue.get(&node).and_then(|messages| messages.first().cloned())
+            };
+            
+            if let Some(msg) = msg_to_send {
+                let target = Address::from((node.as_str(), OUR_PROCESS_ID));
+                
+                // Try to send using generated RPC method
+                // Convert via JSON to handle camelCase serialization
+                let msg_json = serde_json::to_value(&msg).unwrap();
+                let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+                
+                match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
+                    Ok(_) => {
+                        println!("Successfully delivered queued message {} to {}", msg.id, node);
                         // Remove from queue if successful
-                        if let Some(queue) = self.delivery_queue.get_mut(&node) {
-                            queue.retain(|m| m.id != msg.id);
+                        {
+                            let mut queue = self.delivery_queue.lock().unwrap();
+                            if let Some(node_queue) = queue.get_mut(&node) {
+                                node_queue.retain(|m| m.id != msg.id);
+                                if node_queue.is_empty() {
+                                    queue.remove(&node);
+                                }
+                            }
+                        }
+                        
+                        // Update message status in our chat
+                        for chat in self.chats.values_mut() {
+                            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg.id) {
+                                message.status = MessageStatus::Sent;
+                                
+                                // Send ChatUpdate to WebSocket connections
+                                for &channel_id in self.ws_connections.keys() {
+                                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                                        mime: Some("application/json".to_string()),
+                                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                                    });
+                                }
+                                break;
+                            }
                         }
                     }
-                }
-
-                // Clean up empty queues
-                if self.delivery_queue.get(&node).map_or(false, |q| q.is_empty()) {
-                    self.delivery_queue.remove(&node);
+                    Err(e) => {
+                        // Don't attempt more messages to this node if we get Offline or Timeout
+                        println!("Failed to deliver queued message to {}: {:?}", node, e);
+                    }
                 }
             }
         }
@@ -1408,9 +1520,12 @@ impl AppState {
                         }
                     } else {
                         // Queue for delivery
-                        self.delivery_queue.entry(counterparty)
-                            .or_insert_with(Vec::new)
-                            .push(message.clone());
+                        {
+                            let mut queue = self.delivery_queue.lock().unwrap();
+                            queue.entry(counterparty)
+                                .or_insert_with(Vec::new)
+                                .push(message.clone());
+                        }
                     }
                 }
 
