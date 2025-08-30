@@ -12,7 +12,7 @@ interface MessageMenuProps {
 }
 
 const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onClose }) => {
-  const { deleteMessage, editMessage, loadChats, chats } = useChatStore();
+  const { deleteMessage, editMessage, loadChats, chats, activeChat } = useChatStore();
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showForwardPicker, setShowForwardPicker] = useState(false);
   
@@ -46,10 +46,11 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   
   const handleAddReaction = async (emoji: string) => {
     try {
-      await add_reaction(JSON.stringify({ 
+      await add_reaction({ 
+        chat_id: activeChat?.id || '',
         message_id: message.id, 
         emoji 
-      }));
+      });
       await loadChats();
       onClose();
     } catch (err) {
@@ -59,10 +60,11 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   
   const handleForward = async (toChatId: string) => {
     try {
-      await forward_message(JSON.stringify({ 
+      await forward_message({ 
+        from_chat_id: activeChat?.id || '',
         message_id: message.id, 
         to_chat_id: toChatId 
-      }));
+      });
       await loadChats();
       onClose();
     } catch (err) {

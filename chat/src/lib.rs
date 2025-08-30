@@ -196,6 +196,104 @@ pub enum WsServerMessage {
     },
 }
 
+// REQUEST TYPES FOR HTTP ENDPOINTS
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CreateChatReq {
+    pub counterparty: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetChatReq {
+    pub chat_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DeleteChatReq {
+    pub chat_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SendMessageReq {
+    pub chat_id: String,
+    pub content: String,
+    pub reply_to: Option<String>,
+    pub file_info: Option<FileInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EditMessageReq {
+    pub chat_id: String,
+    pub message_id: String,
+    pub new_content: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DeleteMessageReq {
+    pub chat_id: String,
+    pub message_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AddReactionReq {
+    pub chat_id: String,
+    pub message_id: String,
+    pub emoji: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RemoveReactionReq {
+    pub chat_id: String,
+    pub message_id: String,
+    pub emoji: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ForwardMessageReq {
+    pub from_chat_id: String,
+    pub message_id: String,
+    pub to_chat_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CreateChatLinkReq {
+    pub chat_id: String,
+    pub single_use: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RevokeChatKeyReq {
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UploadFileReq {
+    pub chat_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub data: String, // base64 encoded
+    pub reply_to: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UploadProfilePictureReq {
+    pub mime_type: String,
+    pub data: String, // base64 encoded
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SendVoiceNoteReq {
+    pub chat_id: String,
+    pub audio_data: String, // base64 encoded
+    pub duration: u32, // in seconds
+    pub reply_to: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchChatsReq {
+    pub query: String,
+}
+
 // APP STATE
 
 #[derive(Serialize, Deserialize)]
@@ -335,7 +433,7 @@ impl AppState {
             let our_node = our().node.clone();
             self.profile.name = our_node.split('.').next().unwrap_or("User").to_string();
         }
-        
+
         // Create VFS drive for storing chat files
         let package_id = our().package_id();
         match vfs::create_drive(package_id, "files", Some(5)) {
@@ -428,15 +526,9 @@ impl AppState {
 
     // CHAT MANAGEMENT ENDPOINTS
 
+    #[local]
     #[http]
-    async fn create_chat(&mut self, request_body: String) -> Result<Chat, String> {
-        #[derive(Deserialize)]
-        struct CreateChatRequest {
-            counterparty: String,
-        }
-
-        let req: CreateChatRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn create_chat(&mut self, req: CreateChatReq) -> Result<Chat, String> {
 
         // Normalize chat ID to always be alphabetically sorted
         let chat_id = Self::normalize_chat_id(&our().node, &req.counterparty);
@@ -485,14 +577,7 @@ impl AppState {
     }
 
     #[http]
-    async fn get_chat(&self, request_body: String) -> Result<Chat, String> {
-        #[derive(Deserialize)]
-        struct GetChatRequest {
-            chat_id: String,
-        }
-
-        let req: GetChatRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn get_chat(&self, req: GetChatReq) -> Result<Chat, String> {
 
         self.chats.get(&req.chat_id)
             .cloned()
@@ -500,14 +585,7 @@ impl AppState {
     }
 
     #[http]
-    async fn delete_chat(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct DeleteChatRequest {
-            chat_id: String,
-        }
-
-        let req: DeleteChatRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
 
         self.chats.remove(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())
@@ -516,17 +594,9 @@ impl AppState {
 
     // MESSAGE OPERATIONS
 
+    #[local]
     #[http]
-    async fn send_message(&mut self, request_body: String) -> Result<ChatMessage, String> {
-        #[derive(Deserialize)]
-        struct SendMessageRequest {
-            chat_id: String,
-            content: String,
-            reply_to: Option<String>,
-        }
-
-        let req: SendMessageRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -563,12 +633,12 @@ impl AppState {
 
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
-        
+
         // Immediately update status to Sent (backend has received the message)
         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
             msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
         }
-        
+
         // Send ChatUpdate immediately to show Sent status
         for &channel_id in self.ws_connections.keys() {
             let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -618,18 +688,10 @@ impl AppState {
     }
 
     #[http]
-    async fn edit_message(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct EditMessageRequest {
-            message_id: String,
-            new_content: String,
-        }
+    async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
 
-        let req: EditMessageRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
-
-        // Find message in all chats
-        for chat in self.chats.values_mut() {
+        // Find message in the specified chat
+        if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
                 message.content = req.new_content;
                 return Ok("Message edited".to_string());
@@ -640,17 +702,10 @@ impl AppState {
     }
 
     #[http]
-    async fn delete_message(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct DeleteMessageRequest {
-            message_id: String,
-        }
+    async fn delete_message(&mut self, req: DeleteMessageReq) -> Result<String, String> {
 
-        let req: DeleteMessageRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
-
-        // Find and remove message from all chats
-        for chat in self.chats.values_mut() {
+        // Find and remove message from the specified chat
+        if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == req.message_id) {
                 chat.messages.remove(pos);
                 return Ok("Message deleted".to_string());
@@ -661,15 +716,7 @@ impl AppState {
     }
 
     #[http]
-    async fn add_reaction(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct AddReactionRequest {
-            message_id: String,
-            emoji: String,
-        }
-
-        let req: AddReactionRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn add_reaction(&mut self, req: AddReactionReq) -> Result<String, String> {
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -682,8 +729,8 @@ impl AppState {
             timestamp,
         };
 
-        // Find and add reaction to message
-        for chat in self.chats.values_mut() {
+        // Find and add reaction to message in the specified chat
+        if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
                 // Check if user already reacted with this emoji
                 if !message.reactions.iter().any(|r| r.user == reaction.user && r.emoji == reaction.emoji) {
@@ -731,24 +778,12 @@ impl AppState {
     }
 
     #[http]
-    async fn forward_message(&mut self, request_body: String) -> Result<ChatMessage, String> {
-        #[derive(Deserialize)]
-        struct ForwardMessageRequest {
-            message_id: String,
-            to_chat_id: String,
-        }
+    async fn forward_message(&mut self, req: ForwardMessageReq) -> Result<ChatMessage, String> {
 
-        let req: ForwardMessageRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
-
-        // Find the message to forward
-        let mut message_to_forward = None;
-        for chat in self.chats.values() {
-            if let Some(msg) = chat.messages.iter().find(|m| m.id == req.message_id) {
-                message_to_forward = Some(msg.clone());
-                break;
-            }
-        }
+        // Find the message to forward from the specified chat
+        let message_to_forward = self.chats.get(&req.from_chat_id)
+            .and_then(|chat| chat.messages.iter().find(|m| m.id == req.message_id))
+            .cloned();
 
         let original_message = message_to_forward.ok_or_else(|| "Message not found".to_string())?;
 
@@ -834,20 +869,12 @@ impl AppState {
     }
 
     #[http]
-    async fn remove_reaction(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct RemoveReactionRequest {
-            message_id: String,
-            emoji: String,
-        }
-
-        let req: RemoveReactionRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn remove_reaction(&mut self, req: RemoveReactionReq) -> Result<String, String> {
 
         let user = our().node.clone();
 
         // Find and remove reaction from message
-        for chat in self.chats.values_mut() {
+        if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
                 if let Some(pos) = message.reactions.iter().position(|r| r.user == user && r.emoji == req.emoji) {
                     message.reactions.remove(pos);
@@ -872,14 +899,7 @@ impl AppState {
     // BROWSER CHAT MANAGEMENT
 
     #[http]
-    async fn create_chat_link(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct CreateChatLinkRequest {
-            single_use: bool,
-        }
-
-        let _req: CreateChatLinkRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn create_chat_link(&mut self, req: CreateChatLinkReq) -> Result<String, String> {
 
         let key = format!("{:x}", rand::random::<u128>());
         let timestamp = std::time::SystemTime::now()
@@ -892,7 +912,7 @@ impl AppState {
             user_name: format!("Guest-{}", rand::random::<u32>() % 10000),
             created_at: timestamp,
             is_revoked: false,
-            chat_id: format!("browser:{}", key),
+            chat_id: req.chat_id.clone(),
         };
 
         self.chat_keys.insert(key.clone(), chat_key);
@@ -910,14 +930,7 @@ impl AppState {
     }
 
     #[http]
-    async fn revoke_chat_key(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct RevokeChatKeyRequest {
-            key: String,
-        }
-
-        let req: RevokeChatKeyRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn revoke_chat_key(&mut self, req: RevokeChatKeyReq) -> Result<String, String> {
 
         self.chat_keys.get_mut(&req.key)
             .ok_or_else(|| "Chat key not found".to_string())
@@ -935,33 +948,19 @@ impl AppState {
     }
 
     #[http]
-    async fn update_settings(&mut self, request_body: String) -> Result<String, String> {
-        let settings: Settings = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid settings: {}", e))?;
-
+    async fn update_settings(&mut self, settings: Settings) -> Result<String, String> {
         self.settings = settings;
         Ok("Settings updated".to_string())
     }
 
     #[http]
-    async fn update_profile(&mut self, request_body: String) -> Result<String, String> {
-        let profile: UserProfile = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid profile: {}", e))?;
-
+    async fn update_profile(&mut self, profile: UserProfile) -> Result<String, String> {
         self.profile = profile;
         Ok("Profile updated".to_string())
     }
 
     #[http]
-    async fn upload_profile_picture(&mut self, request_body: String) -> Result<String, String> {
-        #[derive(Deserialize)]
-        struct UploadProfilePictureRequest {
-            image_data: String, // Base64 encoded image
-            mime_type: String,
-        }
-
-        let req: UploadProfilePictureRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn upload_profile_picture(&mut self, req: UploadProfilePictureReq) -> Result<String, String> {
 
         // Validate mime type
         if !req.mime_type.starts_with("image/") {
@@ -969,7 +968,7 @@ impl AppState {
         }
 
         // Store the image data as a data URL
-        let data_url = format!("data:{};base64,{}", req.mime_type, req.image_data);
+        let data_url = format!("data:{};base64,{}", req.mime_type, req.data);
         self.profile.profile_pic = Some(data_url.clone());
 
         // Notify all WebSocket connections about profile update
@@ -995,18 +994,7 @@ impl AppState {
     // FILE AND VOICE NOTE OPERATIONS
 
     #[http]
-    async fn upload_file(&mut self, request_body: String) -> Result<ChatMessage, String> {
-        #[derive(Deserialize)]
-        struct UploadFileRequest {
-            chat_id: String,
-            filename: String,
-            mime_type: String,
-            data: String, // Base64 encoded file data
-            reply_to: Option<String>,
-        }
-
-        let req: UploadFileRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn upload_file(&mut self, req: UploadFileReq) -> Result<ChatMessage, String> {
 
         // Decode base64 data
         let file_data = base64_decode(&req.data)
@@ -1036,16 +1024,16 @@ impl AppState {
         let package_id = our().package_id();
         let _safe_filename = req.filename.replace("/", "_").replace("..", "_");
         let file_id = format!("{}_{}", timestamp, rand::random::<u32>());
-        let vfs_path = format!("/{}/files/{}/{}", 
-            package_id, 
-            req.chat_id.replace(":", "_"), 
+        let vfs_path = format!("/{}/files/{}/{}",
+            package_id,
+            req.chat_id.replace(":", "_"),
             file_id
         );
-        
+
         // Create directory if it doesn't exist
         let dir_path = format!("/{}/files/{}", package_id, req.chat_id.replace(":", "_"));
         let _ = vfs::open_dir(&dir_path, true, Some(5));
-        
+
         // Create and write original file to VFS
         let file = vfs::create_file(&vfs_path, Some(5))
             .map_err(|e| format!("Failed to create VFS file: {:?}", e))?;
@@ -1061,7 +1049,7 @@ impl AppState {
             // Files: compress and prepare for sending
             let compressed = compress_data(&file_data)?;
             let compressed_b64 = base64_encode(&compressed);
-            
+
             // Store compressed data for sending to counterparty
             // But locally, we'll serve from VFS
             let local_url = format!("/files/{}/{}", req.chat_id.replace(":", "_"), file_id);
@@ -1107,7 +1095,7 @@ impl AppState {
         // Send to counterparty using generated RPC
         let counterparty = chat.counterparty.clone();
         let mut msg_to_send = message.clone();
-        
+
         // For files (not images), replace URL with compressed data for transmission
         if message_type == MessageType::File {
             if let Some(compressed) = compressed_data {
@@ -1162,17 +1150,7 @@ impl AppState {
         Ok(message)
     }
     #[http]
-    async fn send_voice_note(&mut self, request_body: String) -> Result<ChatMessage, String> {
-        #[derive(Deserialize)]
-        struct VoiceNoteRequest {
-            chat_id: String,
-            audio_data: String, // Base64 encoded audio
-            duration: u64, // Duration in seconds
-            reply_to: Option<String>,
-        }
-
-        let req: VoiceNoteRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn send_voice_note(&mut self, req: SendVoiceNoteReq) -> Result<ChatMessage, String> {
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1283,32 +1261,68 @@ impl AppState {
             .as_secs();
 
         // Check if chat already exists
-        if self.chats.contains_key(&chat_id) {
+        let chat_exists = self.chats.contains_key(&chat_id);
+        if !chat_exists {
+            let chat = Chat {
+                id: chat_id.clone(),
+                counterparty: counterparty.clone(),
+                messages: Vec::new(),
+                last_activity: timestamp,
+                unread_count: 0,
+                is_blocked: false,
+                notify: true,
+            };
+
+            self.chats.insert(chat_id.clone(), chat.clone());
+            println!("receive_chat_creation: Created chat {}", chat_id);
+
+            // Notify WebSocket connections about the new chat
+            println!("receive_chat_creation: WebSocket connections: {}", self.ws_connections.len());
+            for &channel_id in self.ws_connections.keys() {
+                println!("receive_chat_creation: Sending ChatUpdate to channel {}", channel_id);
+                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                    mime: Some("application/json".to_string()),
+                    bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                });
+            }
+        } else {
             println!("receive_chat_creation: Chat {} already exists", chat_id);
-            return Ok(()); // Chat already exists, nothing to do
         }
 
-        let chat = Chat {
-            id: chat_id.clone(),
-            counterparty: counterparty.clone(),
-            messages: Vec::new(),
-            last_activity: timestamp,
-            unread_count: 0,
-            is_blocked: false,
-            notify: true,
+        // Check if we have queued messages for this counterparty
+        let queued_messages = {
+            let mut queue = self.delivery_queue.lock().unwrap();
+            queue.remove(&counterparty).unwrap_or_default()
         };
 
-        self.chats.insert(chat_id.clone(), chat.clone());
-        println!("receive_chat_creation: Created chat {}", chat_id);
-
-        // Notify WebSocket connections about the new chat
-        println!("receive_chat_creation: WebSocket connections: {}", self.ws_connections.len());
-        for &channel_id in self.ws_connections.keys() {
-            println!("receive_chat_creation: Sending ChatUpdate to channel {}", channel_id);
-            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+        if !queued_messages.is_empty() {
+            println!("receive_chat_creation: Found {} queued messages for {}", queued_messages.len(), counterparty);
+            
+            // Try to deliver queued messages now that we know the counterparty is online
+            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+            let delivery_queue = self.delivery_queue.clone();
+            
+            spawn(async move {
+                for msg in queued_messages {
+                    let msg_json = serde_json::to_value(&msg).unwrap();
+                    let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+                    
+                    match receive_message_remote_rpc(&target, msg_for_rpc).await {
+                        Ok(_) => {
+                            println!("Successfully delivered queued message {} to {}", msg.id, counterparty);
+                        }
+                        Err(e) => {
+                            println!("Failed to deliver queued message {} to {}: {:?}", msg.id, counterparty, e);
+                            // Re-add to queue if delivery fails
+                            let mut queue = delivery_queue.lock().unwrap();
+                            queue.entry(counterparty.clone())
+                                .or_insert_with(Vec::new)
+                                .push(msg);
+                            break; // Stop trying to send more messages if one fails
+                        }
+                    }
+                }
             });
         }
 
@@ -1336,16 +1350,16 @@ impl AppState {
         // Update message status to Delivered
         let mut updated_message = message.clone();
         updated_message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
-        
+
         // If message has a file, save it to our VFS
         if let Some(ref mut file_info) = updated_message.file_info {
             let is_image = updated_message.message_type == MessageType::Image;
             let original_url = file_info.url.clone();
-            
+
             let file_data = if file_info.url.starts_with("compressed:") {
                 // Handle compressed file data
                 let compressed_b64 = &file_info.url[11..]; // Skip "compressed:" prefix
-                
+
                 // Decode base64
                 let compressed_data = match base64_decode(compressed_b64) {
                     Ok(data) => data,
@@ -1354,7 +1368,7 @@ impl AppState {
                         vec![]
                     }
                 };
-                
+
                 // Decompress
                 match decompress_data(&compressed_data) {
                     Ok(data) => data,
@@ -1367,7 +1381,7 @@ impl AppState {
                 // Handle data URL (for images)
                 if let Some(comma_pos) = file_info.url.find(',') {
                     let base64_data = &file_info.url[comma_pos + 1..];
-                    
+
                     // Decode base64
                     match base64_decode(base64_data) {
                         Ok(data) => data,
@@ -1382,26 +1396,26 @@ impl AppState {
             } else {
                 vec![]
             };
-            
+
             if !file_data.is_empty() {
                 // Save to VFS
                 let package_id = our().package_id();
                 let file_id = format!("{}_{}", updated_message.timestamp, rand::random::<u32>());
-                let vfs_path = format!("/{}/files/{}/{}", 
-                    package_id, 
-                    chat_id.replace(":", "_"), 
+                let vfs_path = format!("/{}/files/{}/{}",
+                    package_id,
+                    chat_id.replace(":", "_"),
                     file_id
                 );
-                
+
                 // Create directory if it doesn't exist
                 let dir_path = format!("/{}/files/{}", package_id, chat_id.replace(":", "_"));
                 let _ = vfs::open_dir(&dir_path, true, Some(5));
-                
+
                 // Create and write file
                 if let Ok(file) = vfs::create_file(&vfs_path, Some(5)) {
                     let _ = file.write(&file_data);
                     println!("Saved received file {} to VFS at {}", file_info.filename, vfs_path);
-                    
+
                     // For images, keep the data URL for inline display
                     // For files, update to local VFS path
                     if is_image {
@@ -1544,37 +1558,30 @@ impl AppState {
         if path_segments.len() < 3 {
             return Err("Invalid file path".to_string());
         }
-        
+
         let chat_id = &path_segments[1];
         let file_id = &path_segments[2];
-        
+
         // Build VFS path
         let package_id = our().package_id();
         let vfs_path = format!("/{}/files/{}/{}", package_id, chat_id, file_id);
-        
+
         // Read file from VFS
         let file = vfs::open_file(&vfs_path, false, Some(5))
             .map_err(|e| format!("Failed to open file: {:?}", e))?;
-        
+
         let file_data = file.read()
             .map_err(|e| format!("Failed to read file: {:?}", e))?;
-        
+
         // Try to determine MIME type from file content or default to application/octet-stream
         let mime_type = "application/octet-stream".to_string();
-        
+
         Ok((mime_type, file_data))
     }
     // SEARCH
 
     #[http]
-    async fn search_chats(&self, request_body: String) -> Result<Vec<Chat>, String> {
-        #[derive(Deserialize)]
-        struct SearchRequest {
-            query: String,
-        }
-
-        let req: SearchRequest = serde_json::from_str(&request_body)
-            .map_err(|e| format!("Invalid request: {}", e))?;
+    async fn search_chats(&self, req: SearchChatsReq) -> Result<Vec<Chat>, String> {
 
         let query = req.query.to_lowercase();
         let results: Vec<Chat> = self.chats.values()
@@ -1801,12 +1808,12 @@ impl AppState {
                                 .push(message.clone());
                         }
                     }
-                    
+
                     // Update status to Sent now that BE has received and processed it
                     if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
                         msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
                     }
-                    
+
                     // Send ChatUpdate with the updated status
                     let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                     send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {

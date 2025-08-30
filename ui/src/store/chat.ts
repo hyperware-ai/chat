@@ -140,8 +140,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   createChat: async (counterparty: string) => {
     try {
       set({ isLoading: true });
-      const requestBody = JSON.stringify({ counterparty });
-      const chat = await api.create_chat(requestBody);
+      const chat = await api.create_chat({ counterparty });
       
       set(state => ({
         chats: [chat, ...state.chats],
@@ -184,12 +183,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
     
     try {
-      const requestBody = JSON.stringify({ 
+      const message = await api.send_message({ 
         chat_id: chatId, 
         content, 
-        reply_to: replyTo 
+        reply_to: replyTo || null,
+        file_info: null
       });
-      const message = await api.send_message(requestBody);
       
       // Replace optimistic message with real message from API
       set(state => ({
@@ -243,11 +242,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Edit a message
   editMessage: async (messageId: string, newContent: string) => {
     try {
-      const requestBody = JSON.stringify({ 
+      const chatId = get().activeChat?.id;
+      if (!chatId) throw new Error('No active chat');
+      
+      await api.edit_message({ 
+        chat_id: chatId,
         message_id: messageId, 
         new_content: newContent 
       });
-      await api.edit_message(requestBody);
       
       // Update local state
       set(state => ({
@@ -266,8 +268,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Delete a message
   deleteMessage: async (messageId: string) => {
     try {
-      const requestBody = JSON.stringify({ message_id: messageId });
-      await api.delete_message(requestBody);
+      const chatId = get().activeChat?.id;
+      if (!chatId) throw new Error('No active chat');
+      
+      await api.delete_message({ 
+        chat_id: chatId,
+        message_id: messageId 
+      });
       
       // Update local state
       set(state => ({
@@ -284,8 +291,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Delete a chat
   deleteChat: async (chatId: string) => {
     try {
-      const requestBody = JSON.stringify({ chat_id: chatId });
-      await api.delete_chat(requestBody);
+      await api.delete_chat({ chat_id: chatId });
       
       set(state => ({
         chats: state.chats.filter(chat => chat.id !== chatId),
@@ -299,8 +305,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Update settings
   updateSettings: async (settings: Settings) => {
     try {
-      const requestBody = JSON.stringify(settings);
-      await api.update_settings(requestBody);
+      await api.update_settings(settings);
       set({ settings });
     } catch (error) {
       set({ error: 'Failed to update settings' });
@@ -310,8 +315,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Update profile
   updateProfile: async (profile: UserProfile) => {
     try {
-      const requestBody = JSON.stringify(profile);
-      await api.update_profile(requestBody);
+      await api.update_profile(profile);
       set({ profile });
     } catch (error) {
       set({ error: 'Failed to update profile' });
@@ -321,8 +325,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Search chats
   searchChats: async (query: string) => {
     try {
-      const requestBody = JSON.stringify({ query });
-      return await api.search_chats(requestBody);
+      return await api.search_chats({ query });
     } catch (error) {
       set({ error: 'Failed to search chats' });
       return [];
@@ -529,8 +532,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Browser chat management
   createChatLink: async (singleUse: boolean) => {
     try {
-      const requestBody = JSON.stringify({ single_use: singleUse });
-      return await api.create_chat_link(requestBody);
+      const chatId = get().activeChat?.id;
+      if (!chatId) throw new Error('No active chat');
+      
+      return await api.create_chat_link({ 
+        chat_id: chatId,
+        single_use: singleUse 
+      });
     } catch (error) {
       set({ error: 'Failed to create chat link' });
       throw error;
@@ -548,8 +556,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   revokeChatKey: async (key: string) => {
     try {
-      const requestBody = JSON.stringify({ key });
-      await api.revoke_chat_key(requestBody);
+      await api.revoke_chat_key({ key });
       await get().loadChatKeys();
     } catch (error) {
       set({ error: 'Failed to revoke chat key' });

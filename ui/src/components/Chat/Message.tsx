@@ -101,15 +101,17 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       );
       
       if (existingReaction) {
-        await remove_reaction(JSON.stringify({ 
+        await remove_reaction({ 
+          chat_id: activeChat?.id || '',
           message_id: message.id, 
           emoji 
-        }));
+        });
       } else {
-        await add_reaction(JSON.stringify({ 
+        await add_reaction({ 
+          chat_id: activeChat?.id || '',
           message_id: message.id, 
           emoji 
-        }));
+        });
       }
       
       // Reload chats to get updated reactions

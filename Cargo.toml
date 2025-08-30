@@ -6,6 +6,7 @@ panic = "abort"
 [workspace]
 members = [
     "chat",
+    "send-bulk",
     "target/caller-util?",
 ]
 resolver = "2"

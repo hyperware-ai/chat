@@ -8,6 +8,7 @@
       "homepage:homepage:sys",
       "http-server:distro:sys",
       "kv:distro:sys",
+      "terminal:terminal:sys",
       "timer:distro:sys",
       "vfs:distro:sys"
     ],
@@ -15,6 +16,7 @@
       "homepage:homepage:sys",
       "http-server:distro:sys",
       "kv:distro:sys",
+      "terminal:terminal:sys",
       "timer:distro:sys",
       "vfs:distro:sys"
     ],

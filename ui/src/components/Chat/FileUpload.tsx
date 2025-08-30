@@ -30,15 +30,13 @@ const FileUpload: React.FC<FileUploadProps> = ({ onClose }) => {
               const base64 = (event.target.result as string).split(',')[1]; // Remove data URL prefix
               
               // Upload file
-              const requestBody = JSON.stringify({
+              await upload_file({
                 chat_id: activeChat.id,
                 filename: file.name,
                 mime_type: file.type || 'application/octet-stream',
                 data: base64,
                 reply_to: null
               });
-              
-              await upload_file(requestBody);
               await loadChats(); // Refresh to show new message
             }
           };

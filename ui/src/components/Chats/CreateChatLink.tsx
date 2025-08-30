@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { create_chat_link } from '../../../../target/ui/caller-utils';
+import { useChatStore } from '../../store/chat';
 import './CreateChatLink.css';
 
 interface CreateChatLinkProps {
@@ -7,6 +8,7 @@ interface CreateChatLinkProps {
 }
 
 export const CreateChatLink: React.FC<CreateChatLinkProps> = ({ onClose }) => {
+  const { activeChat } = useChatStore();
   const [singleUse, setSingleUse] = useState(false);
   const [generatedLink, setGeneratedLink] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -16,7 +18,14 @@ export const CreateChatLink: React.FC<CreateChatLinkProps> = ({ onClose }) => {
     setLoading(true);
     setError(null);
     try {
-      const link = await create_chat_link(JSON.stringify({ single_use: singleUse }));
+      if (!activeChat) {
+        setError('No active chat selected');
+        return;
+      }
+      const link = await create_chat_link({ 
+        chat_id: activeChat.id,
+        single_use: singleUse 
+      });
       const fullLink = `${window.location.origin}/public/join-${link}`;
       setGeneratedLink(fullLink);
     } catch (err) {
