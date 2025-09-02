@@ -33,6 +33,25 @@ use caller_utils::chat::{
 };
 
 // Notification structures matching the notifications server API
+#[derive(Serialize, Deserialize, Debug)]
+enum NotificationsAction {
+    SendNotification {
+        title: String,
+        body: String,
+        icon: Option<String>,
+        data: Option<serde_json::Value>,
+    },
+    GetPublicKey,
+    InitializeKeys,
+    AddSubscription {
+        subscription: PushSubscription,
+    },
+    RemoveSubscription {
+        endpoint: String,
+    },
+    ClearSubscriptions,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct PushSubscription {
     endpoint: String,
@@ -46,23 +65,13 @@ struct SubscriptionKeys {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-enum NotificationsAction {
-    SendNotification {
-        subscription: PushSubscription,
-        title: String,
-        body: String,
-        icon: Option<String>,
-        data: Option<serde_json::Value>,
-    },
-    GetPublicKey,
-    InitializeKeys,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 enum NotificationsResponse {
     NotificationSent,
     PublicKey(String),
     KeysInitialized,
+    SubscriptionAdded,
+    SubscriptionRemoved,
+    SubscriptionsCleared,
     Err(String),
 }
 
@@ -450,36 +459,7 @@ async fn send_push_notification_for_message(
     content: &str,
     chat_id: &str
 ) {
-    // Get push subscription from homepage
-    let homepage_address = Address::new(
-        &our().node,
-        ProcessId::new(Some("homepage"), "homepage", "sys")
-    );
-
-    // Request push subscription from homepage
-    let request = Request::to(homepage_address.clone())
-        .body(HomepageRequest::GetPushSubscription)
-        .expects_response(5);
-
-    let Ok(HomepageResponse::PushSubscription(subscription_opt)) = send::<HomepageResponse>(request).await else {
-        println!("Failed to get push subscription from homepage");
-        return;
-    };
-
-    // Check if we have a subscription
-    let Some(subscription_json_str) = subscription_opt else {
-        println!("notification: No push subscription available");
-        return;
-    };
-
-    // The subscription is returned as a JSON string, so we need to parse it
-    let Ok(subscription) = serde_json::from_str::<PushSubscription>(&subscription_json_str) else {
-        println!("notification: Failed to parse subscription from JSON string");
-        return;
-    };
-
-    println!("Successfully parsed push subscription");
-    // Send notification to notifications server
+    // Send notification to notifications server (it will send to all registered devices)
     let notifications_address = Address::new(
         &our().node,
         ProcessId::new(Some("notifications"), "distro", "sys")
@@ -493,7 +473,6 @@ async fn send_push_notification_for_message(
     };
 
     let notification_action = NotificationsAction::SendNotification {
-        subscription,
         title: format!("Message from {}", sender),
         body: truncated_content,
         icon: Some("/icon-180.png".to_string()),
