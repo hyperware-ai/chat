@@ -11,7 +11,9 @@ use hyperware_process_lib::{
     vfs,
     LazyLoadBlob,
     Address,
-    hyperapp::{SaveOptions, spawn, sleep},
+    ProcessId,
+    Request,
+    hyperapp::{SaveOptions, send, sleep, spawn},
 };
 use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use serde_json;
@@ -29,6 +31,40 @@ use caller_utils::app::{
     receive_message_ack_remote_rpc,
     receive_reaction_remote_rpc,
 };
+
+// Notification structures matching the notifications server API
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct PushSubscription {
+    endpoint: String,
+    keys: SubscriptionKeys,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct SubscriptionKeys {
+    p256dh: String,
+    auth: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum NotificationsAction {
+    SendNotification {
+        subscription: PushSubscription,
+        title: String,
+        body: String,
+        icon: Option<String>,
+        data: Option<serde_json::Value>,
+    },
+    GetPublicKey,
+    InitializeKeys,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum NotificationsResponse {
+    NotificationSent,
+    PublicKey(String),
+    KeysInitialized,
+    Err(String),
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ChatMessage {
@@ -394,6 +430,111 @@ fn base64_encode(data: &[u8]) -> String {
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
     ::base64::decode(input)
+}
+
+// Helper function to send push notification for a message
+async fn send_push_notification_for_message(
+    sender: &str,
+    content: &str,
+    chat_id: &str
+) {
+    // Get push subscription from homepage
+    let homepage_address = Address::new(
+        &our().node,
+        ProcessId::new(Some("homepage"), "homepage", "sys")
+    );
+
+    // Request push subscription from homepage
+    match Request::to(homepage_address.clone())
+        .body(b"\"GetPushSubscription\"")
+        .send_and_await_response(5)
+    {
+        Ok(Ok(response)) => {
+            // Parse the response to get subscription
+            if let Ok(resp_value) = serde_json::from_slice::<serde_json::Value>(response.body()) {
+                println!("Got homepage response: {:?}", resp_value);
+                // Check if we have a PushSubscription response
+                if let Some(subscription_json) = resp_value.get("PushSubscription") {
+                    if !subscription_json.is_null() {
+                        // The subscription is returned as a JSON string, so we need to parse it twice
+                        let subscription_str = if subscription_json.is_string() {
+                            subscription_json.as_str().unwrap_or("")
+                        } else {
+                            // If it's already an object, convert it back to string
+                            &serde_json::to_string(&subscription_json).unwrap_or_default()
+                        };
+
+                        // Parse the subscription data from the JSON string
+                        if let Ok(subscription) = serde_json::from_str::<PushSubscription>(subscription_str) {
+                            println!("Successfully parsed push subscription");
+                            // Send notification to notifications server
+                            let notifications_address = Address::new(
+                                &our().node,
+                                ProcessId::new(Some("notifications"), "distro", "sys")
+                            );
+
+                            // Truncate message for notification
+                            let truncated_content = if content.len() > 100 {
+                                format!("{}...", &content[..97])
+                            } else {
+                                content.to_string()
+                            };
+
+                            let notification_action = NotificationsAction::SendNotification {
+                                subscription,
+                                title: format!("Message from {}", sender),
+                                body: truncated_content,
+                                icon: Some("/icon-180.png".to_string()),
+                                data: Some(serde_json::json!({
+                                    "url": format!("/chat#{}", chat_id),
+                                    "chat_id": chat_id,
+                                    "sender": sender,
+                                    "appId": "chat:chat:nick.os",
+                                    "appLabel": "Chat"
+                                })),
+                            };
+
+                            // Send the notification request
+                            println!("Sending notification to notifications:distro:sys");
+                            let request = Request::to(notifications_address)
+                                .body(serde_json::to_vec(&notification_action).unwrap());
+                            match send::<NotificationsResponse>(request).await
+                            {
+                                Ok(resp) => {
+                                    println!("Push notification response: {:?}", resp);
+                                    match resp {
+                                        NotificationsResponse::NotificationSent => {
+                                            println!("Push notification sent successfully");
+                                        }
+                                        NotificationsResponse::Err(e) => {
+                                            println!("Notification server error: {}", e);
+                                        }
+                                        _ => {
+                                            println!("Unexpected notification response");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("Error sending notification request: {:?}", e);
+                                }
+                            }
+                        } else {
+                            println!("notification: Failed to parse subscription from string: {}", subscription_str);
+                        }
+                    } else {
+                        println!("notification: No push subscription available (null)");
+                    }
+                } else {
+                    println!("notification: No PushSubscription field in response: {:?}", resp_value);
+                }
+            } else {
+                println!("notification: Failed to parse homepage response as JSON");
+            }
+        }
+        _ => {
+            println!("Failed to get push subscription from homepage");
+        }
+    }
 }
 
 // HYPERPROCESS IMPLEMENTATION
@@ -1298,16 +1439,16 @@ impl AppState {
 
         if !queued_messages.is_empty() {
             println!("receive_chat_creation: Found {} queued messages for {}", queued_messages.len(), counterparty);
-            
+
             // Try to deliver queued messages now that we know the counterparty is online
             let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
             let delivery_queue = self.delivery_queue.clone();
-            
+
             spawn(async move {
                 for msg in queued_messages {
                     let msg_json = serde_json::to_value(&msg).unwrap();
                     let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
-                    
+
                     match receive_message_remote_rpc(&target, msg_for_rpc).await {
                         Ok(_) => {
                             println!("Successfully delivered queued message {} to {}", msg.id, counterparty);
@@ -1450,6 +1591,18 @@ impl AppState {
             send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
                 mime: Some("application/json".to_string()),
                 bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
+            });
+        }
+
+        // Send push notification if user has notifications enabled
+        if chat.notify && self.settings.notify_chats {
+            // Try to send a push notification
+            spawn(async move {
+                send_push_notification_for_message(
+                    &updated_message.sender,
+                    &updated_message.content,
+                    &chat_id
+                ).await;
             });
         }
 
