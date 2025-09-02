@@ -25,7 +25,7 @@ use flate2::Compression;
 use std::io::{Write, Read};
 
 // Import generated RPC functions from caller-utils
-use caller_utils::app::{
+use caller_utils::chat::{
     receive_chat_creation_remote_rpc,
     receive_message_remote_rpc,
     receive_message_ack_remote_rpc,
@@ -330,10 +330,22 @@ pub struct SearchChatsReq {
     pub query: String,
 }
 
+// just the ones we care about
+#[derive(Serialize, Deserialize, Clone, Debug, process_macros::SerdeJsonInto)]
+enum HomepageRequest {
+    GetPushSubscription
+}
+
+// just the ones we care about
+#[derive(Serialize, Deserialize, Clone, Debug, process_macros::SerdeJsonInto)]
+enum HomepageResponse {
+    PushSubscription(Option<String>)
+}
+
 // APP STATE
 
 #[derive(Serialize, Deserialize)]
-pub struct AppState {
+pub struct ChatState {
     pub profile: UserProfile,
     pub chats: HashMap<String, Chat>,
     pub chat_keys: HashMap<String, ChatKey>,
@@ -350,9 +362,9 @@ fn default_delivery_queue() -> Arc<Mutex<HashMap<String, Vec<ChatMessage>>>> {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-impl Default for AppState {
+impl Default for ChatState {
     fn default() -> Self {
-        AppState {
+        ChatState {
             profile: UserProfile::default(),
             chats: HashMap::new(),
             chat_keys: HashMap::new(),
@@ -445,27 +457,16 @@ async fn send_push_notification_for_message(
     );
 
     // Request push subscription from homepage
-    match Request::to(homepage_address.clone())
-        .body(b"\"GetPushSubscription\"")
-        .send_and_await_response(5)
+    let request = Request::to(homepage_address.clone())
+        .body(HomepageRequest::GetPushSubscription)
+        .expects_response(5);
+    match send::<HomepageResponse>(request).await
     {
-        Ok(Ok(response)) => {
-            // Parse the response to get subscription
-            if let Ok(resp_value) = serde_json::from_slice::<serde_json::Value>(response.body()) {
-                println!("Got homepage response: {:?}", resp_value);
-                // Check if we have a PushSubscription response
-                if let Some(subscription_json) = resp_value.get("PushSubscription") {
-                    if !subscription_json.is_null() {
-                        // The subscription is returned as a JSON string, so we need to parse it twice
-                        let subscription_str = if subscription_json.is_string() {
-                            subscription_json.as_str().unwrap_or("")
-                        } else {
-                            // If it's already an object, convert it back to string
-                            &serde_json::to_string(&subscription_json).unwrap_or_default()
-                        };
-
-                        // Parse the subscription data from the JSON string
-                        if let Ok(subscription) = serde_json::from_str::<PushSubscription>(subscription_str) {
+        Ok(HomepageResponse::PushSubscription(subscription_opt)) => {
+            // Check if we have a subscription
+            if let Some(subscription_json_str) = subscription_opt {
+                // The subscription is returned as a JSON string, so we need to parse it
+                if let Ok(subscription) = serde_json::from_str::<PushSubscription>(&subscription_json_str) {
                             println!("Successfully parsed push subscription");
                             // Send notification to notifications server
                             let notifications_address = Address::new(
@@ -497,7 +498,8 @@ async fn send_push_notification_for_message(
                             // Send the notification request
                             println!("Sending notification to notifications:distro:sys");
                             let request = Request::to(notifications_address)
-                                .body(serde_json::to_vec(&notification_action).unwrap());
+                                .body(serde_json::to_vec(&notification_action).unwrap())
+                                .expects_response(5);
                             match send::<NotificationsResponse>(request).await
                             {
                                 Ok(resp) => {
@@ -518,17 +520,11 @@ async fn send_push_notification_for_message(
                                     println!("Error sending notification request: {:?}", e);
                                 }
                             }
-                        } else {
-                            println!("notification: Failed to parse subscription from string: {}", subscription_str);
-                        }
-                    } else {
-                        println!("notification: No push subscription available (null)");
-                    }
                 } else {
-                    println!("notification: No PushSubscription field in response: {:?}", resp_value);
+                    println!("notification: Failed to parse subscription from JSON string");
                 }
             } else {
-                println!("notification: Failed to parse homepage response as JSON");
+                println!("notification: No push subscription available");
             }
         }
         _ => {
@@ -561,10 +557,9 @@ async fn send_push_notification_for_message(
         }
     ],
     save_config = SaveOptions::OnDiff,
-    wit_world = "chat-app-dot-os-v0"
+    wit_world = "chat-ware-dot-hypr-v0"
 )]
-impl AppState {
-
+impl ChatState {
     #[init]
     async fn initialize(&mut self) {
         add_to_homepage("Chat", None, Some("/"), None);
@@ -1829,7 +1824,7 @@ impl AppState {
 }
 
 // Helper methods implementation
-impl AppState {
+impl ChatState {
     // Normalize chat ID to prevent duplicates
     // Always returns the ID in alphabetical order: "nodeA:nodeB"
     fn normalize_chat_id(node1: &str, node2: &str) -> String {
