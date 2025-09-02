@@ -460,75 +460,75 @@ async fn send_push_notification_for_message(
     let request = Request::to(homepage_address.clone())
         .body(HomepageRequest::GetPushSubscription)
         .expects_response(5);
-    match send::<HomepageResponse>(request).await
-    {
-        Ok(HomepageResponse::PushSubscription(subscription_opt)) => {
-            // Check if we have a subscription
-            if let Some(subscription_json_str) = subscription_opt {
-                // The subscription is returned as a JSON string, so we need to parse it
-                if let Ok(subscription) = serde_json::from_str::<PushSubscription>(&subscription_json_str) {
-                            println!("Successfully parsed push subscription");
-                            // Send notification to notifications server
-                            let notifications_address = Address::new(
-                                &our().node,
-                                ProcessId::new(Some("notifications"), "distro", "sys")
-                            );
 
-                            // Truncate message for notification
-                            let truncated_content = if content.len() > 100 {
-                                format!("{}...", &content[..97])
-                            } else {
-                                content.to_string()
-                            };
+    let Ok(HomepageResponse::PushSubscription(subscription_opt)) = send::<HomepageResponse>(request).await else {
+        println!("Failed to get push subscription from homepage");
+        return;
+    };
 
-                            let notification_action = NotificationsAction::SendNotification {
-                                subscription,
-                                title: format!("Message from {}", sender),
-                                body: truncated_content,
-                                icon: Some("/icon-180.png".to_string()),
-                                data: Some(serde_json::json!({
-                                    "url": format!("/chat#{}", chat_id),
-                                    "chat_id": chat_id,
-                                    "sender": sender,
-                                    "appId": "chat:chat:nick.os",
-                                    "appLabel": "Chat"
-                                })),
-                            };
+    // Check if we have a subscription
+    let Some(subscription_json_str) = subscription_opt else {
+        println!("notification: No push subscription available");
+        return;
+    };
 
-                            // Send the notification request
-                            println!("Sending notification to notifications:distro:sys");
-                            let request = Request::to(notifications_address)
-                                .body(serde_json::to_vec(&notification_action).unwrap())
-                                .expects_response(5);
-                            match send::<NotificationsResponse>(request).await
-                            {
-                                Ok(resp) => {
-                                    println!("Push notification response: {:?}", resp);
-                                    match resp {
-                                        NotificationsResponse::NotificationSent => {
-                                            println!("Push notification sent successfully");
-                                        }
-                                        NotificationsResponse::Err(e) => {
-                                            println!("Notification server error: {}", e);
-                                        }
-                                        _ => {
-                                            println!("Unexpected notification response");
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    println!("Error sending notification request: {:?}", e);
-                                }
-                            }
-                } else {
-                    println!("notification: Failed to parse subscription from JSON string");
+    // The subscription is returned as a JSON string, so we need to parse it
+    let Ok(subscription) = serde_json::from_str::<PushSubscription>(&subscription_json_str) else {
+        println!("notification: Failed to parse subscription from JSON string");
+        return;
+    };
+
+    println!("Successfully parsed push subscription");
+    // Send notification to notifications server
+    let notifications_address = Address::new(
+        &our().node,
+        ProcessId::new(Some("notifications"), "distro", "sys")
+    );
+
+    // Truncate message for notification
+    let truncated_content = if content.len() > 100 {
+        format!("{}...", &content[..97])
+    } else {
+        content.to_string()
+    };
+
+    let notification_action = NotificationsAction::SendNotification {
+        subscription,
+        title: format!("Message from {}", sender),
+        body: truncated_content,
+        icon: Some("/icon-180.png".to_string()),
+        data: Some(serde_json::json!({
+            "url": format!("/chat#{}", chat_id),
+            "chat_id": chat_id,
+            "sender": sender,
+            "appId": "chat:chat:nick.os",
+            "appLabel": "Chat"
+        })),
+    };
+
+    // Send the notification request
+    println!("Sending notification to notifications:distro:sys");
+    let request = Request::to(notifications_address)
+        .body(serde_json::to_vec(&notification_action).unwrap())
+        .expects_response(5);
+
+    match send::<NotificationsResponse>(request).await {
+        Ok(resp) => {
+            println!("Push notification response: {:?}", resp);
+            match resp {
+                NotificationsResponse::NotificationSent => {
+                    println!("Push notification sent successfully");
                 }
-            } else {
-                println!("notification: No push subscription available");
+                NotificationsResponse::Err(e) => {
+                    println!("Notification server error: {}", e);
+                }
+                _ => {
+                    println!("Unexpected notification response");
+                }
             }
         }
-        _ => {
-            println!("Failed to get push subscription from homepage");
+        Err(e) => {
+            println!("Error sending notification request: {:?}", e);
         }
     }
 }
