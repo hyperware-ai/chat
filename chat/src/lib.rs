@@ -480,7 +480,7 @@ async fn send_push_notification_for_message(
             "url": format!("/chat#{}", chat_id),
             "chat_id": chat_id,
             "sender": sender,
-            "appId": "chat:chat:nick.os",
+            "appId": "chat:chat:ware.hypr",
             "appLabel": "Chat"
         })),
     };
