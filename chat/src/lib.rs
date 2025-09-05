@@ -25,12 +25,14 @@ use flate2::Compression;
 use std::io::{Write, Read};
 
 // Import generated RPC functions from caller-utils
-use caller_utils::chat::{
+use chat_caller_utils::chat::{
     receive_chat_creation_remote_rpc,
     receive_message_remote_rpc,
     receive_message_ack_remote_rpc,
     receive_reaction_remote_rpc,
 };
+use chat_caller_utils::ChatMessage as CUChatMessage;
+
 
 // Notification structures matching the notifications server API
 #[derive(Serialize, Deserialize, Debug)]
@@ -611,7 +613,7 @@ impl ChatState {
 
                         // Try to send using generated RPC method
                         let msg_json = serde_json::to_value(&msg).unwrap();
-                        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+                        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
 
                         match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
                             Ok(_) => {
@@ -775,7 +777,7 @@ impl ChatState {
         spawn(async move {
             // Try to send using generated RPC method and queue if it fails
             let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-            let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+            let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
             match receive_message_remote_rpc(&target, msg_for_rpc).await {
                 Ok(_) => {
                     println!("Message {} sent successfully to {}", message_id_clone, counterparty);
@@ -945,7 +947,7 @@ impl ChatState {
 
             // Send using generated RPC method
             let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-            let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+            let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
             match receive_message_remote_rpc(&target, msg_for_rpc).await {
                 Ok(_) => {
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
@@ -1225,7 +1227,7 @@ impl ChatState {
         // Send using generated RPC method
         // Convert our local type to the generated type via JSON serialization
         let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
         match receive_message_remote_rpc(&target, msg_for_rpc).await {
             Ok(_) => {
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
@@ -1322,7 +1324,7 @@ impl ChatState {
         // Send using generated RPC method
         // Convert our local type to the generated type via JSON serialization
         let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-        let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
         match receive_message_remote_rpc(&target, msg_for_rpc).await {
             Ok(_) => {
                 if let Some(chat) = self.chats.get_mut(&req.chat_id) {
@@ -1421,7 +1423,7 @@ impl ChatState {
             spawn(async move {
                 for msg in queued_messages {
                     let msg_json = serde_json::to_value(&msg).unwrap();
-                    let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+                    let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
 
                     match receive_message_remote_rpc(&target, msg_for_rpc).await {
                         Ok(_) => {
@@ -1839,7 +1841,7 @@ impl ChatState {
 
                 // Try to send using generated RPC method
                 let msg_json = serde_json::to_value(&msg).unwrap();
-                let msg_for_rpc: caller_utils::ChatMessage = serde_json::from_value(msg_json).unwrap();
+                let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
 
                 match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
                     Ok(_) => {

@@ -7,6 +7,6 @@ panic = "abort"
 members = [
     "chat",
     "send-bulk",
-    "target/caller-util?",
+    "target/chat-caller-util?",
 ]
 resolver = "2"
