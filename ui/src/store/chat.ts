@@ -9,6 +9,7 @@ import {
 import type { WsServerMessage } from '../types/chat';
 import * as api from '../utils/chatApi';
 import { ChatWebSocket } from '../utils/websocket';
+import { browserStorage } from '../utils/storage';
 
 interface ChatStore {
   // State
@@ -28,6 +29,7 @@ interface ChatStore {
   // Actions
   initialize: () => Promise<void>;
   loadChats: () => Promise<void>;
+  loadChatsWithDiff: () => Promise<void>;
   loadProfile: () => Promise<void>;
   loadSettings: () => Promise<void>;
   createChat: (counterparty: string) => Promise<void>;
@@ -87,11 +89,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (our?.node) {
         set({ nodeId: our.node, isConnected: true });
         
-        // Load initial data
+        // Try to load from browser storage first
+        const storedState = browserStorage.loadChatState();
+        if (storedState && storedState.chats.length > 0) {
+          // Load stored state immediately for instant UI
+          set({ chats: storedState.chats });
+          
+          // Mark as needing sync
+          console.log('[Storage] Loaded cached state with', storedState.chats.length, 'chats');
+        }
+        
+        // Load initial data (this will sync with server)
         await Promise.all([
           get().loadProfile(),
           get().loadSettings(),
-          get().loadChats(),
+          get().loadChatsWithDiff(), // Use new diff-based loading
         ]);
         
         // Connect WebSocket
@@ -111,8 +123,51 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const chats = await api.get_chats();
       set({ chats });
+      // Save to browser storage
+      browserStorage.saveChatState(chats);
     } catch (error) {
       set({ error: 'Failed to load chats' });
+    }
+  },
+
+  // Load chats with diff-based synchronization
+  loadChatsWithDiff: async () => {
+    try {
+      const storedState = browserStorage.loadChatState();
+      
+      // For now, still fetch all chats from server
+      // In a future optimization, we would send a sync request with timestamps/hashes
+      // and the server would return only the changes
+      const serverChats = await api.get_chats();
+      
+      if (storedState && storedState.chats.length > 0) {
+        // Generate diff between stored and server state
+        const diff = browserStorage.generateDiff(storedState.chats, serverChats);
+        
+        // Log diff stats for debugging
+        console.log('[Storage] Diff stats:', {
+          newChats: diff.newChats.length,
+          updatedChats: diff.updatedChats.length,
+          deletedChats: diff.deletedChatIds.length,
+          newMessages: Object.keys(diff.newMessages).length,
+          updatedMessages: Object.keys(diff.updatedMessages).length,
+        });
+        
+        // Apply the diff to get the final state
+        const mergedChats = browserStorage.applyDiff(storedState.chats, diff);
+        set({ chats: mergedChats });
+        
+        // Save the updated state
+        browserStorage.saveChatState(mergedChats);
+      } else {
+        // No stored state, use server data directly
+        set({ chats: serverChats });
+        browserStorage.saveChatState(serverChats);
+      }
+    } catch (error) {
+      console.error('[Storage] Failed to load chats with diff:', error);
+      // Fallback to regular loading
+      await get().loadChats();
     }
   },
 
@@ -191,8 +246,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       });
       
       // Replace optimistic message with real message from API
-      set(state => ({
-        chats: state.chats.map(chat => 
+      set(state => {
+        const updatedChats = state.chats.map(chat => 
           chat.id === chatId 
             ? { 
                 ...chat, 
@@ -202,16 +257,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 last_activity: message.timestamp 
               }
             : chat
-        ),
-        activeChat: state.activeChat?.id === chatId 
-          ? { 
-              ...state.activeChat, 
-              messages: state.activeChat.messages.map(m => 
-                m.id === tempId ? message : m
-              ) 
-            }
-          : state.activeChat,
-      }));
+        );
+        
+        // Save to browser storage
+        browserStorage.saveChatState(updatedChats);
+        
+        return {
+          chats: updatedChats,
+          activeChat: state.activeChat?.id === chatId 
+            ? { 
+                ...state.activeChat, 
+                messages: state.activeChat.messages.map(m => 
+                  m.id === tempId ? message : m
+                ) 
+              }
+            : state.activeChat,
+        };
+      });
       
     } catch (error) {
       // On error, update the optimistic message to show failed status
@@ -277,19 +339,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       });
       
       // Update local state
-      set(state => ({
-        chats: state.chats.map(chat => ({
+      set(state => {
+        const updatedChats = state.chats.map(chat => ({
           ...chat,
           messages: chat.messages.filter(msg => msg.id !== messageId)
-        })),
-        // Also update activeChat if it's the same chat
-        activeChat: state.activeChat?.id === chatId 
-          ? { 
-              ...state.activeChat, 
-              messages: state.activeChat.messages.filter(msg => msg.id !== messageId) 
-            }
-          : state.activeChat
-      }));
+        }));
+        
+        // Save to browser storage
+        browserStorage.saveChatState(updatedChats);
+        
+        return {
+          chats: updatedChats,
+          // Also update activeChat if it's the same chat
+          activeChat: state.activeChat?.id === chatId 
+            ? { 
+                ...state.activeChat, 
+                messages: state.activeChat.messages.filter(msg => msg.id !== messageId) 
+              }
+            : state.activeChat
+        };
+      });
     } catch (error) {
       set({ error: 'Failed to delete message' });
     }
@@ -461,6 +530,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           };
         }
         
+        // Save updated state to browser storage
+        browserStorage.saveChatState(newChats);
+        
         return { 
           chats: newChats,
           activeChat: updatedActiveChat
@@ -522,6 +594,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           
           console.log('[WS] Updated chats after NewMessage. Found:', foundChat);
           console.log('[WS] ActiveChat updated:', updatedActiveChat !== state.activeChat);
+          
+          // Save updated state to browser storage
+          if (foundChat) {
+            browserStorage.saveChatState(updatedChats);
+          }
+          
           return {
             chats: updatedChats,
             activeChat: updatedActiveChat
