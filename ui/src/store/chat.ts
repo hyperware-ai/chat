@@ -281,7 +281,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         chats: state.chats.map(chat => ({
           ...chat,
           messages: chat.messages.filter(msg => msg.id !== messageId)
-        }))
+        })),
+        // Also update activeChat if it's the same chat
+        activeChat: state.activeChat?.id === chatId 
+          ? { 
+              ...state.activeChat, 
+              messages: state.activeChat.messages.filter(msg => msg.id !== messageId) 
+            }
+          : state.activeChat
       }));
     } catch (error) {
       set({ error: 'Failed to delete message' });
