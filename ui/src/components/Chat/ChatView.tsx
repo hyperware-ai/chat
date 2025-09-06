@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useChatStore } from '../../store/chat';
 import MessageList from './MessageList';
 import MessageInput from './MessageInput';
@@ -6,7 +6,14 @@ import ChatHeader from './ChatHeader';
 import './ChatView.css';
 
 const ChatView: React.FC = () => {
-  const { activeChat, markChatAsRead, setActiveChat } = useChatStore();
+  const { 
+    activeChat, 
+    markChatAsRead, 
+    setActiveChat, 
+    loadOlderMessages,
+    isLoadingOlderMessages,
+    hasMoreMessages 
+  } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [swipeX, setSwipeX] = useState(0);
@@ -16,6 +23,8 @@ const ChatView: React.FC = () => {
   const startXRef = useRef(0);
   const startYRef = useRef(0);
   const chatViewRef = useRef<HTMLDivElement>(null);
+  const previousScrollHeightRef = useRef(0);
+  const isLoadingRef = useRef(false);
 
   useEffect(() => {
     if (activeChat) {
@@ -45,23 +54,46 @@ const ChatView: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeChat?.messages]);
 
-  // Check if scrolled to bottom
+  // Check if scrolled to bottom and handle infinite scroll
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
 
-    const checkScroll = () => {
+    const handleScroll = async () => {
       const { scrollTop, scrollHeight, clientHeight } = container;
-      // Consider "at bottom" if within 100px of bottom
+      
+      // Check if at bottom for scroll button
       const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
       setShowScrollButton(!isAtBottom);
+      
+      // Check if scrolled to top for infinite scroll
+      if (scrollTop < 100 && !isLoadingRef.current && activeChat) {
+        const canLoadMore = hasMoreMessages[activeChat.id] !== false;
+        
+        if (canLoadMore && !isLoadingOlderMessages) {
+          isLoadingRef.current = true;
+          previousScrollHeightRef.current = scrollHeight;
+          
+          await loadOlderMessages(activeChat.id);
+          
+          // After loading, maintain scroll position
+          setTimeout(() => {
+            if (container) {
+              const newScrollHeight = container.scrollHeight;
+              const scrollDiff = newScrollHeight - previousScrollHeightRef.current;
+              container.scrollTop = scrollTop + scrollDiff;
+            }
+            isLoadingRef.current = false;
+          }, 100);
+        }
+      }
     };
 
-    container.addEventListener('scroll', checkScroll);
-    checkScroll(); // Check initial state
+    container.addEventListener('scroll', handleScroll);
+    handleScroll(); // Check initial state
 
-    return () => container.removeEventListener('scroll', checkScroll);
-  }, [activeChat]);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [activeChat, loadOlderMessages, isLoadingOlderMessages, hasMoreMessages]);
 
   // Hide tooltip when user sends a message or taps
   const handleUserInteraction = () => {
@@ -149,6 +181,16 @@ const ChatView: React.FC = () => {
       )}
 
       <div className="messages-container" ref={messagesContainerRef}>
+        {isLoadingOlderMessages && (
+          <div style={{ 
+            padding: '10px', 
+            textAlign: 'center', 
+            color: 'var(--text-secondary)',
+            fontSize: '14px'
+          }}>
+            Loading older messages...
+          </div>
+        )}
         <MessageList messages={activeChat.messages} />
         <div ref={messagesEndRef} />
       </div>

@@ -24,12 +24,16 @@ interface ChatStore {
   connectionStatus: 'connected' | 'disconnected' | 'connecting';
   error: string | null;
   isLoading: boolean;
+  isLoadingOlderMessages: boolean;
+  hasMoreMessages: Record<string, boolean>; // chatId -> boolean
+  oldestMessageTimestamp: Record<string, number>; // chatId -> timestamp
   replyingTo: any | null; // Message being replied to
   
   // Actions
   initialize: () => Promise<void>;
   loadChats: () => Promise<void>;
   loadChatsWithDiff: () => Promise<void>;
+  loadOlderMessages: (chatId: string) => Promise<void>;
   loadProfile: () => Promise<void>;
   loadSettings: () => Promise<void>;
   createChat: (counterparty: string) => Promise<void>;
@@ -77,6 +81,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   connectionStatus: 'disconnected',
   error: null,
   isLoading: false,
+  isLoadingOlderMessages: false,
+  hasMoreMessages: {},
+  oldestMessageTimestamp: {},
   replyingTo: null,
 
   // Initialize the app
@@ -140,9 +147,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // and the server would return only the changes
       const serverChats = await api.get_chats();
       
+      // Limit initial messages to last 50 per chat for performance
+      const limitedChats = serverChats.map(chat => ({
+        ...chat,
+        messages: chat.messages.slice(-50) // Take last 50 messages
+      }));
+      
+      // Mark chats that might have more messages
+      const hasMore: Record<string, boolean> = {};
+      serverChats.forEach(chat => {
+        // If server has more than 50 messages, there might be more to load
+        hasMore[chat.id] = chat.messages.length > 50;
+      });
+      
       if (storedState && storedState.chats.length > 0) {
         // Generate diff between stored and server state
-        const diff = browserStorage.generateDiff(storedState.chats, serverChats);
+        const diff = browserStorage.generateDiff(storedState.chats, limitedChats);
         
         // Log diff stats for debugging
         console.log('[Storage] Diff stats:', {
@@ -155,19 +175,116 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         
         // Apply the diff to get the final state
         const mergedChats = browserStorage.applyDiff(storedState.chats, diff);
-        set({ chats: mergedChats });
+        set({ 
+          chats: mergedChats,
+          hasMoreMessages: hasMore 
+        });
         
         // Save the updated state
         browserStorage.saveChatState(mergedChats);
       } else {
         // No stored state, use server data directly
-        set({ chats: serverChats });
-        browserStorage.saveChatState(serverChats);
+        set({ 
+          chats: limitedChats,
+          hasMoreMessages: hasMore 
+        });
+        browserStorage.saveChatState(limitedChats);
       }
     } catch (error) {
       console.error('[Storage] Failed to load chats with diff:', error);
       // Fallback to regular loading
       await get().loadChats();
+    }
+  },
+
+  // Load older messages for pagination
+  loadOlderMessages: async (chatId: string) => {
+    const state = get();
+    
+    // Don't load if already loading or no more messages
+    if (state.isLoadingOlderMessages || state.hasMoreMessages[chatId] === false) {
+      return;
+    }
+    
+    try {
+      set({ isLoadingOlderMessages: true });
+      
+      // Get the oldest message timestamp for this chat
+      const chat = state.chats.find(c => c.id === chatId);
+      if (!chat || chat.messages.length === 0) {
+        set({ isLoadingOlderMessages: false });
+        return;
+      }
+      
+      const oldestTimestamp = Math.min(...chat.messages.map(m => m.timestamp));
+      
+      // Load messages before the oldest timestamp
+      const olderMessages = await api.get_messages_paginated({
+        chat_id: chatId,
+        before_timestamp: oldestTimestamp,
+        limit: 50
+      });
+      
+      if (olderMessages.length === 0) {
+        // No more messages to load
+        set(state => ({
+          hasMoreMessages: { ...state.hasMoreMessages, [chatId]: false },
+          isLoadingOlderMessages: false
+        }));
+        return;
+      }
+      
+      // Prepend older messages to the chat
+      set(state => {
+        const updatedChats = state.chats.map(chat => {
+          if (chat.id === chatId) {
+            // Merge older messages with existing ones
+            const existingIds = new Set(chat.messages.map(m => m.id));
+            const newMessages = olderMessages.filter(m => !existingIds.has(m.id));
+            
+            return {
+              ...chat,
+              messages: [...newMessages, ...chat.messages]
+            };
+          }
+          return chat;
+        });
+        
+        // Update activeChat if it's the same chat
+        let updatedActiveChat = state.activeChat;
+        if (state.activeChat?.id === chatId) {
+          const existingIds = new Set(state.activeChat.messages.map(m => m.id));
+          const newMessages = olderMessages.filter(m => !existingIds.has(m.id));
+          
+          updatedActiveChat = {
+            ...state.activeChat,
+            messages: [...newMessages, ...state.activeChat.messages]
+          };
+        }
+        
+        // Save to browser storage
+        browserStorage.saveChatState(updatedChats);
+        
+        return {
+          chats: updatedChats,
+          activeChat: updatedActiveChat,
+          isLoadingOlderMessages: false,
+          hasMoreMessages: { 
+            ...state.hasMoreMessages, 
+            [chatId]: olderMessages.length === 50 // If we got full page, there might be more
+          },
+          oldestMessageTimestamp: {
+            ...state.oldestMessageTimestamp,
+            [chatId]: Math.min(...olderMessages.map(m => m.timestamp))
+          }
+        };
+      });
+    } catch (error) {
+      console.error('[Pagination] Failed to load older messages:', error);
+      set({ 
+        error: 'Failed to load older messages',
+        isLoadingOlderMessages: false 
+      });
     }
   },
 
