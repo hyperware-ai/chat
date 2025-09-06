@@ -40,3 +40,49 @@
   width: 100%;
   cursor: pointer;
 }
+
+/* Upload progress styles */
+.upload-progress-container {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 10px;
+}
+
+.upload-progress-item {
+  margin-bottom: 15px;
+}
+
+.upload-progress-item:last-child {
+  margin-bottom: 0;
+}
+
+.upload-filename {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-progress-bar {
+  height: 6px;
+  background: var(--border-color);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+
+.upload-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.upload-progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+}
