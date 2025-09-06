@@ -1571,8 +1571,9 @@ impl ChatState {
             });
         }
 
-        // Send push notification if user has notifications enabled
-        if chat.notify && self.settings.notify_chats {
+        // Send push notification if user has notifications enabled AND no active WebSocket connection
+        // We check if there are any WebSocket connections for this node - if yes, the user is actively using the app
+        if chat.notify && self.settings.notify_chats && self.ws_connections.is_empty() {
             // Try to send a push notification
             spawn(async move {
                 send_push_notification_for_message(
