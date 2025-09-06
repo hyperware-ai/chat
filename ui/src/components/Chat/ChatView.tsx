@@ -8,9 +8,11 @@ import './ChatView.css';
 const ChatView: React.FC = () => {
   const { activeChat, markChatAsRead, setActiveChat } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [swipeX, setSwipeX] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
   const [showOfflineTooltip, setShowOfflineTooltip] = useState(false);
+  const [showScrollButton, setShowScrollButton] = useState(false);
   const startXRef = useRef(0);
   const startYRef = useRef(0);
   const chatViewRef = useRef<HTMLDivElement>(null);
@@ -43,9 +45,32 @@ const ChatView: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeChat?.messages]);
 
+  // Check if scrolled to bottom
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const checkScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      // Consider "at bottom" if within 100px of bottom
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
+      setShowScrollButton(!isAtBottom);
+    };
+
+    container.addEventListener('scroll', checkScroll);
+    checkScroll(); // Check initial state
+
+    return () => container.removeEventListener('scroll', checkScroll);
+  }, [activeChat]);
+
   // Hide tooltip when user sends a message or taps
   const handleUserInteraction = () => {
     setShowOfflineTooltip(false);
+  };
+
+  // Scroll to bottom function
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
   // Swipe handlers for navigation
@@ -123,10 +148,20 @@ const ChatView: React.FC = () => {
         </div>
       )}
 
-      <div className="messages-container">
+      <div className="messages-container" ref={messagesContainerRef}>
         <MessageList messages={activeChat.messages} />
         <div ref={messagesEndRef} />
       </div>
+
+      {showScrollButton && (
+        <button 
+          className="scroll-to-bottom-button"
+          onClick={scrollToBottom}
+          aria-label="Scroll to bottom"
+        >
+          ↓
+        </button>
+      )}
 
       <MessageInput chatId={activeChat.id} onSendMessage={handleUserInteraction} />
     </div>
