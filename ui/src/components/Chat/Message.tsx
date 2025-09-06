@@ -15,7 +15,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
   const [swipeX, setSwipeX] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
-  const { activeChat, loadChats, settings, setReplyingTo } = useChatStore();
+  const { activeChat, settings, setReplyingTo } = useChatStore();
   const messageRef = useRef<HTMLDivElement>(null);
   const startXRef = useRef(0);
   const startYRef = useRef(0);
@@ -162,8 +162,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
         });
       }
       
-      // Reload chats to get updated reactions
-      await loadChats();
+      // WebSocket will handle the update
     } catch (err) {
       console.error('Error handling reaction:', err);
     }

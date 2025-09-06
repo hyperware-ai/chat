@@ -7,14 +7,10 @@ import NewChatModal from './NewChatModal';
 import './ChatList.css';
 
 const ChatList: React.FC = () => {
-  const { chats, loadChats, searchChats } = useChatStore();
+  const { chats, searchChats } = useChatStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewChat, setShowNewChat] = useState(false);
   const [filteredChats, setFilteredChats] = useState(chats);
-
-  useEffect(() => {
-    loadChats();
-  }, [loadChats]);
 
   useEffect(() => {
     if (searchQuery) {

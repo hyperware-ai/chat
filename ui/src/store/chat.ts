@@ -9,7 +9,7 @@ import {
 import type { WsServerMessage } from '../types/chat';
 import * as api from '../utils/chatApi';
 import { ChatWebSocket } from '../utils/websocket';
-import { browserStorage } from '../utils/storage';
+import { idbStorage } from '../utils/indexeddb';
 
 interface ChatStore {
   // State
@@ -24,17 +24,12 @@ interface ChatStore {
   connectionStatus: 'connected' | 'disconnected' | 'connecting';
   error: string | null;
   isLoading: boolean;
-  isLoadingOlderMessages: boolean;
-  hasMoreMessages: Record<string, boolean>; // chatId -> boolean
-  oldestMessageTimestamp: Record<string, number>; // chatId -> timestamp
   replyingTo: any | null; // Message being replied to
   
   // Actions
   initialize: () => Promise<void>;
-  loadChats: () => Promise<void>;
-  loadChatsWithDiff: () => Promise<void>;
-  syncWithServer: (storedState: any) => Promise<void>;
-  loadOlderMessages: (chatId: string) => Promise<void>;
+  loadChatsFromServer: () => Promise<void>;
+  syncWithServer: () => Promise<void>;
   loadProfile: () => Promise<void>;
   loadSettings: () => Promise<void>;
   createChat: (counterparty: string) => Promise<void>;
@@ -57,6 +52,9 @@ interface ChatStore {
   clearError: () => void;
   setReplyingTo: (message: any | null) => void;
 }
+
+// Track if already initialized to prevent double initialization
+let isInitialized = false;
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   // Initial state
@@ -82,269 +80,144 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   connectionStatus: 'disconnected',
   error: null,
   isLoading: false,
-  isLoadingOlderMessages: false,
-  hasMoreMessages: {},
-  oldestMessageTimestamp: {},
   replyingTo: null,
 
   // Initialize the app
   initialize: async () => {
+    console.log('[INIT] Starting initialization...');
+    
+    // Prevent double initialization
+    if (isInitialized) {
+      console.log('[INIT] Already initialized, skipping...');
+      return;
+    }
+    isInitialized = true;
+    
     try {
-      set({ isLoading: true });
-      
       // Check if we're connected to Hyperware
       const our = (window as any).our;
+      console.log('[INIT] our.node:', our?.node);
+      
       if (our?.node) {
         set({ nodeId: our.node, isConnected: true });
         
-        // Load initial data - loadChatsWithDiff will handle browser storage
-        await Promise.all([
+        // Initialize IndexedDB
+        console.log('[INIT] Initializing IndexedDB...');
+        await idbStorage.init();
+        
+        // Load cached chats from IndexedDB
+        console.log('[INIT] Loading chats from IndexedDB...');
+        const cachedChats = await idbStorage.loadChats();
+        const activeChatId = await idbStorage.loadMetadata('activeChatId');
+        const lastSync = await idbStorage.loadMetadata('lastSyncTimestamp');
+        
+        if (cachedChats.length > 0) {
+          console.log('[INIT] Loaded', cachedChats.length, 'chats from IndexedDB');
+          
+          // Restore active chat
+          let activeChat = null;
+          if (activeChatId) {
+            activeChat = cachedChats.find(c => c.id === activeChatId) || null;
+          }
+          
+          set({ 
+            chats: cachedChats,
+            activeChat,
+            isLoading: false // Don't show loading since we have cached data
+          });
+          
+          // Check if we need to sync with server
+          const ageMs = lastSync ? Date.now() - lastSync : Infinity;
+          const ageMinutes = ageMs / (1000 * 60);
+          console.log('[INIT] Cache age:', ageMinutes.toFixed(1), 'minutes');
+          
+          // Sync in background if data is older than 1 minute
+          if (ageMinutes > 1) {
+            setTimeout(() => get().syncWithServer(), 1000);
+          }
+        } else {
+          console.log('[INIT] No cached data, loading from server...');
+          set({ isLoading: true });
+          await get().loadChatsFromServer();
+        }
+        
+        // Connect WebSocket for real-time updates
+        console.log('[INIT] Connecting WebSocket...');
+        get().connectWebSocket();
+        
+        // Load profile and settings in background
+        Promise.all([
           get().loadProfile(),
           get().loadSettings(),
-          get().loadChatsWithDiff(), // This handles both cached state and server sync
-        ]);
+        ]).catch(error => {
+          console.error('[INIT] Failed to load profile/settings:', error);
+        });
         
-        // Connect WebSocket
-        get().connectWebSocket();
       } else {
         set({ isConnected: false, error: 'Not connected to Hyperware' });
       }
     } catch (error) {
+      console.error('[INIT] Initialization error:', error);
       set({ error: error instanceof Error ? error.message : 'Failed to initialize' });
     } finally {
       set({ isLoading: false });
     }
   },
 
-  // Load all chats
-  loadChats: async () => {
+  // Load chats from server and save to IndexedDB
+  loadChatsFromServer: async () => {
     try {
+      console.log('[SYNC] Loading chats from server...');
       const chats = await api.get_chats();
+      console.log('[SYNC] Loaded', chats.length, 'chats from server');
+      
       set({ chats });
-      // Save to browser storage
-      browserStorage.saveChatState(chats);
+      
+      // Save complete data to IndexedDB
+      await idbStorage.saveChats(chats);
+      
+      // Save active chat ID if we have one
+      const state = get();
+      if (state.activeChat) {
+        await idbStorage.saveMetadata('activeChatId', state.activeChat.id);
+      }
+      
+      console.log('[SYNC] Saved chats to IndexedDB');
     } catch (error) {
+      console.error('[SYNC] Failed to load chats:', error);
       set({ error: 'Failed to load chats' });
     }
   },
 
-  // Load chats with diff-based synchronization
-  loadChatsWithDiff: async () => {
+  // Sync with server - much simpler now with IndexedDB
+  syncWithServer: async () => {
     try {
-      const storedState = browserStorage.loadChatState();
+      console.log('[SYNC] Syncing with server...');
       
-      // Check if we have valid stored state
-      if (storedState && storedState.chats.length > 0) {
-        // Calculate age of stored data
-        const ageMs = Date.now() - storedState.lastSyncTimestamp;
-        const ageMinutes = ageMs / (1000 * 60);
-        
-        console.log('[Storage] Using cached state, age:', ageMinutes.toFixed(1), 'minutes');
-        
-        // Use stored state immediately for instant UI
-        set({ 
-          chats: storedState.chats,
-          hasMoreMessages: {} // Will be updated after server sync
-        });
-        
-        // If data is relatively fresh (< 5 minutes), skip immediate sync
-        if (ageMinutes < 5) {
-          console.log('[Storage] Cached state is fresh, deferring server sync');
-          // Schedule a background sync after a short delay
-          setTimeout(async () => {
-            await get().syncWithServer(storedState);
-          }, 2000);
-          return;
-        }
-        
-        // Data is older, sync with server immediately
-        await get().syncWithServer(storedState);
-      } else {
-        // No stored state, fetch from server
-        console.log('[Storage] No cached state, fetching from server');
-        const serverChats = await api.get_chats();
-        
-        // Limit initial messages to last 50 per chat for performance
-        const limitedChats = serverChats.map(chat => ({
-          ...chat,
-          messages: chat.messages.slice(-50)
-        }));
-        
-        // Mark chats that might have more messages
-        const hasMore: Record<string, boolean> = {};
-        serverChats.forEach(chat => {
-          hasMore[chat.id] = chat.messages.length > 50;
-        });
-        
-        set({ 
-          chats: limitedChats,
-          hasMoreMessages: hasMore 
-        });
-        
-        // Save to browser storage
-        browserStorage.saveChatState(limitedChats);
-      }
-    } catch (error) {
-      console.error('[Storage] Failed to load chats with diff:', error);
-      // Fallback to regular loading
-      await get().loadChats();
-    }
-  },
-  
-  // Sync stored state with server
-  syncWithServer: async (storedState: any) => {
-    try {
-      console.log('[Storage] Syncing with server...');
-      
-      // Fetch latest from server
+      // Fetch all chats from server (complete history)
       const serverChats = await api.get_chats();
+      console.log('[SYNC] Got', serverChats.length, 'chats from server');
       
-      // Limit messages for performance
-      const limitedServerChats = serverChats.map(chat => ({
-        ...chat,
-        messages: chat.messages.slice(-50)
-      }));
+      // Update state with server data
+      set({ chats: serverChats });
       
-      // Generate diff between stored and server state
-      const diff = browserStorage.generateDiff(storedState.chats, limitedServerChats);
+      // Save everything to IndexedDB
+      await idbStorage.saveChats(serverChats);
       
-      console.log('[Storage] Sync diff stats:', {
-        newChats: diff.newChats.length,
-        updatedChats: diff.updatedChats.length,
-        deletedChats: diff.deletedChatIds.length,
-        newMessages: Object.keys(diff.newMessages).length,
-        updatedMessages: Object.keys(diff.updatedMessages).length,
-      });
-      
-      // Only update if there are actual changes
-      const hasChanges = diff.newChats.length > 0 || 
-                        diff.updatedChats.length > 0 || 
-                        diff.deletedChatIds.length > 0 ||
-                        Object.keys(diff.newMessages).length > 0 ||
-                        Object.keys(diff.updatedMessages).length > 0 ||
-                        Object.keys(diff.deletedMessageIds).length > 0;
-      
-      if (hasChanges) {
-        // Apply the diff to get the final state
-        const mergedChats = browserStorage.applyDiff(storedState.chats, diff);
-        
-        // Mark chats that might have more messages
-        const hasMore: Record<string, boolean> = {};
-        serverChats.forEach(chat => {
-          hasMore[chat.id] = chat.messages.length > 50;
-        });
-        
-        set({ 
-          chats: mergedChats,
-          hasMoreMessages: hasMore 
-        });
-        
-        // Save the updated state
-        browserStorage.saveChatState(mergedChats);
-        console.log('[Storage] Sync complete, state updated');
-      } else {
-        console.log('[Storage] Sync complete, no changes detected');
-        
-        // Just update the hasMoreMessages flag
-        const hasMore: Record<string, boolean> = {};
-        serverChats.forEach(chat => {
-          hasMore[chat.id] = chat.messages.length > 50;
-        });
-        set({ hasMoreMessages: hasMore });
-      }
-    } catch (error) {
-      console.error('[Storage] Failed to sync with server:', error);
-    }
-  },
-
-  // Load older messages for pagination
-  loadOlderMessages: async (chatId: string) => {
-    const state = get();
-    
-    // Don't load if already loading or no more messages
-    if (state.isLoadingOlderMessages || state.hasMoreMessages[chatId] === false) {
-      return;
-    }
-    
-    try {
-      set({ isLoadingOlderMessages: true });
-      
-      // Get the oldest message timestamp for this chat
-      const chat = state.chats.find(c => c.id === chatId);
-      if (!chat || chat.messages.length === 0) {
-        set({ isLoadingOlderMessages: false });
-        return;
-      }
-      
-      const oldestTimestamp = Math.min(...chat.messages.map(m => m.timestamp));
-      
-      // Load messages before the oldest timestamp using dedicated backend endpoint
-      const olderMessages = await api.get_messages({
-        chat_id: chatId,
-        before_timestamp: oldestTimestamp,
-        limit: 50
-      });
-      
-      if (olderMessages.length === 0) {
-        // No more messages to load
-        set(state => ({
-          hasMoreMessages: { ...state.hasMoreMessages, [chatId]: false },
-          isLoadingOlderMessages: false
-        }));
-        return;
-      }
-      
-      // Prepend older messages to the chat
-      set(state => {
-        const updatedChats = state.chats.map(chat => {
-          if (chat.id === chatId) {
-            // Merge older messages with existing ones
-            const existingIds = new Set(chat.messages.map(m => m.id));
-            const newMessages = olderMessages.filter(m => !existingIds.has(m.id));
-            
-            return {
-              ...chat,
-              messages: [...newMessages, ...chat.messages]
-            };
-          }
-          return chat;
-        });
-        
-        // Update activeChat if it's the same chat
-        let updatedActiveChat = state.activeChat;
-        if (state.activeChat?.id === chatId) {
-          const existingIds = new Set(state.activeChat.messages.map(m => m.id));
-          const newMessages = olderMessages.filter(m => !existingIds.has(m.id));
-          
-          updatedActiveChat = {
-            ...state.activeChat,
-            messages: [...newMessages, ...state.activeChat.messages]
-          };
+      // Update metadata
+      const state = get();
+      if (state.activeChat) {
+        // Update activeChat with fresh data
+        const updatedActiveChat = serverChats.find(c => c.id === state.activeChat?.id);
+        if (updatedActiveChat) {
+          set({ activeChat: updatedActiveChat });
         }
-        
-        // Save to browser storage
-        browserStorage.saveChatState(updatedChats);
-        
-        return {
-          chats: updatedChats,
-          activeChat: updatedActiveChat,
-          isLoadingOlderMessages: false,
-          hasMoreMessages: { 
-            ...state.hasMoreMessages, 
-            [chatId]: olderMessages.length === 50 // If we got full page, there might be more
-          },
-          oldestMessageTimestamp: {
-            ...state.oldestMessageTimestamp,
-            [chatId]: Math.min(...olderMessages.map(m => m.timestamp))
-          }
-        };
-      });
+        await idbStorage.saveMetadata('activeChatId', state.activeChat.id);
+      }
+      
+      console.log('[SYNC] Sync complete, saved to IndexedDB');
     } catch (error) {
-      console.error('[Pagination] Failed to load older messages:', error);
-      set({ 
-        error: 'Failed to load older messages',
-        isLoadingOlderMessages: false 
-      });
+      console.error('[SYNC] Failed to sync with server:', error);
     }
   },
 
@@ -436,8 +309,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             : chat
         );
         
-        // Save to browser storage
-        browserStorage.saveChatState(updatedChats);
+        // Save the updated chat to IndexedDB
+        const updatedChat = updatedChats.find(c => c.id === chatId);
+        if (updatedChat) {
+          idbStorage.saveChat(updatedChat);
+        }
         
         return {
           chats: updatedChats,
@@ -522,8 +398,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messages: chat.messages.filter(msg => msg.id !== messageId)
         }));
         
-        // Save to browser storage
-        browserStorage.saveChatState(updatedChats);
+        // Save the updated chat to IndexedDB
+        const updatedChat = updatedChats.find(c => c.id === chatId);
+        if (updatedChat) {
+          idbStorage.saveChat(updatedChat);
+        }
         
         return {
           chats: updatedChats,
@@ -588,6 +467,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Set active chat
   setActiveChat: (chat: Chat | null) => {
     set({ activeChat: chat });
+    // Save active chat ID to IndexedDB
+    if (chat) {
+      idbStorage.saveMetadata('activeChatId', chat.id);
+    } else {
+      idbStorage.saveMetadata('activeChatId', null);
+    }
   },
 
   // Mark chat as read
@@ -707,8 +592,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           };
         }
         
-        // Save updated state to browser storage
-        browserStorage.saveChatState(newChats);
+        // Save updated chat to IndexedDB
+        const changedChat = newChats.find(c => c.id === updatedChat.id);
+        if (changedChat) {
+          idbStorage.saveChat(changedChat);
+        }
         
         return { 
           chats: newChats,
@@ -772,9 +660,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           console.log('[WS] Updated chats after NewMessage. Found:', foundChat);
           console.log('[WS] ActiveChat updated:', updatedActiveChat !== state.activeChat);
           
-          // Save updated state to browser storage
+          // Save updated chat to IndexedDB
           if (foundChat) {
-            browserStorage.saveChatState(updatedChats);
+            const chatToSave = updatedChats.find(c => 
+              c.counterparty === newMsg.sender || c.id.includes(newMsg.sender)
+            );
+            if (chatToSave) {
+              idbStorage.saveChat(chatToSave);
+            }
           }
           
           return {

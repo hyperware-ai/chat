@@ -8,7 +8,7 @@ interface FileUploadProps {
 }
 
 const FileUpload: React.FC<FileUploadProps> = ({ onClose }) => {
-  const { activeChat, loadChats, settings } = useChatStore();
+  const { activeChat, settings } = useChatStore();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{ [filename: string]: number }>({});
   
@@ -58,7 +58,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onClose }) => {
               // Mark as complete
               setUploadProgress(prev => ({ ...prev, [file.name]: 100 }));
               
-              await loadChats(); // Refresh to show new message
+              // WebSocket will handle the update
               
               // Remove from progress after a delay
               setTimeout(() => {

@@ -12,7 +12,7 @@ interface MessageMenuProps {
 }
 
 const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onClose }) => {
-  const { deleteMessage, editMessage, loadChats, chats, activeChat } = useChatStore();
+  const { deleteMessage, editMessage, chats, activeChat } = useChatStore();
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showForwardPicker, setShowForwardPicker] = useState(false);
   
@@ -51,7 +51,7 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
         message_id: message.id, 
         emoji 
       });
-      await loadChats();
+      // WebSocket will handle the update
       onClose();
     } catch (err) {
       console.error('Error adding reaction:', err);
@@ -65,7 +65,7 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
         message_id: message.id, 
         to_chat_id: toChatId 
       });
-      await loadChats();
+      // WebSocket will handle the update
       onClose();
     } catch (err) {
       console.error('Error forwarding message:', err);

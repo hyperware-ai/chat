@@ -4,6 +4,7 @@ interface StoredChatState {
   chats: Chat[];
   lastSyncTimestamp: number;
   messageHashes: Record<string, string>; // chatId -> hash of message IDs
+  activeChatId?: string; // Remember which chat was active
 }
 
 class BrowserStorage {
@@ -11,38 +12,115 @@ class BrowserStorage {
   private readonly STORAGE_VERSION = '1.0';
 
   // Store chat state in localStorage
-  saveChatState(chats: Chat[]): void {
+  saveChatState(chats: Chat[], activeChatId?: string): void {
     try {
-      const messageHashes: Record<string, string> = {};
-      
-      // Create hashes for each chat's messages for quick comparison
-      chats.forEach(chat => {
-        const messageIds = chat.messages.map(m => m.id).join(',');
-        messageHashes[chat.id] = this.hashString(messageIds);
+      console.log('[STORAGE] Saving chat state:', {
+        chatCount: chats.length,
+        activeChatId,
+        timestamp: new Date().toISOString()
       });
+      
+      // Much more aggressive message limiting to avoid quota issues
+      const limitedChats: Chat[] = chats.map(chat => ({
+        ...chat,
+        // Only keep last 20 messages per chat, and strip unnecessary data
+        messages: chat.messages.slice(-20).map(msg => ({
+          id: msg.id,
+          sender: msg.sender,
+          content: msg.content.length > 500 ? msg.content.substring(0, 500) + '...' : msg.content,
+          timestamp: msg.timestamp,
+          status: msg.status,
+          reply_to: msg.reply_to,
+          reactions: msg.reactions?.slice(0, 5) || [], // Limit reactions
+          message_type: msg.message_type,
+          file_info: msg.file_info ? {
+            ...msg.file_info,
+            // Don't store base64 data or large URLs
+            url: msg.file_info.url.length > 100 ? '' : msg.file_info.url
+          } : null
+        } as ChatMessage))
+      }));
 
       const state: StoredChatState = {
-        chats: chats.map(chat => ({
-          ...chat,
-          // Store only essential message data to save space
-          messages: chat.messages.slice(-50) // Keep last 50 messages per chat
-        })),
+        chats: limitedChats,
         lastSyncTimestamp: Date.now(),
-        messageHashes
+        messageHashes: {}, // Skip hashes to save space
+        activeChatId
       };
 
-      const serialized = JSON.stringify({
-        version: this.STORAGE_VERSION,
-        state
-      });
-
-      // Use compression if available (for larger datasets)
-      localStorage.setItem(this.STORAGE_KEY, serialized);
+      const serialized = JSON.stringify(state);
+      const sizeKB = serialized.length / 1024;
+      
+      console.log('[STORAGE] Attempting to save, size:', sizeKB.toFixed(2), 'KB');
+      
+      // If still too large, reduce further
+      if (sizeKB > 2048) { // 2MB limit to be safe
+        console.log('[STORAGE] State too large, reducing to 10 messages per chat...');
+        const minimalChats = chats.map(chat => ({
+          ...chat,
+          messages: chat.messages.slice(-10).map(msg => ({
+            id: msg.id,
+            sender: msg.sender,
+            content: msg.content.substring(0, 200),
+            timestamp: msg.timestamp,
+            status: msg.status,
+            reply_to: null,
+            reactions: [],
+            message_type: msg.message_type,
+            file_info: null
+          }))
+        }));
+        
+        const minimalState: StoredChatState = {
+          chats: minimalChats,
+          lastSyncTimestamp: Date.now(),
+          messageHashes: {},
+          activeChatId
+        };
+        
+        const minimalSerialized = JSON.stringify(minimalState);
+        localStorage.setItem(this.STORAGE_KEY, minimalSerialized);
+        console.log('[STORAGE] Saved minimal state, size:', (minimalSerialized.length / 1024).toFixed(2), 'KB');
+      } else {
+        // Clear old data first to make room
+        try {
+          // Clear any other old storage keys from this app
+          const keysToRemove: string[] = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key !== this.STORAGE_KEY && key.startsWith('chat_')) {
+              keysToRemove.push(key);
+            }
+          }
+          keysToRemove.forEach(key => localStorage.removeItem(key));
+        } catch (e) {
+          console.log('[STORAGE] Could not clear old keys:', e);
+        }
+        
+        localStorage.setItem(this.STORAGE_KEY, serialized);
+        console.log('[STORAGE] State saved successfully, size:', sizeKB.toFixed(2), 'KB');
+      }
     } catch (error) {
-      console.error('Failed to save chat state:', error);
-      // Clear storage if quota exceeded
+      console.error('[STORAGE] Failed to save chat state:', error);
+      // If quota exceeded, try to save just the chat list without messages
       if (error instanceof DOMException && error.name === 'QuotaExceededError') {
-        this.clearStorage();
+        try {
+          console.log('[STORAGE] Quota exceeded, saving minimal state without messages...');
+          const minimalState: StoredChatState = {
+            chats: chats.map(chat => ({
+              ...chat,
+              messages: [] // No messages at all
+            })),
+            lastSyncTimestamp: Date.now(),
+            messageHashes: {},
+            activeChatId
+          };
+          localStorage.setItem(this.STORAGE_KEY, JSON.stringify(minimalState));
+          console.log('[STORAGE] Saved minimal state without messages');
+        } catch (e) {
+          console.error('[STORAGE] Could not save even minimal state, clearing storage');
+          this.clearStorage();
+        }
       }
     }
   }
@@ -50,20 +128,28 @@ class BrowserStorage {
   // Load chat state from localStorage
   loadChatState(): StoredChatState | null {
     try {
+      console.log('[STORAGE] Attempting to load chat state...');
       const serialized = localStorage.getItem(this.STORAGE_KEY);
-      if (!serialized) return null;
+      
+      if (!serialized) {
+        console.log('[STORAGE] No stored state found in localStorage');
+        return null;
+      }
 
+      console.log('[STORAGE] Found stored state, size:', (serialized.length / 1024).toFixed(2), 'KB');
       const parsed = JSON.parse(serialized);
       
       // Check version compatibility
       if (parsed.version !== this.STORAGE_VERSION) {
+        console.log('[STORAGE] Version mismatch, clearing storage. Expected:', this.STORAGE_VERSION, 'Got:', parsed.version);
         this.clearStorage();
         return null;
       }
 
+      console.log('[STORAGE] Successfully loaded state with', parsed.state?.chats?.length || 0, 'chats');
       return parsed.state;
     } catch (error) {
-      console.error('Failed to load chat state:', error);
+      console.error('[STORAGE] Failed to load chat state:', error);
       this.clearStorage();
       return null;
     }
@@ -239,7 +325,31 @@ class BrowserStorage {
   }
 
   clearStorage(): void {
+    console.log('[STORAGE] Clearing storage...');
     localStorage.removeItem(this.STORAGE_KEY);
+    // Also clear any other app-related keys
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith('chat_') || key.startsWith('app_'))) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach(key => {
+      console.log('[STORAGE] Removing old key:', key);
+      localStorage.removeItem(key);
+    });
+  }
+  
+  // Get current storage size
+  getStorageSize(): number {
+    let totalSize = 0;
+    for (let key in localStorage) {
+      if (localStorage.hasOwnProperty(key)) {
+        totalSize += localStorage[key].length + key.length;
+      }
+    }
+    return totalSize / 1024; // Return in KB
   }
 }
 

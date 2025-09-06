@@ -11,7 +11,9 @@ function App() {
     activeChat,
     error,
     initialize,
-    clearError 
+    clearError,
+    chats,
+    isLoading
   } = useChatStore();
 
   // Initialize on mount
@@ -19,8 +21,9 @@ function App() {
     initialize();
   }, [initialize]);
 
-  // Show loading state while connecting
-  if (!nodeId && !error) {
+  // Show loading state only if we're truly loading (no cached data and no connection yet)
+  // BUT: If we have chats from cache, skip the loading screen entirely
+  if (chats.length === 0 && !nodeId && !error && isLoading) {
     return (
       <div className="app-loading">
         <div className="spinner" />
@@ -29,8 +32,8 @@ function App() {
     );
   }
 
-  // Show error if not connected
-  if (!isConnected && error) {
+  // Show error only if we have no cached data AND there's a connection error
+  if (!isConnected && error && chats.length === 0) {
     return (
       <div className="app-error">
         <h2>Connection Error</h2>

@@ -78,7 +78,7 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
       <textarea
         ref={inputRef}
         className="message-input"
-        placeholder={isMobile ? "Type a message... (Enter for newline)" : "Type a message... (Enter to send)"}
+        placeholder="Type a message..."
         value={message}
         onChange={(e) => setMessage(e.target.value)}
         onKeyDown={handleKeyDown}
