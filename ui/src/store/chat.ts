@@ -25,6 +25,7 @@ interface ChatStore {
   error: string | null;
   isLoading: boolean;
   replyingTo: any | null; // Message being replied to
+  tempIdToRealId: { [tempId: string]: string }; // Map temp IDs to real message IDs
   
   // Actions
   initialize: () => Promise<void>;
@@ -81,6 +82,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   error: null,
   isLoading: false,
   replyingTo: null,
+  tempIdToRealId: {},
 
   // Initialize the app
   initialize: async () => {
@@ -92,6 +94,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return;
     }
     isInitialized = true;
+    
+    // Set up periodic cleanup of temp ID mappings (every 2 minutes)
+    setInterval(() => {
+      const state = get();
+      const fiveMinutesAgo = Date.now() / 1000 - 300;
+      const cleanedMappings: typeof state.tempIdToRealId = {};
+      let cleanedCount = 0;
+      
+      for (const [tempId, realId] of Object.entries(state.tempIdToRealId)) {
+        const match = tempId.match(/^temp-(\d+)-/);
+        if (match) {
+          const tempTimestamp = parseInt(match[1]);
+          if (tempTimestamp > fiveMinutesAgo) {
+            cleanedMappings[tempId] = realId;
+          } else {
+            cleanedCount++;
+          }
+        }
+      }
+      
+      if (cleanedCount > 0) {
+        console.log('[CLEANUP] Removed', cleanedCount, 'old temp ID mappings');
+        set({ tempIdToRealId: cleanedMappings });
+      }
+    }, 120000); // Run every 2 minutes
     
     try {
       // Check if we're connected to Hyperware
@@ -275,17 +302,35 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       file_info: null,
     };
     
+    console.log('[SEND] Creating optimistic message:', tempId, 'content:', content.substring(0, 30));
+    
     // Immediately show the message with "Sending" status
-    set(state => ({
-      chats: state.chats.map(chat => 
+    set(state => {
+      const updatedChats = state.chats.map(chat => 
         chat.id === chatId 
-          ? { ...chat, messages: [...chat.messages, optimisticMessage], last_activity: timestamp }
+          ? { 
+              ...chat, 
+              messages: [...chat.messages, optimisticMessage], 
+              last_activity: timestamp 
+            }
           : chat
-      ),
-      activeChat: state.activeChat?.id === chatId 
-        ? { ...state.activeChat, messages: [...state.activeChat.messages, optimisticMessage] }
-        : state.activeChat,
-    }));
+      );
+      
+      const updatedActiveChat = state.activeChat?.id === chatId 
+        ? { 
+            ...state.activeChat, 
+            messages: [...state.activeChat.messages, optimisticMessage],
+            last_activity: timestamp
+          }
+        : state.activeChat;
+      
+      console.log('[SEND] Added optimistic message to UI. Total messages:', updatedActiveChat?.messages.length);
+      
+      return {
+        chats: updatedChats,
+        activeChat: updatedActiveChat,
+      };
+    });
     
     try {
       const message = await api.send_message({ 
@@ -295,14 +340,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         file_info: null
       });
       
-      // Replace optimistic message with real message from API
+      console.log('[SEND] Received real message from API:', message.id, 'replacing temp:', tempId);
+      
+      // Store the mapping from temp ID to real ID
       set(state => {
+        const newTempIdToRealId = { ...state.tempIdToRealId, [tempId]: message.id };
+        
+        // Clean up old temp ID mappings (older than 5 minutes)
+        const fiveMinutesAgo = Date.now() / 1000 - 300;
+        const cleanedTempIdToRealId: typeof newTempIdToRealId = {};
+        for (const [oldTempId, realId] of Object.entries(newTempIdToRealId)) {
+          // Extract timestamp from temp ID format: temp-{timestamp}-{random}
+          const match = oldTempId.match(/^temp-(\d+)-/);
+          if (match) {
+            const tempTimestamp = parseInt(match[1]);
+            if (tempTimestamp > fiveMinutesAgo) {
+              cleanedTempIdToRealId[oldTempId] = realId;
+            } else {
+              console.log('[SEND] Cleaning up old temp ID mapping:', oldTempId);
+            }
+          }
+        }
+        
         const updatedChats = state.chats.map(chat => 
           chat.id === chatId 
             ? { 
                 ...chat, 
                 messages: chat.messages.map(m => 
-                  m.id === tempId ? message : m
+                  m.id === tempId ? { ...message, status: 'Sent' as const } : m
                 ), 
                 last_activity: message.timestamp 
               }
@@ -315,16 +380,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           idbStorage.saveChat(updatedChat);
         }
         
+        const updatedActiveChat = state.activeChat?.id === chatId 
+          ? { 
+              ...state.activeChat, 
+              messages: state.activeChat.messages.map(m => 
+                m.id === tempId ? { ...message, status: 'Sent' as const } : m
+              ) 
+            }
+          : state.activeChat;
+        
+        console.log('[SEND] Replaced optimistic message in UI. Total messages:', updatedActiveChat?.messages.length);
+        
         return {
           chats: updatedChats,
-          activeChat: state.activeChat?.id === chatId 
-            ? { 
-                ...state.activeChat, 
-                messages: state.activeChat.messages.map(m => 
-                  m.id === tempId ? message : m
-                ) 
-              }
-            : state.activeChat,
+          activeChat: updatedActiveChat,
+          tempIdToRealId: cleanedTempIdToRealId,
         };
       });
       
@@ -518,82 +588,73 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (message.ChatUpdate) {
       console.log('[WS] Processing ChatUpdate:', message.ChatUpdate);
       // Handle new chat or chat update
-      const updatedChat = message.ChatUpdate;
-      console.log('[WS] Chat update received for chat:', updatedChat.id, 'with', updatedChat.messages.length, 'messages');
+      const serverChat = message.ChatUpdate;
+      console.log('[WS] Chat update received for chat:', serverChat.id, 'with', serverChat.messages.length, 'messages');
       
       set(state => {
-        const existingChatIndex = state.chats.findIndex(c => c.id === updatedChat.id);
+        const existingChatIndex = state.chats.findIndex(c => c.id === serverChat.id);
         let newChats;
         
         if (existingChatIndex >= 0) {
-          // Update existing chat
+          // Update existing chat - merge messages carefully
           console.log('[WS] Updating existing chat at index:', existingChatIndex);
           const existingChat = state.chats[existingChatIndex];
           
-          // Merge messages intelligently to preserve optimistic messages
-          const mergedMessages = [...updatedChat.messages];
+          // Build a map of server messages by ID for quick lookup
+          const serverMessageIds = new Set(serverChat.messages.map(m => m.id));
           
-          // Check for any optimistic messages (temp IDs) that aren't in the update
-          existingChat.messages.forEach(msg => {
-            if (msg.id.startsWith('temp-')) {
-              // Keep optimistic messages that haven't been replaced yet
-              const hasRealVersion = updatedChat.messages.some(m => 
-                m.content === msg.content && 
-                m.sender === msg.sender &&
-                Math.abs(m.timestamp - msg.timestamp) < 5 // Within 5 seconds
-              );
-              if (!hasRealVersion) {
-                mergedMessages.push(msg);
+          // Start with all server messages
+          const mergedMessages = [...serverChat.messages];
+          
+          // Preserve local messages that aren't on the server yet
+          existingChat.messages.forEach(localMsg => {
+            // Check if this is a temp message
+            if (localMsg.id.startsWith('temp-')) {
+              // Check if we have a real ID mapping for this temp message
+              const realId = state.tempIdToRealId[localMsg.id];
+              
+              if (realId && serverMessageIds.has(realId)) {
+                // The server has the real version, so we don't need the temp one
+                console.log('[WS] Temp message', localMsg.id, 'replaced by server version', realId);
+              } else {
+                // Keep the temp message - it hasn't been confirmed yet
+                console.log('[WS] Keeping unconfirmed temp message:', localMsg.id);
+                mergedMessages.push(localMsg);
               }
+            } else if (!serverMessageIds.has(localMsg.id)) {
+              // This is a real message that's not in the server update
+              // This could happen if we just sent it and the server hasn't propagated it yet
+              console.log('[WS] Keeping local message not in server update:', localMsg.id);
+              mergedMessages.push(localMsg);
             }
           });
           
-          // Sort messages by timestamp
+          // Sort messages by timestamp to maintain order
           mergedMessages.sort((a, b) => a.timestamp - b.timestamp);
           
           newChats = [...state.chats];
           newChats[existingChatIndex] = {
-            ...updatedChat,
+            ...serverChat,
             messages: mergedMessages
           };
         } else {
           // Add new chat
           console.log('[WS] Adding new chat');
-          newChats = [...state.chats, updatedChat];
+          newChats = [...state.chats, serverChat];
         }
         
         // Update activeChat if it's the same chat being updated
         let updatedActiveChat = state.activeChat;
-        if (state.activeChat && state.activeChat.id === updatedChat.id) {
-          console.log('[WS] Updating activeChat with new data');
-          const existingChat = state.chats[existingChatIndex];
-          
-          // Same merging logic for activeChat
-          const mergedMessages = [...updatedChat.messages];
-          if (existingChat) {
-            existingChat.messages.forEach(msg => {
-              if (msg.id.startsWith('temp-')) {
-                const hasRealVersion = updatedChat.messages.some(m => 
-                  m.content === msg.content && 
-                  m.sender === msg.sender &&
-                  Math.abs(m.timestamp - msg.timestamp) < 5
-                );
-                if (!hasRealVersion) {
-                  mergedMessages.push(msg);
-                }
-              }
-            });
+        if (state.activeChat && state.activeChat.id === serverChat.id) {
+          console.log('[WS] Updating activeChat with merged data');
+          const mergedChat = newChats.find(c => c.id === serverChat.id);
+          if (mergedChat) {
+            updatedActiveChat = mergedChat;
           }
-          mergedMessages.sort((a, b) => a.timestamp - b.timestamp);
-          
-          updatedActiveChat = {
-            ...updatedChat,
-            messages: mergedMessages
-          };
         }
         
         // Save updated chat to IndexedDB
-        const changedChat = newChats.find(c => c.id === updatedChat.id);
+        const changedChat = newChats.find(c => c.id === serverChat.id);
         if (changedChat) {
           idbStorage.saveChat(changedChat);
         }
@@ -681,17 +742,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       console.log('[WS] Processing MessageAck for message:', message_id);
       
       set(state => {
-        console.log('[WS] Current chats before ACK update:', state.chats);
-        console.log('[WS] Looking for message with ID:', message_id);
+        // Find the temp ID that maps to this real message ID (if any)
+        let tempIdForThisMessage: string | null = null;
+        for (const [tempId, realId] of Object.entries(state.tempIdToRealId)) {
+          if (realId === message_id) {
+            tempIdForThisMessage = tempId;
+            break;
+          }
+        }
+        
+        console.log('[WS] Message ACK for:', message_id, 'temp ID:', tempIdForThisMessage);
         
         const updatedChats = state.chats.map(chat => ({
           ...chat,
           messages: chat.messages.map(msg => {
-            if (msg.id === message_id) {
-              // MessageAck means BE has received the message, so status should be Sent
+            // Check if this message matches either the real ID or the temp ID
+            if (msg.id === message_id || (tempIdForThisMessage && msg.id === tempIdForThisMessage)) {
               const oldStatus = msg.status;
-              const newStatus: MessageStatus = 'Sent';
-              console.log(`[WS] Updating message ${message_id} status from ${oldStatus} to ${newStatus}`);
+              const newStatus: MessageStatus = 'Delivered';
+              console.log(`[WS] Updating message ${msg.id} status from ${oldStatus} to ${newStatus}`);
               return { ...msg, status: newStatus };
             }
             return msg;
@@ -701,24 +770,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // Update activeChat if it contains the message
         let updatedActiveChat = state.activeChat;
         if (state.activeChat) {
-          const hasMessage = state.activeChat.messages.some(m => m.id === message_id);
-          if (hasMessage) {
-            updatedActiveChat = {
-              ...state.activeChat,
-              messages: state.activeChat.messages.map(msg => {
-                if (msg.id === message_id) {
-                  const oldStatus = msg.status;
-                  const newStatus: MessageStatus = msg.status === 'Sending' ? 'Sent' : 'Delivered';
-                  console.log(`[WS] Updating activeChat message ${message_id} status from ${oldStatus} to ${newStatus}`);
-                  return { ...msg, status: newStatus };
-                }
-                return msg;
-              })
-            };
-          }
+          updatedActiveChat = {
+            ...state.activeChat,
+            messages: state.activeChat.messages.map(msg => {
+              if (msg.id === message_id || (tempIdForThisMessage && msg.id === tempIdForThisMessage)) {
+                const oldStatus = msg.status;
+                const newStatus: MessageStatus = 'Delivered';
+                console.log(`[WS] Updating activeChat message ${msg.id} status from ${oldStatus} to ${newStatus}`);
+                return { ...msg, status: newStatus };
+              }
+              return msg;
+            })
+          };
         }
         
-        console.log('[WS] Updated chats after ACK:', updatedChats);
         return {
           chats: updatedChats,
           activeChat: updatedActiveChat
