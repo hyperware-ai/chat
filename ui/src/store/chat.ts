@@ -33,6 +33,7 @@ interface ChatStore {
   initialize: () => Promise<void>;
   loadChats: () => Promise<void>;
   loadChatsWithDiff: () => Promise<void>;
+  syncWithServer: (storedState: any) => Promise<void>;
   loadOlderMessages: (chatId: string) => Promise<void>;
   loadProfile: () => Promise<void>;
   loadSettings: () => Promise<void>;
@@ -96,21 +97,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (our?.node) {
         set({ nodeId: our.node, isConnected: true });
         
-        // Try to load from browser storage first
-        const storedState = browserStorage.loadChatState();
-        if (storedState && storedState.chats.length > 0) {
-          // Load stored state immediately for instant UI
-          set({ chats: storedState.chats });
-          
-          // Mark as needing sync
-          console.log('[Storage] Loaded cached state with', storedState.chats.length, 'chats');
-        }
-        
-        // Load initial data (this will sync with server)
+        // Load initial data - loadChatsWithDiff will handle browser storage
         await Promise.all([
           get().loadProfile(),
           get().loadSettings(),
-          get().loadChatsWithDiff(), // Use new diff-based loading
+          get().loadChatsWithDiff(), // This handles both cached state and server sync
         ]);
         
         // Connect WebSocket
@@ -142,39 +133,107 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const storedState = browserStorage.loadChatState();
       
-      // For now, still fetch all chats from server
-      // In a future optimization, we would send a sync request with timestamps/hashes
-      // and the server would return only the changes
-      const serverChats = await api.get_chats();
-      
-      // Limit initial messages to last 50 per chat for performance
-      const limitedChats = serverChats.map(chat => ({
-        ...chat,
-        messages: chat.messages.slice(-50) // Take last 50 messages
-      }));
-      
-      // Mark chats that might have more messages
-      const hasMore: Record<string, boolean> = {};
-      serverChats.forEach(chat => {
-        // If server has more than 50 messages, there might be more to load
-        hasMore[chat.id] = chat.messages.length > 50;
-      });
-      
+      // Check if we have valid stored state
       if (storedState && storedState.chats.length > 0) {
-        // Generate diff between stored and server state
-        const diff = browserStorage.generateDiff(storedState.chats, limitedChats);
+        // Calculate age of stored data
+        const ageMs = Date.now() - storedState.lastSyncTimestamp;
+        const ageMinutes = ageMs / (1000 * 60);
         
-        // Log diff stats for debugging
-        console.log('[Storage] Diff stats:', {
-          newChats: diff.newChats.length,
-          updatedChats: diff.updatedChats.length,
-          deletedChats: diff.deletedChatIds.length,
-          newMessages: Object.keys(diff.newMessages).length,
-          updatedMessages: Object.keys(diff.updatedMessages).length,
+        console.log('[Storage] Using cached state, age:', ageMinutes.toFixed(1), 'minutes');
+        
+        // Use stored state immediately for instant UI
+        set({ 
+          chats: storedState.chats,
+          hasMoreMessages: {} // Will be updated after server sync
         });
         
+        // If data is relatively fresh (< 5 minutes), skip immediate sync
+        if (ageMinutes < 5) {
+          console.log('[Storage] Cached state is fresh, deferring server sync');
+          // Schedule a background sync after a short delay
+          setTimeout(async () => {
+            await get().syncWithServer(storedState);
+          }, 2000);
+          return;
+        }
+        
+        // Data is older, sync with server immediately
+        await get().syncWithServer(storedState);
+      } else {
+        // No stored state, fetch from server
+        console.log('[Storage] No cached state, fetching from server');
+        const serverChats = await api.get_chats();
+        
+        // Limit initial messages to last 50 per chat for performance
+        const limitedChats = serverChats.map(chat => ({
+          ...chat,
+          messages: chat.messages.slice(-50)
+        }));
+        
+        // Mark chats that might have more messages
+        const hasMore: Record<string, boolean> = {};
+        serverChats.forEach(chat => {
+          hasMore[chat.id] = chat.messages.length > 50;
+        });
+        
+        set({ 
+          chats: limitedChats,
+          hasMoreMessages: hasMore 
+        });
+        
+        // Save to browser storage
+        browserStorage.saveChatState(limitedChats);
+      }
+    } catch (error) {
+      console.error('[Storage] Failed to load chats with diff:', error);
+      // Fallback to regular loading
+      await get().loadChats();
+    }
+  },
+  
+  // Sync stored state with server
+  syncWithServer: async (storedState: any) => {
+    try {
+      console.log('[Storage] Syncing with server...');
+      
+      // Fetch latest from server
+      const serverChats = await api.get_chats();
+      
+      // Limit messages for performance
+      const limitedServerChats = serverChats.map(chat => ({
+        ...chat,
+        messages: chat.messages.slice(-50)
+      }));
+      
+      // Generate diff between stored and server state
+      const diff = browserStorage.generateDiff(storedState.chats, limitedServerChats);
+      
+      console.log('[Storage] Sync diff stats:', {
+        newChats: diff.newChats.length,
+        updatedChats: diff.updatedChats.length,
+        deletedChats: diff.deletedChatIds.length,
+        newMessages: Object.keys(diff.newMessages).length,
+        updatedMessages: Object.keys(diff.updatedMessages).length,
+      });
+      
+      // Only update if there are actual changes
+      const hasChanges = diff.newChats.length > 0 || 
+                        diff.updatedChats.length > 0 || 
+                        diff.deletedChatIds.length > 0 ||
+                        Object.keys(diff.newMessages).length > 0 ||
+                        Object.keys(diff.updatedMessages).length > 0 ||
+                        Object.keys(diff.deletedMessageIds).length > 0;
+      
+      if (hasChanges) {
         // Apply the diff to get the final state
         const mergedChats = browserStorage.applyDiff(storedState.chats, diff);
+        
+        // Mark chats that might have more messages
+        const hasMore: Record<string, boolean> = {};
+        serverChats.forEach(chat => {
+          hasMore[chat.id] = chat.messages.length > 50;
+        });
+        
         set({ 
           chats: mergedChats,
           hasMoreMessages: hasMore 
@@ -182,18 +241,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         
         // Save the updated state
         browserStorage.saveChatState(mergedChats);
+        console.log('[Storage] Sync complete, state updated');
       } else {
-        // No stored state, use server data directly
-        set({ 
-          chats: limitedChats,
-          hasMoreMessages: hasMore 
+        console.log('[Storage] Sync complete, no changes detected');
+        
+        // Just update the hasMoreMessages flag
+        const hasMore: Record<string, boolean> = {};
+        serverChats.forEach(chat => {
+          hasMore[chat.id] = chat.messages.length > 50;
         });
-        browserStorage.saveChatState(limitedChats);
+        set({ hasMoreMessages: hasMore });
       }
     } catch (error) {
-      console.error('[Storage] Failed to load chats with diff:', error);
-      // Fallback to regular loading
-      await get().loadChats();
+      console.error('[Storage] Failed to sync with server:', error);
     }
   },
 
