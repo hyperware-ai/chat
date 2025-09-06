@@ -16,6 +16,11 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
   const { sendMessage, replyingTo, setReplyingTo } = useChatStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   
+  // Detect if user is on mobile device
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || 
+                   ('ontouchstart' in window) || 
+                   window.innerWidth <= 768;
+  
   // Focus input when replying
   useEffect(() => {
     if (replyingTo) {
@@ -35,7 +40,9 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // On desktop: Enter sends, Shift+Enter adds newline
+    // On mobile: Enter adds newline, send button must be used
+    if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
       e.preventDefault();
       handleSubmit();
     }
@@ -71,7 +78,7 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
       <textarea
         ref={inputRef}
         className="message-input"
-        placeholder="Type a message..."
+        placeholder={isMobile ? "Type a message... (Enter for newline)" : "Type a message... (Enter to send)"}
         value={message}
         onChange={(e) => setMessage(e.target.value)}
         onKeyDown={handleKeyDown}
