@@ -397,8 +397,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (existingChatIndex >= 0) {
           // Update existing chat
           console.log('[WS] Updating existing chat at index:', existingChatIndex);
+          const existingChat = state.chats[existingChatIndex];
+          
+          // Merge messages intelligently to preserve optimistic messages
+          const mergedMessages = [...updatedChat.messages];
+          
+          // Check for any optimistic messages (temp IDs) that aren't in the update
+          existingChat.messages.forEach(msg => {
+            if (msg.id.startsWith('temp-')) {
+              // Keep optimistic messages that haven't been replaced yet
+              const hasRealVersion = updatedChat.messages.some(m => 
+                m.content === msg.content && 
+                m.sender === msg.sender &&
+                Math.abs(m.timestamp - msg.timestamp) < 5 // Within 5 seconds
+              );
+              if (!hasRealVersion) {
+                mergedMessages.push(msg);
+              }
+            }
+          });
+          
+          // Sort messages by timestamp
+          mergedMessages.sort((a, b) => a.timestamp - b.timestamp);
+          
           newChats = [...state.chats];
-          newChats[existingChatIndex] = updatedChat;
+          newChats[existingChatIndex] = {
+            ...updatedChat,
+            messages: mergedMessages
+          };
         } else {
           // Add new chat
           console.log('[WS] Adding new chat');
@@ -409,7 +435,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         let updatedActiveChat = state.activeChat;
         if (state.activeChat && state.activeChat.id === updatedChat.id) {
           console.log('[WS] Updating activeChat with new data');
-          updatedActiveChat = updatedChat;
+          const existingChat = state.chats[existingChatIndex];
+          
+          // Same merging logic for activeChat
+          const mergedMessages = [...updatedChat.messages];
+          if (existingChat) {
+            existingChat.messages.forEach(msg => {
+              if (msg.id.startsWith('temp-')) {
+                const hasRealVersion = updatedChat.messages.some(m => 
+                  m.content === msg.content && 
+                  m.sender === msg.sender &&
+                  Math.abs(m.timestamp - msg.timestamp) < 5
+                );
+                if (!hasRealVersion) {
+                  mergedMessages.push(msg);
+                }
+              }
+            });
+          }
+          mergedMessages.sort((a, b) => a.timestamp - b.timestamp);
+          
+          updatedActiveChat = {
+            ...updatedChat,
+            messages: mergedMessages
+          };
         }
         
         return { 
