@@ -399,6 +399,7 @@ impl Default for UserProfile {
 }
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
+const ICON: &str = include_str!("./icon");
 
 // Helper function to enforce one-way status transitions
 fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> MessageStatus {
@@ -543,7 +544,7 @@ async fn send_push_notification_for_message(
 impl ChatState {
     #[init]
     async fn initialize(&mut self) {
-        add_to_homepage("Chat", None, Some("/"), None);
+        add_to_homepage("Chat", Some(ICON), Some("/"), None);
 
         // Initialize with default profile
         if self.profile.name == "User" {
