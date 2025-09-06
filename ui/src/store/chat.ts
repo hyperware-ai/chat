@@ -218,8 +218,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       
       const oldestTimestamp = Math.min(...chat.messages.map(m => m.timestamp));
       
-      // Load messages before the oldest timestamp
-      const olderMessages = await api.get_messages_paginated({
+      // Load messages before the oldest timestamp using dedicated backend endpoint
+      const olderMessages = await api.get_messages({
         chat_id: chatId,
         before_timestamp: oldestTimestamp,
         limit: 50

@@ -256,6 +256,13 @@ pub struct GetChatReq {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct GetMessagesReq {
+    pub chat_id: String,
+    pub before_timestamp: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct DeleteChatReq {
     pub chat_id: String,
 }
@@ -700,6 +707,35 @@ impl ChatState {
         self.chats.get(&req.chat_id)
             .cloned()
             .ok_or_else(|| "Chat not found".to_string())
+    }
+
+    #[http]
+    async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
+        // Get the chat
+        let chat = self.chats.get(&req.chat_id)
+            .ok_or_else(|| "Chat not found".to_string())?;
+        
+        // Filter messages based on timestamp if provided
+        let mut messages: Vec<ChatMessage> = if let Some(before_ts) = req.before_timestamp {
+            chat.messages.iter()
+                .filter(|msg| msg.timestamp < before_ts)
+                .cloned()
+                .collect()
+        } else {
+            chat.messages.clone()
+        };
+        
+        // Sort by timestamp descending (newest first)
+        messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        
+        // Apply limit (convert u64 to usize for truncate)
+        let limit = req.limit.unwrap_or(50) as usize;
+        messages.truncate(limit);
+        
+        // Return in ascending order (oldest first) for display
+        messages.reverse();
+        
+        Ok(messages)
     }
 
     #[http]
