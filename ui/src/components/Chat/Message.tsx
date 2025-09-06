@@ -19,6 +19,17 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const messageRef = useRef<HTMLDivElement>(null);
   const startXRef = useRef(0);
   const startYRef = useRef(0);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchStartTimeRef = useRef(0);
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
 
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp * 1000);
@@ -54,7 +65,27 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const handleTouchStart = (e: React.TouchEvent) => {
     startXRef.current = e.touches[0].clientX;
     startYRef.current = e.touches[0].clientY;
+    touchStartTimeRef.current = Date.now();
     setIsSwiping(false);
+    
+    // Start long press timer for iOS
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
+    
+    longPressTimerRef.current = setTimeout(() => {
+      // Trigger long press after 500ms
+      const touch = e.touches[0];
+      const rect = messageRef.current?.getBoundingClientRect();
+      if (rect) {
+        setMenuPosition({ x: touch.clientX, y: touch.clientY });
+        setShowMenu(true);
+        // Haptic feedback for long press
+        if ('vibrate' in navigator) {
+          navigator.vibrate(10);
+        }
+      }
+    }, 500);
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
@@ -62,6 +93,14 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
     const currentY = e.touches[0].clientY;
     const deltaX = currentX - startXRef.current;
     const deltaY = Math.abs(currentY - startYRef.current);
+    
+    // Cancel long press if user moves finger too much
+    if (Math.abs(deltaX) > 10 || deltaY > 10) {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+    }
     
     // Only trigger swipe if horizontal movement is greater than vertical
     if (Math.abs(deltaX) > 10 && deltaY < 50) {
@@ -78,7 +117,16 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   };
 
   const handleTouchEnd = () => {
-    if (Math.abs(swipeX) >= 60) {
+    // Clear long press timer
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    
+    // Check if it was a quick tap (less than 200ms) to prevent accidental swipe-to-reply
+    const touchDuration = Date.now() - touchStartTimeRef.current;
+    
+    if (Math.abs(swipeX) >= 60 && touchDuration > 200) {
       // Trigger reply action
       setReplyingTo(message);
       // Add visual feedback
