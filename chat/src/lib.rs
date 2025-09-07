@@ -374,6 +374,7 @@ pub struct ChatState {
     pub ws_connections: HashMap<u32, String>, // channel_id -> node/browser_id
     pub browser_connections: HashMap<String, u32>, // chat_key -> channel_id
     pub last_heartbeat: HashMap<u32, u64>, // channel_id -> timestamp
+    pub active_connections: HashSet<u32>, // channel_ids that are actively viewing the app
 }
 
 fn default_delivery_queue() -> Arc<Mutex<HashMap<String, Vec<ChatMessage>>>> {
@@ -392,6 +393,7 @@ impl Default for ChatState {
             ws_connections: HashMap::new(),
             browser_connections: HashMap::new(),
             last_heartbeat: HashMap::new(),
+            active_connections: HashSet::new(),
         }
     }
 }
@@ -1607,9 +1609,9 @@ impl ChatState {
             });
         }
 
-        // Send push notification if user has notifications enabled AND no active WebSocket connection
-        // We check if there are any WebSocket connections for this node - if yes, the user is actively using the app
-        if chat.notify && self.settings.notify_chats && self.ws_connections.is_empty() {
+        // Send push notification if user has notifications enabled AND no active connections
+        // We only send notifications if the user is not actively viewing the app
+        if chat.notify && self.settings.notify_chats && self.active_connections.is_empty() {
             // Try to send a push notification
             spawn(async move {
                 send_push_notification_for_message(
@@ -1783,6 +1785,7 @@ impl ChatState {
 
                 // Clean up browser connections
                 self.browser_connections.retain(|_, &mut v| v != channel_id);
+                self.active_connections.remove(&channel_id);
             }
             WsMessageType::Text => {
                 // Parse and handle client message
@@ -2011,6 +2014,13 @@ impl ChatState {
                 }
             }
             WsClientMessage::UpdateStatus { status } => {
+                // Track whether this connection is active (user viewing the page)
+                if status == "active" {
+                    self.active_connections.insert(channel_id);
+                } else if status == "inactive" {
+                    self.active_connections.remove(&channel_id);
+                }
+                
                 if let Some(node) = self.ws_connections.get(&channel_id) {
                     let msg = WsServerMessage::StatusUpdate {
                         node: node.clone(),

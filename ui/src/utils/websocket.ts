@@ -8,6 +8,7 @@ export class ChatWebSocket {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
+  private isPageVisible = !document.hidden;
 
   connect(onMessage: (msg: WsServerMessage) => void) {
     this.onMessageCallback = onMessage;
@@ -25,10 +26,14 @@ export class ChatWebSocket {
         console.log('WebSocket connected');
         this.reconnectAttempts = 0;
         this.startHeartbeat();
+        this.setupVisibilityTracking();
         
         // Send initial heartbeat to trigger chat sync from backend
         console.log('Sending initial heartbeat to trigger chat sync');
         this.send({ Heartbeat: null });
+        
+        // Send initial visibility status
+        this.sendVisibilityStatus();
       };
 
       this.ws.onmessage = (event) => {
@@ -68,6 +73,7 @@ export class ChatWebSocket {
 
   disconnect() {
     this.stopHeartbeat();
+    this.cleanupVisibilityTracking();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -113,5 +119,35 @@ export class ChatWebSocket {
 
   get isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  private setupVisibilityTracking() {
+    // Set up page visibility tracking
+    const handleVisibilityChange = () => {
+      const wasVisible = this.isPageVisible;
+      this.isPageVisible = !document.hidden;
+      
+      if (wasVisible !== this.isPageVisible) {
+        console.log('Page visibility changed:', this.isPageVisible ? 'visible' : 'hidden');
+        this.sendVisibilityStatus();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    // Store handler for cleanup
+    (this as any).visibilityHandler = handleVisibilityChange;
+  }
+
+  private cleanupVisibilityTracking() {
+    if ((this as any).visibilityHandler) {
+      document.removeEventListener('visibilitychange', (this as any).visibilityHandler);
+      delete (this as any).visibilityHandler;
+    }
+  }
+
+  private sendVisibilityStatus() {
+    const status = this.isPageVisible ? 'active' : 'inactive';
+    this.send({ UpdateStatus: { status } });
   }
 }
