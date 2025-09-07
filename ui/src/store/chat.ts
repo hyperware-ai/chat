@@ -37,6 +37,7 @@ interface ChatStore {
   sendMessage: (chatId: string, content: string, replyTo?: string) => Promise<void>;
   editMessage: (messageId: string, newContent: string) => Promise<void>;
   deleteMessage: (messageId: string) => Promise<void>;
+  deleteMessageLocally: (messageId: string) => void;
   deleteChat: (chatId: string) => Promise<void>;
   updateSettings: (settings: Settings) => Promise<void>;
   updateProfile: (profile: UserProfile) => Promise<void>;
@@ -450,7 +451,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  // Delete a message
+  // Delete a message for both parties
   deleteMessage: async (messageId: string) => {
     try {
       const chatId = get().activeChat?.id;
@@ -458,7 +459,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       
       await api.delete_message({ 
         chat_id: chatId,
-        message_id: messageId 
+        message_id: messageId,
+        delete_for_both: true
       });
       
       // Update local state
@@ -488,6 +490,40 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (error) {
       set({ error: 'Failed to delete message' });
     }
+  },
+
+  // Delete a message locally only
+  deleteMessageLocally: (messageId: string) => {
+    const chatId = get().activeChat?.id;
+    if (!chatId) {
+      console.error('No active chat');
+      return;
+    }
+    
+    // Update local state only (no API call)
+    set(state => {
+      const updatedChats = state.chats.map(chat => ({
+        ...chat,
+        messages: chat.messages.filter(msg => msg.id !== messageId)
+      }));
+      
+      // Save the updated chat to IndexedDB
+      const updatedChat = updatedChats.find(c => c.id === chatId);
+      if (updatedChat) {
+        idbStorage.saveChat(updatedChat);
+      }
+      
+      return {
+        chats: updatedChats,
+        // Also update activeChat if it's the same chat
+        activeChat: state.activeChat?.id === chatId 
+          ? { 
+              ...state.activeChat, 
+              messages: state.activeChat.messages.filter(msg => msg.id !== messageId) 
+            }
+          : state.activeChat
+      };
+    });
   },
 
   // Delete a chat

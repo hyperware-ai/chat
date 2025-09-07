@@ -287,6 +287,7 @@ pub struct EditMessageReq {
 pub struct DeleteMessageReq {
     pub chat_id: String,
     pub message_id: String,
+    pub delete_for_both: Option<bool>, // true = delete for both, false/None = delete locally only
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -868,6 +869,7 @@ impl ChatState {
                 let counterparty = chat.counterparty.clone();
                 let message_id = req.message_id.clone();
                 let chat_id = req.chat_id.clone();
+                let delete_for_both = req.delete_for_both.unwrap_or(false);
                 
                 // Remove the message
                 chat.messages.remove(pos);
@@ -881,11 +883,13 @@ impl ChatState {
                     });
                 }
                 
-                // Send deletion notification to counterparty
-                let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-                spawn(async move {
-                    let _ = receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
-                });
+                // Only send deletion notification to counterparty if deleting for both
+                if delete_for_both {
+                    let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+                    spawn(async move {
+                        let _ = receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
+                    });
+                }
                 
                 return Ok("Message deleted".to_string());
             }
