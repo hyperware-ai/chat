@@ -29,6 +29,7 @@ use chat_caller_utils::chat::{
     receive_chat_creation_remote_rpc,
     receive_message_remote_rpc,
     receive_message_ack_remote_rpc,
+    receive_message_deletion_remote_rpc,
     receive_reaction_remote_rpc,
 };
 use chat_caller_utils::ChatMessage as CUChatMessage;
@@ -863,7 +864,29 @@ impl ChatState {
         // Find and remove message from the specified chat
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == req.message_id) {
+                // Store counterparty before removing message
+                let counterparty = chat.counterparty.clone();
+                let message_id = req.message_id.clone();
+                let chat_id = req.chat_id.clone();
+                
+                // Remove the message
                 chat.messages.remove(pos);
+                
+                // Notify all WebSocket connections about the updated chat
+                for &channel_id in self.ws_connections.keys() {
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                        mime: Some("application/json".to_string()),
+                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                    });
+                }
+                
+                // Send deletion notification to counterparty
+                let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+                spawn(async move {
+                    let _ = receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
+                });
+                
                 return Ok("Message deleted".to_string());
             }
         }
@@ -1704,6 +1727,30 @@ impl ChatState {
         }
         println!("Sent message {} not found for ACK", message_id);
         // Not an error - might be an ACK for a message we don't have anymore
+        Ok(())
+    }
+
+    #[remote]
+    async fn receive_message_deletion(&mut self, message_id: String, chat_id: String) -> Result<(), String> {
+        println!("Received deletion request for message {} in chat {}", message_id, chat_id);
+        
+        // Find the chat and delete the message
+        if let Some(chat) = self.chats.get_mut(&chat_id) {
+            if let Some(pos) = chat.messages.iter().position(|m| m.id == message_id) {
+                chat.messages.remove(pos);
+                println!("Deleted message {} from chat {}", message_id, chat_id);
+                
+                // Notify all WebSocket connections about the updated chat
+                for &channel_id in self.ws_connections.keys() {
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                        mime: Some("application/json".to_string()),
+                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                    });
+                }
+            }
+        }
+        
         Ok(())
     }
 
