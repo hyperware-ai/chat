@@ -1119,6 +1119,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "debug-chats"
+version = "0.1.0"
+dependencies = [
+ "hyperware_process_lib",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

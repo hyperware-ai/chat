@@ -20,6 +20,43 @@
   padding-bottom: 20px;
   -webkit-overflow-scrolling: touch;
   min-height: 0;
+  position: relative;
+  /* Prevent iOS bounce when pulling down */
+  overscroll-behavior-y: contain;
+}
+
+/* Sync indicator for pull-to-refresh */
+.sync-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: height 0.2s ease-out, opacity 0.2s ease-out;
+  overflow: hidden;
+  z-index: 10;
+}
+
+.sync-indicator-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.sync-spinner {
+  animation: spin 1s linear infinite;
+  font-size: 18px;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Swipe navigation styles */

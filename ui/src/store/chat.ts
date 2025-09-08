@@ -7,7 +7,9 @@ import {
   MessageStatus 
 } from '../types/chat';
 import type { WsServerMessage } from '../types/chat';
+import type { SyncHashInfo } from '../../../target/ui/caller-utils';
 import * as api from '../utils/chatApi';
+import { get_sync_hash, get_all_sync_hashes, get_chat } from '../../../target/ui/caller-utils';
 import { ChatWebSocket } from '../utils/websocket';
 import { idbStorage } from '../utils/indexeddb';
 
@@ -32,6 +34,8 @@ interface ChatStore {
   initialize: () => Promise<void>;
   loadChatsFromServer: () => Promise<void>;
   syncWithServer: () => Promise<void>;
+  verifySyncStatus: () => Promise<void>;
+  forceSyncChat: (chatId: string) => Promise<void>;
   loadProfile: () => Promise<void>;
   loadSettings: () => Promise<void>;
   createChat: (counterparty: string) => Promise<void>;
@@ -64,6 +68,38 @@ function generateMessageHash(content: string, sender: string, timestamp: number)
   // Use 5-second buckets for timestamp to handle minor time differences
   const timeBucket = Math.floor(timestamp / 5);
   return `${sender}-${timeBucket}-${content.substring(0, 100)}`;
+}
+
+// Helper function to calculate a simple hash for sync verification (matches backend)
+function calculateChatHash(chat: Chat): string {
+  let hash = 0;
+  
+  // Hash message count
+  const str1 = chat.messages.length.toString();
+  for (let i = 0; i < str1.length; i++) {
+    hash = (hash << 5) - hash + str1.charCodeAt(i);
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  
+  // Hash each message's key fields
+  for (const msg of chat.messages) {
+    const msgStr = `${msg.id}${msg.sender}${msg.content}${msg.timestamp}`;
+    for (let i = 0; i < msgStr.length; i++) {
+      hash = (hash << 5) - hash + msgStr.charCodeAt(i);
+      hash = hash & hash;
+    }
+    
+    // Hash reactions
+    for (const reaction of msg.reactions || []) {
+      const reactionStr = `${reaction.emoji}${reaction.user}${reaction.timestamp}`;
+      for (let i = 0; i < reactionStr.length; i++) {
+        hash = (hash << 5) - hash + reactionStr.charCodeAt(i);
+        hash = hash & hash;
+      }
+    }
+  }
+  
+  return Math.abs(hash).toString(16);
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
@@ -190,6 +226,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           console.error('[INIT] Failed to load profile/settings:', error);
         });
         
+        // Verify sync status after initial load
+        setTimeout(() => {
+          console.log('[INIT] Running initial sync verification...');
+          get().verifySyncStatus();
+        }, 3000);
+        
+        // Set up periodic sync verification (every 5 minutes)
+        setInterval(() => {
+          console.log('[PERIODIC] Running periodic sync verification...');
+          get().verifySyncStatus();
+        }, 5 * 60 * 1000);
+        
       } else {
         set({ isConnected: false, error: 'Not connected to Hyperware' });
       }
@@ -255,6 +303,102 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       console.log('[SYNC] Sync complete, saved to IndexedDB');
     } catch (error) {
       console.error('[SYNC] Failed to sync with server:', error);
+    }
+  },
+  
+  // Verify sync status - check for desyncs between frontend and backend
+  verifySyncStatus: async () => {
+    try {
+      console.log('[SYNC-VERIFY] Starting sync verification...');
+      
+      // Get all sync hashes from backend
+      const backendHashes = await get_all_sync_hashes();
+      console.log('[SYNC-VERIFY] Got', backendHashes.length, 'hashes from backend');
+      
+      const state = get();
+      const desyncedChats: string[] = [];
+      
+      // Check each chat's hash
+      for (const backendHash of backendHashes) {
+        const localChat = state.chats.find(c => c.id === backendHash.chat_id);
+        
+        if (!localChat) {
+          console.log('[SYNC-VERIFY] Chat missing locally:', backendHash.chat_id);
+          desyncedChats.push(backendHash.chat_id);
+          continue;
+        }
+        
+        // Calculate local hash
+        const localHash = calculateChatHash(localChat);
+        
+        // Compare hashes
+        if (localHash !== backendHash.hash) {
+          console.log('[SYNC-VERIFY] Hash mismatch for chat:', backendHash.chat_id);
+          console.log('[SYNC-VERIFY]   Local hash:', localHash);
+          console.log('[SYNC-VERIFY]   Backend hash:', backendHash.hash);
+          console.log('[SYNC-VERIFY]   Local messages:', localChat.messages.length);
+          console.log('[SYNC-VERIFY]   Backend messages:', backendHash.message_count);
+          desyncedChats.push(backendHash.chat_id);
+        } else {
+          console.log('[SYNC-VERIFY] Chat in sync:', backendHash.chat_id);
+        }
+      }
+      
+      // Check for local chats not on backend
+      for (const localChat of state.chats) {
+        if (!backendHashes.find(h => h.chat_id === localChat.id)) {
+          console.log('[SYNC-VERIFY] Chat exists locally but not on backend:', localChat.id);
+          desyncedChats.push(localChat.id);
+        }
+      }
+      
+      // If any chats are desynced, force a full sync
+      if (desyncedChats.length > 0) {
+        console.log('[SYNC-VERIFY] Found', desyncedChats.length, 'desynced chats, forcing full sync...');
+        await get().syncWithServer();
+      } else {
+        console.log('[SYNC-VERIFY] All chats are in sync');
+      }
+    } catch (error) {
+      console.error('[SYNC-VERIFY] Failed to verify sync status:', error);
+      // On error, force a full sync to be safe
+      await get().syncWithServer();
+    }
+  },
+  
+  // Force sync a specific chat
+  forceSyncChat: async (chatId: string) => {
+    try {
+      console.log('[FORCE-SYNC] Force syncing chat:', chatId);
+      
+      // Get the chat from the server
+      const serverChat = await get_chat({ chat_id: chatId });
+      console.log('[FORCE-SYNC] Got chat from server with', serverChat.messages.length, 'messages');
+      
+      // Update local state
+      set(state => {
+        const updatedChats = state.chats.map(chat => 
+          chat.id === chatId ? serverChat : chat
+        );
+        
+        // Also update activeChat if it's the same
+        const updatedActiveChat = state.activeChat?.id === chatId 
+          ? serverChat 
+          : state.activeChat;
+        
+        return {
+          chats: updatedChats,
+          activeChat: updatedActiveChat
+        };
+      });
+      
+      // Save to IndexedDB
+      await idbStorage.saveChat(serverChat);
+      
+      console.log('[FORCE-SYNC] Chat synced successfully');
+    } catch (error) {
+      console.error('[FORCE-SYNC] Failed to force sync chat:', error);
+      set({ error: `Failed to sync chat: ${error}` });
     }
   },
 

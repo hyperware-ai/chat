@@ -9,7 +9,8 @@ const ChatView: React.FC = () => {
   const { 
     activeChat, 
     markChatAsRead, 
-    setActiveChat
+    setActiveChat,
+    forceSyncChat
   } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -17,8 +18,13 @@ const ChatView: React.FC = () => {
   const [isSwiping, setIsSwiping] = useState(false);
   const [showOfflineTooltip, setShowOfflineTooltip] = useState(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [pullDistance, setPullDistance] = useState(0);
   const startXRef = useRef(0);
   const startYRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
+  const isAtBottomRef = useRef(false);
+  const touchStartYRef = useRef(0);
   const chatViewRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -49,7 +55,7 @@ const ChatView: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeChat?.messages]);
 
-  // Check if scrolled to bottom for scroll button
+  // Check if scrolled to bottom for scroll button and sync trigger
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -57,9 +63,13 @@ const ChatView: React.FC = () => {
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = container;
       
-      // Check if at bottom for scroll button
-      const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
+      // Check if at bottom
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
+      isAtBottomRef.current = isAtBottom;
       setShowScrollButton(!isAtBottom);
+      
+      // Store last scroll position
+      lastScrollTopRef.current = scrollTop;
     };
 
     container.addEventListener('scroll', handleScroll);
@@ -76,6 +86,75 @@ const ChatView: React.FC = () => {
   // Scroll to bottom function
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+  
+  // Handle pull-to-refresh for syncing
+  const handleMessagesTouchStart = (e: React.TouchEvent) => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    
+    // Check if we're at the bottom
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
+    
+    if (isAtBottom) {
+      touchStartYRef.current = e.touches[0].clientY;
+    }
+  };
+  
+  const handleMessagesTouchMove = (e: React.TouchEvent) => {
+    if (touchStartYRef.current === 0 || isSyncing) return;
+    
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    
+    // Check if still at bottom
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
+    
+    if (!isAtBottom) {
+      // User has scrolled up, cancel pull-to-refresh
+      touchStartYRef.current = 0;
+      setPullDistance(0);
+      return;
+    }
+    
+    const currentY = e.touches[0].clientY;
+    const deltaY = currentY - touchStartYRef.current; // Positive when pulling down
+    
+    // If pulling down past the bottom
+    if (deltaY > 10) {
+      // Prevent default to stop bounce on iOS
+      e.preventDefault();
+      
+      const pull = Math.min(deltaY, 100);
+      setPullDistance(pull);
+      
+      // Add haptic feedback at threshold
+      if (pull >= 60 && pull < 65 && 'vibrate' in navigator) {
+        navigator.vibrate(10);
+      }
+    }
+  };
+  
+  const handleMessagesTouchEnd = async () => {
+    if (pullDistance >= 60 && !isSyncing && activeChat) {
+      // Trigger sync
+      setIsSyncing(true);
+      setPullDistance(0);
+      
+      try {
+        console.log('[PULL-REFRESH] Syncing chat:', activeChat.id);
+        await forceSyncChat(activeChat.id);
+      } finally {
+        setIsSyncing(false);
+      }
+    } else {
+      setPullDistance(0);
+    }
+    
+    // Reset touch start
+    touchStartYRef.current = 0;
   };
 
   // Swipe handlers for navigation
@@ -153,7 +232,43 @@ const ChatView: React.FC = () => {
         </div>
       )}
 
-      <div className="messages-container" ref={messagesContainerRef}>
+      <div 
+        className="messages-container" 
+        ref={messagesContainerRef}
+        onTouchStart={handleMessagesTouchStart}
+        onTouchMove={handleMessagesTouchMove}
+        onTouchEnd={handleMessagesTouchEnd}
+      >
+        {/* Pull-to-refresh indicator */}
+        {(pullDistance > 0 || isSyncing) && (
+          <div 
+            className="sync-indicator"
+            style={{
+              height: pullDistance > 0 ? `${pullDistance}px` : '60px',
+              opacity: pullDistance > 0 ? Math.min(pullDistance / 60, 1) : 1
+            }}
+          >
+            <div className="sync-indicator-content">
+              {isSyncing ? (
+                <>
+                  <span className="sync-spinner">⟳</span>
+                  <span>Syncing...</span>
+                </>
+              ) : pullDistance >= 60 ? (
+                <>
+                  <span>↓</span>
+                  <span>Release to sync</span>
+                </>
+              ) : (
+                <>
+                  <span>↓</span>
+                  <span>Pull to sync</span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+        
         <MessageList messages={activeChat.messages} />
         <div ref={messagesEndRef} />
       </div>

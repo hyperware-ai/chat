@@ -23,6 +23,8 @@ use flate2::write::GzEncoder;
 use flate2::read::GzDecoder;
 use flate2::Compression;
 use std::io::{Write, Read};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 // Import generated RPC functions from caller-utils
 use chat_caller_utils::chat::{
@@ -261,6 +263,20 @@ pub struct GetMessagesReq {
     pub chat_id: String,
     pub before_timestamp: Option<u64>,
     pub limit: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetSyncHashReq {
+    pub chat_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SyncHashInfo {
+    pub chat_id: String,
+    pub message_count: u32,
+    pub last_message_id: Option<String>,
+    pub last_message_timestamp: Option<u64>,
+    pub hash: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -523,16 +539,16 @@ async fn send_push_notification_for_message(
                             if let Some(end) = e[start..].find(':') {
                                 let endpoint = &e[start..start + end];
                                 println!("Removing invalid endpoint: {}", endpoint);
-                                
+
                                 // Send request to remove the invalid subscription
                                 let remove_action = NotificationsAction::RemoveSubscription {
                                     endpoint: endpoint.to_string(),
                                 };
-                                
+
                                 let remove_request = Request::to(notifications_address)
                                     .body(serde_json::to_vec(&remove_action).unwrap())
                                     .expects_response(5);
-                                
+
                                 // Fire and forget the removal request
                                 spawn(async move {
                                     match send::<NotificationsResponse>(remove_request).await {
@@ -729,6 +745,7 @@ impl ChatState {
         Ok(chat)
     }
 
+    #[local]
     #[http]
     async fn get_chats(&self) -> Result<Vec<Chat>, String> {
         let mut chats: Vec<Chat> = self.chats.values().cloned().collect();
@@ -741,6 +758,7 @@ impl ChatState {
         Ok(chats)
     }
 
+    #[local]
     #[http]
     async fn get_chat(&self, req: GetChatReq) -> Result<Chat, String> {
 
@@ -749,6 +767,7 @@ impl ChatState {
             .ok_or_else(|| "Chat not found".to_string())
     }
 
+    #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
         // Get the chat
@@ -776,6 +795,82 @@ impl ChatState {
         messages.reverse();
 
         Ok(messages)
+    }
+
+    #[http]
+    async fn get_sync_hash(&self, req: GetSyncHashReq) -> Result<SyncHashInfo, String> {
+        let chat = self.chats.get(&req.chat_id)
+            .ok_or_else(|| "Chat not found".to_string())?;
+
+        // Calculate a hash of the message history
+        let mut hasher = DefaultHasher::new();
+
+        // Hash message count
+        chat.messages.len().hash(&mut hasher);
+
+        // Hash each message's key fields (id, sender, content, timestamp)
+        for msg in &chat.messages {
+            msg.id.hash(&mut hasher);
+            msg.sender.hash(&mut hasher);
+            msg.content.hash(&mut hasher);
+            msg.timestamp.hash(&mut hasher);
+
+            // Also hash reactions to detect reaction desyncs
+            for reaction in &msg.reactions {
+                reaction.emoji.hash(&mut hasher);
+                reaction.user.hash(&mut hasher);
+                reaction.timestamp.hash(&mut hasher);
+            }
+        }
+
+        let hash = hasher.finish();
+
+        Ok(SyncHashInfo {
+            chat_id: req.chat_id,
+            message_count: chat.messages.len() as u32,
+            last_message_id: chat.messages.last().map(|m| m.id.clone()),
+            last_message_timestamp: chat.messages.last().map(|m| m.timestamp),
+            hash: format!("{:x}", hash),
+        })
+    }
+
+    #[http]
+    async fn get_all_sync_hashes(&self) -> Result<Vec<SyncHashInfo>, String> {
+        let mut sync_hashes = Vec::new();
+
+        for (chat_id, chat) in &self.chats {
+            let mut hasher = DefaultHasher::new();
+
+            // Hash message count
+            chat.messages.len().hash(&mut hasher);
+
+            // Hash each message's key fields
+            for msg in &chat.messages {
+                msg.id.hash(&mut hasher);
+                msg.sender.hash(&mut hasher);
+                msg.content.hash(&mut hasher);
+                msg.timestamp.hash(&mut hasher);
+
+                // Also hash reactions
+                for reaction in &msg.reactions {
+                    reaction.emoji.hash(&mut hasher);
+                    reaction.user.hash(&mut hasher);
+                    reaction.timestamp.hash(&mut hasher);
+                }
+            }
+
+            let hash = hasher.finish();
+
+            sync_hashes.push(SyncHashInfo {
+                chat_id: chat_id.clone(),
+                message_count: chat.messages.len() as u32,
+                last_message_id: chat.messages.last().map(|m| m.id.clone()),
+                last_message_timestamp: chat.messages.last().map(|m| m.timestamp),
+                hash: format!("{:x}", hash),
+            });
+        }
+
+        Ok(sync_hashes)
     }
 
     #[http]
