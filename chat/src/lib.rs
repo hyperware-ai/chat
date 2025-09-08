@@ -33,8 +33,10 @@ use chat_caller_utils::chat::{
     receive_message_ack_remote_rpc,
     receive_message_deletion_remote_rpc,
     receive_reaction_remote_rpc,
+    receive_profile_update_remote_rpc,
 };
 use chat_caller_utils::ChatMessage as CUChatMessage;
+use chat_caller_utils::UserProfile as CUUserProfile;
 
 
 // Notification structures matching the notifications server API
@@ -133,6 +135,8 @@ pub struct Chat {
     pub unread_count: u32,
     pub is_blocked: bool,
     pub notify: bool,
+    #[serde(default)]
+    pub counterparty_profile: Option<UserProfile>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -394,6 +398,8 @@ pub struct ChatState {
     pub last_heartbeat: HashMap<u32, u64>, // channel_id -> timestamp
     #[serde(default)]
     pub active_connections: HashSet<u32>, // channel_ids that are actively viewing the app
+    #[serde(default)]
+    pub node_profiles: HashMap<String, UserProfile>, // Store profiles of other nodes
 }
 
 fn default_delivery_queue() -> Arc<Mutex<HashMap<String, Vec<ChatMessage>>>> {
@@ -413,6 +419,7 @@ impl Default for ChatState {
             browser_connections: HashMap::new(),
             last_heartbeat: HashMap::new(),
             active_connections: HashSet::new(),
+            node_profiles: HashMap::new(),
         }
     }
 }
@@ -651,6 +658,7 @@ impl ChatState {
                 unread_count: 0,
                 is_blocked: false,
                 notify: false,
+                counterparty_profile: None,
             };
 
             self.chats.insert("system:welcome".to_string(), welcome_chat);
@@ -718,6 +726,9 @@ impl ChatState {
             .unwrap()
             .as_secs();
 
+        // Get counterparty profile if we have it
+        let counterparty_profile = self.node_profiles.get(&req.counterparty).cloned();
+
         let chat = Chat {
             id: chat_id.clone(),
             counterparty: req.counterparty.clone(),
@@ -726,19 +737,29 @@ impl ChatState {
             unread_count: 0,
             is_blocked: false,
             notify: true,
+            counterparty_profile,
         };
 
         self.chats.insert(chat_id, chat.clone());
 
-        // Notify the counterparty about the chat creation asynchronously
+        // Notify the counterparty about the chat creation and our profile asynchronously
         let target = Address::from((req.counterparty.as_str(), OUR_PROCESS_ID));
         let our_node = our().node.clone();
+        let our_profile = self.profile.clone();
 
         // Spawn task to notify counterparty without blocking
         spawn(async move {
-            match receive_chat_creation_remote_rpc(&target, our_node).await {
+            // First notify about chat creation
+            match receive_chat_creation_remote_rpc(&target, our_node.clone()).await {
                 Ok(_) => println!("Successfully notified counterparty about chat creation"),
                 Err(e) => println!("Failed to notify counterparty about chat creation: {:?}", e),
+            }
+
+            // Then share our profile
+            let cu_profile = ChatState::to_cu_user_profile(&our_profile);
+            match receive_profile_update_remote_rpc(&target, our_node, cu_profile).await {
+                Ok(_) => println!("Successfully shared profile with counterparty"),
+                Err(e) => println!("Failed to share profile with counterparty: {:?}", e),
             }
         });
 
@@ -917,6 +938,7 @@ impl ChatState {
                 unread_count: 0,
                 is_blocked: false,
                 notify: true,
+                counterparty_profile: None,
             }
         });
 
@@ -1129,6 +1151,7 @@ impl ChatState {
                 unread_count: 0,
                 is_blocked: false,
                 notify: true,
+                counterparty_profile: self.node_profiles.get(&counterparty).cloned(),
             }
         });
 
@@ -1269,7 +1292,35 @@ impl ChatState {
 
     #[http]
     async fn update_profile(&mut self, profile: UserProfile) -> Result<String, String> {
-        self.profile = profile;
+        self.profile = profile.clone();
+
+        // Notify all chat counterparties about the profile update
+        let our_node = our().node.clone();
+        let counterparties: Vec<String> = self.chats.values()
+            .map(|chat| chat.counterparty.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for counterparty in counterparties {
+            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+            let node = our_node.clone();
+            let prof = profile.clone();
+
+            spawn(async move {
+                let cu_profile = ChatState::to_cu_user_profile(&prof);
+                match receive_profile_update_remote_rpc(&target, node, cu_profile).await {
+                    Ok(_) => {
+                        // Successfully notified counterparty
+                    },
+                    Err(_) => {
+                        // Counterparty is likely offline, profile will be shared when they come online
+                        // No need to print errors as this is expected behavior
+                    }
+                }
+            });
+        }
+
         Ok("Profile updated".to_string())
     }
 
@@ -1294,6 +1345,28 @@ impl ChatState {
             send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
                 mime: Some("application/json".to_string()),
                 bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
+            });
+        }
+
+        // Notify all chat counterparties about the profile update
+        let our_node = our().node.clone();
+        let counterparties: Vec<String> = self.chats.values()
+            .map(|chat| chat.counterparty.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for counterparty in counterparties {
+            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+            let node = our_node.clone();
+            let prof = self.profile.clone();
+
+            spawn(async move {
+                let cu_profile = ChatState::to_cu_user_profile(&prof);
+                match receive_profile_update_remote_rpc(&target, node, cu_profile).await {
+                    Ok(_) => println!("Notified {} about profile pic update", counterparty),
+                    Err(e) => println!("Failed to notify {} about profile pic update: {:?}", counterparty, e),
+                }
             });
         }
 
@@ -1400,6 +1473,7 @@ impl ChatState {
                 unread_count: 0,
                 is_blocked: false,
                 notify: true,
+                counterparty_profile: None,
             }
         });
 
@@ -1506,6 +1580,7 @@ impl ChatState {
                 unread_count: 0,
                 is_blocked: false,
                 notify: true,
+                counterparty_profile: None,
             }
         });
 
@@ -1577,6 +1652,9 @@ impl ChatState {
         // Check if chat already exists
         let chat_exists = self.chats.contains_key(&chat_id);
         if !chat_exists {
+            // Get counterparty profile if we have it
+            let counterparty_profile = self.node_profiles.get(&counterparty).cloned();
+
             let chat = Chat {
                 id: chat_id.clone(),
                 counterparty: counterparty.clone(),
@@ -1585,6 +1663,7 @@ impl ChatState {
                 unread_count: 0,
                 is_blocked: false,
                 notify: true,
+                counterparty_profile,
             };
 
             self.chats.insert(chat_id.clone(), chat.clone());
@@ -1616,6 +1695,7 @@ impl ChatState {
             // Try to deliver queued messages now that we know the counterparty is online
             let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
             let delivery_queue = self.delivery_queue.clone();
+            let counterparty_clone = counterparty.clone();
 
             spawn(async move {
                 for msg in queued_messages {
@@ -1624,13 +1704,13 @@ impl ChatState {
 
                     match receive_message_remote_rpc(&target, msg_for_rpc).await {
                         Ok(_) => {
-                            println!("Successfully delivered queued message {} to {}", msg.id, counterparty);
+                            println!("Successfully delivered queued message {} to {}", msg.id, counterparty_clone);
                         }
                         Err(e) => {
-                            println!("Failed to deliver queued message {} to {}: {:?}", msg.id, counterparty, e);
+                            println!("Failed to deliver queued message {} to {}: {:?}", msg.id, counterparty_clone, e);
                             // Re-add to queue if delivery fails
                             let mut queue = delivery_queue.lock().unwrap();
-                            queue.entry(counterparty.clone())
+                            queue.entry(counterparty_clone.clone())
                                 .or_insert_with(Vec::new)
                                 .push(msg);
                             break; // Stop trying to send more messages if one fails
@@ -1639,6 +1719,23 @@ impl ChatState {
                 }
             });
         }
+
+        // Share our profile with the counterparty
+        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+        let our_node = our().node.clone();
+        let our_profile = self.profile.clone();
+
+        spawn(async move {
+            let cu_profile = ChatState::to_cu_user_profile(&our_profile);
+            match receive_profile_update_remote_rpc(&target, our_node, cu_profile).await {
+                Ok(_) => {
+                    // Successfully shared profile
+                },
+                Err(_) => {
+                    // Counterparty is likely offline, profile will be shared when they come online
+                }
+            }
+        });
 
         Ok(())
     }
@@ -1658,6 +1755,7 @@ impl ChatState {
                 unread_count: 0,
                 is_blocked: false,
                 notify: true,
+                counterparty_profile: self.node_profiles.get(&message.sender).cloned(),
             }
         });
 
@@ -1874,6 +1972,32 @@ impl ChatState {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == message_id) {
                 chat.messages.remove(pos);
                 println!("Deleted message {} from chat {}", message_id, chat_id);
+
+                // Notify all WebSocket connections about the updated chat
+                for &channel_id in self.ws_connections.keys() {
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
+                        mime: Some("application/json".to_string()),
+                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[remote]
+    async fn receive_profile_update(&mut self, node: String, profile: UserProfile) -> Result<(), String> {
+        println!("Received profile update from {}: {:?}", node, profile);
+
+        // Store the profile
+        self.node_profiles.insert(node.clone(), profile.clone());
+
+        // Update all chats with this counterparty
+        for chat in self.chats.values_mut() {
+            if chat.counterparty == node {
+                chat.counterparty_profile = Some(profile.clone());
 
                 // Notify all WebSocket connections about the updated chat
                 for &channel_id in self.ws_connections.keys() {
@@ -2295,6 +2419,7 @@ impl ChatState {
                                 unread_count: 0,
                                 is_blocked: false,
                                 notify: true,
+                                counterparty_profile: None,
                             });
 
                         chat.messages.push(message.clone());
@@ -2377,6 +2502,25 @@ mod base64 {
         }
 
         Ok(output)
+    }
+}
+
+// Helper functions for converting between UserProfile types
+impl ChatState {
+    // Helper function to convert our UserProfile to chat_caller_utils::UserProfile
+    fn to_cu_user_profile(profile: &UserProfile) -> CUUserProfile {
+        CUUserProfile {
+            name: profile.name.clone(),
+            profile_pic: profile.profile_pic.clone(),
+        }
+    }
+
+    // Helper function to convert from chat_caller_utils::UserProfile to our UserProfile
+    fn from_cu_user_profile(profile: CUUserProfile) -> UserProfile {
+        UserProfile {
+            name: profile.name,
+            profile_pic: profile.profile_pic,
+        }
     }
 }
 

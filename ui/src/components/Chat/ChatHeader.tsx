@@ -21,7 +21,11 @@ const ChatHeader: React.FC<ChatHeaderProps> = ({ chat }) => {
         </button>
         
         <div className="chat-header-info" onClick={() => setShowSettings(true)}>
-          <Avatar name={chat.counterparty} size="small" />
+          <Avatar 
+            name={chat.counterparty} 
+            profilePic={chat.counterparty_profile?.profile_pic}
+            size="small" 
+          />
           <span className="chat-header-name">{chat.counterparty}</span>
         </div>
         
