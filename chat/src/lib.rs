@@ -376,6 +376,7 @@ pub struct ChatState {
     pub ws_connections: HashMap<u32, String>, // channel_id -> node/browser_id
     pub browser_connections: HashMap<String, u32>, // chat_key -> channel_id
     pub last_heartbeat: HashMap<u32, u64>, // channel_id -> timestamp
+    #[serde(default)]
     pub active_connections: HashSet<u32>, // channel_ids that are actively viewing the app
 }
 
@@ -718,7 +719,7 @@ impl ChatState {
         // Get the chat
         let chat = self.chats.get(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
-        
+
         // Filter messages based on timestamp if provided
         let mut messages: Vec<ChatMessage> = if let Some(before_ts) = req.before_timestamp {
             chat.messages.iter()
@@ -728,17 +729,17 @@ impl ChatState {
         } else {
             chat.messages.clone()
         };
-        
+
         // Sort by timestamp descending (newest first)
         messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        
+
         // Apply limit (convert u64 to usize for truncate)
         let limit = req.limit.unwrap_or(50) as usize;
         messages.truncate(limit);
-        
+
         // Return in ascending order (oldest first) for display
         messages.reverse();
-        
+
         Ok(messages)
     }
 
@@ -870,10 +871,10 @@ impl ChatState {
                 let message_id = req.message_id.clone();
                 let chat_id = req.chat_id.clone();
                 let delete_for_both = req.delete_for_both.unwrap_or(false);
-                
+
                 // Remove the message
                 chat.messages.remove(pos);
-                
+
                 // Notify all WebSocket connections about the updated chat
                 for &channel_id in self.ws_connections.keys() {
                     let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -882,7 +883,7 @@ impl ChatState {
                         bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
                     });
                 }
-                
+
                 // Only send deletion notification to counterparty if deleting for both
                 if delete_for_both {
                     let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
@@ -890,7 +891,7 @@ impl ChatState {
                         let _ = receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
                     });
                 }
-                
+
                 return Ok("Message deleted".to_string());
             }
         }
@@ -1737,13 +1738,13 @@ impl ChatState {
     #[remote]
     async fn receive_message_deletion(&mut self, message_id: String, chat_id: String) -> Result<(), String> {
         println!("Received deletion request for message {} in chat {}", message_id, chat_id);
-        
+
         // Find the chat and delete the message
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == message_id) {
                 chat.messages.remove(pos);
                 println!("Deleted message {} from chat {}", message_id, chat_id);
-                
+
                 // Notify all WebSocket connections about the updated chat
                 for &channel_id in self.ws_connections.keys() {
                     let chat_update = WsServerMessage::ChatUpdate(chat.clone());
@@ -1754,7 +1755,7 @@ impl ChatState {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -2071,7 +2072,7 @@ impl ChatState {
                 } else if status == "inactive" {
                     self.active_connections.remove(&channel_id);
                 }
-                
+
                 if let Some(node) = self.ws_connections.get(&channel_id) {
                     let msg = WsServerMessage::StatusUpdate {
                         node: node.clone(),
