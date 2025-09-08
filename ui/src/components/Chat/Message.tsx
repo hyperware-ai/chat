@@ -4,6 +4,9 @@ import MessageMenu from './MessageMenu';
 import './Message.css';
 import { add_reaction, remove_reaction } from '../../../../target/ui/caller-utils';
 import { useChatStore } from '../../store/chat';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 
 interface MessageProps {
   message: ChatMessage;
@@ -143,28 +146,39 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
 
   const handleReaction = async (emoji: string) => {
     try {
+      const ourNode = (window as any).our?.node;
+      console.log('[REACTION] Our node:', ourNode);
+      console.log('[REACTION] Message reactions:', message.reactions);
+      
       // Check if user already reacted with this emoji
       const existingReaction = message.reactions?.find(
-        r => r.user === window.our?.node && r.emoji === emoji
+        r => r.user === ourNode && r.emoji === emoji
       );
       
+      console.log('[REACTION] Existing reaction found:', existingReaction);
+      console.log('[REACTION] Chat ID:', activeChat?.id, 'Message ID:', message.id);
+      
       if (existingReaction) {
-        await remove_reaction({ 
+        console.log('[REACTION] Removing reaction:', emoji);
+        const result = await remove_reaction({ 
           chat_id: activeChat?.id || '',
           message_id: message.id, 
           emoji 
         });
+        console.log('[REACTION] Remove reaction result:', result);
       } else {
-        await add_reaction({ 
+        console.log('[REACTION] Adding reaction:', emoji);
+        const result = await add_reaction({ 
           chat_id: activeChat?.id || '',
           message_id: message.id, 
           emoji 
         });
+        console.log('[REACTION] Add reaction result:', result);
       }
       
       // WebSocket will handle the update
     } catch (err) {
-      console.error('Error handling reaction:', err);
+      console.error('[REACTION] Error handling reaction:', err);
     }
   };
 
@@ -179,67 +193,143 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
     return grouped;
   };
 
-  // Parse message content for links and images
+  // Render message content with markdown support
   const renderMessageContent = useMemo(() => {
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    const imageRegex = /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i;
-    
-    const parts = message.content.split(urlRegex);
-    
-    return parts.map((part, index) => {
-      // Check if this part is a URL
-      if (part.match(urlRegex)) {
-        // Check if it's an image URL
-        if (imageRegex.test(part) && settings?.show_images) {
-          return (
-            <div key={index} style={{ margin: '8px 0' }}>
-              <a href={part} target="_blank" rel="noopener noreferrer">
-                <img 
-                  src={part} 
-                  alt="Image" 
-                  style={{ 
-                    maxWidth: '100%', 
-                    maxHeight: '300px',
-                    borderRadius: '8px',
-                    display: 'block'
-                  }}
-                  onError={(e) => {
-                    // If image fails to load, show as link instead
-                    const target = e.target as HTMLImageElement;
-                    target.style.display = 'none';
-                    const link = document.createElement('a');
-                    link.href = part;
-                    link.target = '_blank';
-                    link.rel = 'noopener noreferrer';
-                    link.textContent = part;
-                    link.style.color = isOwn ? '#ffffff' : '#4da6ff';
-                    link.style.textDecoration = 'underline';
-                    target.parentNode?.replaceChild(link, target);
-                  }}
-                />
+    return (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={{
+          // Custom link rendering
+          a: ({ href, children }) => {
+            const imageRegex = /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i;
+            // Check if link is an image URL
+            if (href && imageRegex.test(href) && settings?.show_images) {
+              return (
+                <div style={{ margin: '8px 0' }}>
+                  <a href={href} target="_blank" rel="noopener noreferrer">
+                    <img 
+                      src={href} 
+                      alt="Image" 
+                      style={{ 
+                        maxWidth: '100%', 
+                        maxHeight: '300px',
+                        borderRadius: '8px',
+                        display: 'block'
+                      }}
+                      onError={(e) => {
+                        // If image fails to load, show as link instead
+                        const target = e.target as HTMLImageElement;
+                        target.style.display = 'none';
+                        const link = document.createElement('a');
+                        link.href = href;
+                        link.target = '_blank';
+                        link.rel = 'noopener noreferrer';
+                        link.textContent = href;
+                        link.style.color = isOwn ? '#ffffff' : '#4da6ff';
+                        link.style.textDecoration = 'underline';
+                        target.parentNode?.replaceChild(link, target);
+                      }}
+                    />
+                  </a>
+                </div>
+              );
+            }
+            // Regular link
+            return (
+              <a 
+                href={href} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                style={{ 
+                  color: isOwn ? '#ffffff' : '#4da6ff',
+                  textDecoration: 'underline'
+                }}
+              >
+                {children}
               </a>
-            </div>
-          );
-        }
-        // Regular link
-        return (
-          <a 
-            key={index}
-            href={part} 
-            target="_blank" 
-            rel="noopener noreferrer"
-            style={{ 
-              color: isOwn ? '#ffffff' : '#4da6ff',  // Brighter blue for better visibility
-              textDecoration: 'underline'
-            }}
-          >
-            {part}
-          </a>
-        );
-      }
-      // Regular text
-      return <span key={index}>{part}</span>;
-    });
+            );
+          },
+          // Custom paragraph rendering to handle spacing
+          p: ({ children }) => (
+            <p style={{ margin: '4px 0', wordBreak: 'break-word' }}>{children}</p>
+          ),
+          // Custom code rendering
+          code: ({ children, ...props }) => {
+            const inline = !('className' in props && typeof props.className === 'string' && props.className.includes('language-'));
+            if (inline) {
+              return (
+                <code style={{ 
+                  backgroundColor: isOwn ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)',
+                  padding: '2px 4px',
+                  borderRadius: '3px',
+                  fontSize: '0.9em'
+                }}>
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <pre style={{ 
+                backgroundColor: isOwn ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)',
+                padding: '8px',
+                borderRadius: '4px',
+                overflowX: 'auto',
+                fontSize: '0.9em'
+              }}>
+                <code>{children}</code>
+              </pre>
+            );
+          },
+          // Custom list rendering
+          ul: ({ children }) => (
+            <ul style={{ margin: '4px 0', paddingLeft: '20px' }}>{children}</ul>
+          ),
+          ol: ({ children }) => (
+            <ol style={{ margin: '4px 0', paddingLeft: '20px' }}>{children}</ol>
+          ),
+          // Custom blockquote rendering
+          blockquote: ({ children }) => (
+            <blockquote style={{ 
+              borderLeft: `3px solid ${isOwn ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.2)'}`,
+              paddingLeft: '12px',
+              margin: '8px 0',
+              fontStyle: 'italic'
+            }}>
+              {children}
+            </blockquote>
+          ),
+          // Custom heading rendering
+          h1: ({ children }) => (
+            <h1 style={{ fontSize: '1.3em', fontWeight: 'bold', margin: '8px 0 4px 0' }}>{children}</h1>
+          ),
+          h2: ({ children }) => (
+            <h2 style={{ fontSize: '1.2em', fontWeight: 'bold', margin: '6px 0 4px 0' }}>{children}</h2>
+          ),
+          h3: ({ children }) => (
+            <h3 style={{ fontSize: '1.1em', fontWeight: 'bold', margin: '4px 0' }}>{children}</h3>
+          ),
+          // Custom image rendering
+          img: ({ src, alt }) => {
+            if (!settings?.show_images) return null;
+            return (
+              <img 
+                src={src} 
+                alt={alt} 
+                style={{ 
+                  maxWidth: '100%', 
+                  maxHeight: '300px',
+                  borderRadius: '8px',
+                  display: 'block',
+                  margin: '8px 0'
+                }}
+              />
+            );
+          },
+        }}
+      >
+        {message.content}
+      </ReactMarkdown>
+    );
   }, [message.content, settings?.show_images, isOwn]);
 
   return (
@@ -330,7 +420,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
             {Object.entries(groupReactions()).map(([emoji, users]) => (
               <button
                 key={emoji}
-                className={`reaction ${users.includes(window.our?.node || '') ? 'reacted' : ''}`}
+                className={`reaction ${users.includes((window as any).our?.node || '') ? 'reacted' : ''}`}
                 onClick={() => handleReaction(emoji)}
                 title={users.join(', ')}
               >

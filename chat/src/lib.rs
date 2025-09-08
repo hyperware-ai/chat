@@ -502,7 +502,7 @@ async fn send_push_notification_for_message(
 
     // Send the notification request
     println!("Sending notification to notifications:distro:sys");
-    let request = Request::to(notifications_address)
+    let request = Request::to(notifications_address.clone())
         .body(serde_json::to_vec(&notification_action).unwrap())
         .expects_response(5);
 
@@ -515,6 +515,41 @@ async fn send_push_notification_for_message(
                 }
                 NotificationsResponse::Err(e) => {
                     println!("Notification server error: {}", e);
+                    // Check if the error contains "EndpointNotValid"
+                    if e.contains("EndpointNotValid") {
+                        // Extract the endpoint URL from the error message
+                        // Error format: "Failed to send to https://fcm.googleapis.com/fcm/send/...: EndpointNotValid"
+                        if let Some(start) = e.find("https://") {
+                            if let Some(end) = e[start..].find(':') {
+                                let endpoint = &e[start..start + end];
+                                println!("Removing invalid endpoint: {}", endpoint);
+                                
+                                // Send request to remove the invalid subscription
+                                let remove_action = NotificationsAction::RemoveSubscription {
+                                    endpoint: endpoint.to_string(),
+                                };
+                                
+                                let remove_request = Request::to(notifications_address)
+                                    .body(serde_json::to_vec(&remove_action).unwrap())
+                                    .expects_response(5);
+                                
+                                // Fire and forget the removal request
+                                spawn(async move {
+                                    match send::<NotificationsResponse>(remove_request).await {
+                                        Ok(NotificationsResponse::SubscriptionRemoved) => {
+                                            println!("Successfully removed invalid endpoint");
+                                        }
+                                        Ok(resp) => {
+                                            println!("Unexpected response removing endpoint: {:?}", resp);
+                                        }
+                                        Err(e) => {
+                                            println!("Error removing invalid endpoint: {:?}", e);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
                 }
                 _ => {
                     println!("Unexpected notification response");
