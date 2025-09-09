@@ -15,11 +15,14 @@ const ProfileButton: React.FC<ProfileButtonProps> = ({ onClick }) => {
     // Always try to load profile on mount
     loadProfile();
   }, [loadProfile]);
+  
+  // Use the node name for display purposes
+  const nodeName = (window as any).our?.node?.split('.')[0] || 'User';
 
   return (
     <button className="profile-button" onClick={onClick}>
       <Avatar 
-        name={profile?.name || 'User'}
+        name={nodeName}
         profilePic={profile?.profile_pic}
         size="medium"
       />
