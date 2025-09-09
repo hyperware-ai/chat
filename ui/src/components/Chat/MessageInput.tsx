@@ -30,10 +30,15 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (message.trim()) {
-      await sendMessage(chatId, message.trim(), replyingTo?.id);
+    const messageText = message.trim();
+    if (messageText) {
+      // Clear input immediately to prevent double send
       setMessage('');
-      setReplyingTo(null); // Clear reply after sending
+      const replyToId = replyingTo?.id;
+      setReplyingTo(null); // Clear reply immediately
+      
+      // Send message asynchronously
+      await sendMessage(chatId, messageText, replyToId);
       inputRef.current?.focus();
       onSendMessage?.(); // Call callback when message is sent
     }

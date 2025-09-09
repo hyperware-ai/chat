@@ -5,12 +5,14 @@ import './ProfileSettings.css';
 
 const ProfileSettings: React.FC = () => {
   const { profile, updateProfile } = useChatStore();
-  const [name, setName] = useState(profile?.name || '');
   const [profilePic, setProfilePic] = useState(profile?.profile_pic || '');
+  
+  // Use the node name for display purposes
+  const nodeName = (window as any).our?.node?.split('.')[0] || 'User';
 
   const handleSave = async () => {
     await updateProfile({
-      name,
+      name: profile?.name || nodeName, // Keep existing name in backend
       profile_pic: profilePic || null,
     });
   };
@@ -18,18 +20,7 @@ const ProfileSettings: React.FC = () => {
   return (
     <div className="profile-settings">
       <div className="profile-preview">
-        <Avatar name={name} profilePic={profilePic || null} size="large" />
-      </div>
-      
-      <div className="form-group">
-        <label htmlFor="name">Display Name</label>
-        <input
-          type="text"
-          id="name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Enter your name"
-        />
+        <Avatar name={nodeName} profilePic={profilePic || null} size="large" />
       </div>
       
       <div className="form-group">

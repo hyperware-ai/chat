@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ChatMessage } from '../../types/chat';
 import { useChatStore } from '../../store/chat';
 import { add_reaction, forward_message } from '../../../../target/ui/caller-utils';
+import DeleteMessageModal from './DeleteMessageModal';
 import './MessageMenu.css';
 
 interface MessageMenuProps {
@@ -12,9 +13,10 @@ interface MessageMenuProps {
 }
 
 const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onClose }) => {
-  const { deleteMessage, editMessage, chats, activeChat } = useChatStore();
+  const { deleteMessage, deleteMessageLocally, editMessage, chats, activeChat } = useChatStore();
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showForwardPicker, setShowForwardPicker] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
   
   const commonEmojis = ['👍', '❤️', '😂', '😮', '😢', '😡', '👎', '⚡', '🔥', '💯'];
 
@@ -38,9 +40,16 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   };
 
   const handleDelete = () => {
-    if (confirm('Delete this message?')) {
-      deleteMessage(message.id);
-    }
+    setShowDeleteModal(true);
+  };
+  
+  const handleDeleteLocally = () => {
+    deleteMessageLocally(message.id);
+    onClose();
+  };
+  
+  const handleDeleteForBoth = () => {
+    deleteMessage(message.id);
     onClose();
   };
   
@@ -82,8 +91,10 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
     let left = position.x;
     
     // Check if menu would go off bottom of screen
+    // If so, position it above the click point instead of below
     if (top + menuHeight > window.innerHeight - padding) {
-      top = window.innerHeight - menuHeight - padding;
+      // Position menu above the click point
+      top = Math.max(padding, position.y - menuHeight);
     }
     
     // Check if menu would go off right side of screen
@@ -102,14 +113,22 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
     <>
       <div className="menu-overlay" onClick={onClose} />
       
+      <DeleteMessageModal
+        isOpen={showDeleteModal}
+        onClose={() => setShowDeleteModal(false)}
+        onDeleteLocally={handleDeleteLocally}
+        onDeleteForBoth={handleDeleteForBoth}
+        isOwnMessage={isOwn}
+      />
+      
       {/* Emoji tray - shown when React is clicked, replaces menu */}
       {showEmojiPicker ? (
         <div 
           className="emoji-tray"
           style={{
             position: 'fixed',
-            top: position.y,
-            left: position.x,
+            top: Math.min(position.y, window.innerHeight - 100), // Keep emoji tray on screen
+            left: Math.min(position.x, window.innerWidth - 400), // Account for tray width
             transform: 'translateY(-50%)'
           }}
         >

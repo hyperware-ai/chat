@@ -36,7 +36,10 @@ const ChatListItem: React.FC<ChatListItemProps> = ({ chat }) => {
 
   return (
     <div className="chat-list-item" onClick={() => setActiveChat(chat)}>
-      <Avatar name={chat.counterparty} />
+      <Avatar 
+        name={chat.counterparty} 
+        profilePic={chat.counterparty_profile?.profile_pic}
+      />
       
       <div className="chat-info">
         <div className="chat-header">

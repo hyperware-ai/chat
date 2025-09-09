@@ -7,7 +7,9 @@ import {
   MessageStatus 
 } from '../types/chat';
 import type { WsServerMessage } from '../types/chat';
+import type { SyncHashInfo } from '../../../target/ui/caller-utils';
 import * as api from '../utils/chatApi';
+import { get_sync_hash, get_all_sync_hashes, get_chat } from '../../../target/ui/caller-utils';
 import { ChatWebSocket } from '../utils/websocket';
 import { idbStorage } from '../utils/indexeddb';
 
@@ -26,17 +28,21 @@ interface ChatStore {
   isLoading: boolean;
   replyingTo: any | null; // Message being replied to
   tempIdToRealId: { [tempId: string]: string }; // Map temp IDs to real message IDs
+  pendingMessageHashes: { [hash: string]: string }; // Map content hashes to temp IDs for deduplication
   
   // Actions
   initialize: () => Promise<void>;
   loadChatsFromServer: () => Promise<void>;
   syncWithServer: () => Promise<void>;
+  verifySyncStatus: () => Promise<void>;
+  forceSyncChat: (chatId: string) => Promise<void>;
   loadProfile: () => Promise<void>;
   loadSettings: () => Promise<void>;
   createChat: (counterparty: string) => Promise<void>;
   sendMessage: (chatId: string, content: string, replyTo?: string) => Promise<void>;
   editMessage: (messageId: string, newContent: string) => Promise<void>;
   deleteMessage: (messageId: string) => Promise<void>;
+  deleteMessageLocally: (messageId: string) => void;
   deleteChat: (chatId: string) => Promise<void>;
   updateSettings: (settings: Settings) => Promise<void>;
   updateProfile: (profile: UserProfile) => Promise<void>;
@@ -56,6 +62,45 @@ interface ChatStore {
 
 // Track if already initialized to prevent double initialization
 let isInitialized = false;
+
+// Helper function to generate a hash for message deduplication
+function generateMessageHash(content: string, sender: string, timestamp: number): string {
+  // Use 5-second buckets for timestamp to handle minor time differences
+  const timeBucket = Math.floor(timestamp / 5);
+  return `${sender}-${timeBucket}-${content.substring(0, 100)}`;
+}
+
+// Helper function to calculate a simple hash for sync verification (matches backend)
+function calculateChatHash(chat: Chat): string {
+  let hash = 0;
+  
+  // Hash message count
+  const str1 = chat.messages.length.toString();
+  for (let i = 0; i < str1.length; i++) {
+    hash = (hash << 5) - hash + str1.charCodeAt(i);
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  
+  // Hash each message's key fields
+  for (const msg of chat.messages) {
+    const msgStr = `${msg.id}${msg.sender}${msg.content}${msg.timestamp}`;
+    for (let i = 0; i < msgStr.length; i++) {
+      hash = (hash << 5) - hash + msgStr.charCodeAt(i);
+      hash = hash & hash;
+    }
+    
+    // Hash reactions
+    for (const reaction of msg.reactions || []) {
+      const reactionStr = `${reaction.emoji}${reaction.user}${reaction.timestamp}`;
+      for (let i = 0; i < reactionStr.length; i++) {
+        hash = (hash << 5) - hash + reactionStr.charCodeAt(i);
+        hash = hash & hash;
+      }
+    }
+  }
+  
+  return Math.abs(hash).toString(16);
+}
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   // Initial state
@@ -83,6 +128,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   isLoading: false,
   replyingTo: null,
   tempIdToRealId: {},
+  pendingMessageHashes: {},
 
   // Initialize the app
   initialize: async () => {
@@ -180,6 +226,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           console.error('[INIT] Failed to load profile/settings:', error);
         });
         
+        // Verify sync status after initial load
+        setTimeout(() => {
+          console.log('[INIT] Running initial sync verification...');
+          get().verifySyncStatus();
+        }, 3000);
+        
+        // Set up periodic sync verification (every 5 minutes)
+        setInterval(() => {
+          console.log('[PERIODIC] Running periodic sync verification...');
+          get().verifySyncStatus();
+        }, 5 * 60 * 1000);
+        
       } else {
         set({ isConnected: false, error: 'Not connected to Hyperware' });
       }
@@ -247,6 +305,102 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       console.error('[SYNC] Failed to sync with server:', error);
     }
   },
+  
+  // Verify sync status - check for desyncs between frontend and backend
+  verifySyncStatus: async () => {
+    try {
+      console.log('[SYNC-VERIFY] Starting sync verification...');
+      
+      // Get all sync hashes from backend
+      const backendHashes = await get_all_sync_hashes();
+      console.log('[SYNC-VERIFY] Got', backendHashes.length, 'hashes from backend');
+      
+      const state = get();
+      const desyncedChats: string[] = [];
+      
+      // Check each chat's hash
+      for (const backendHash of backendHashes) {
+        const localChat = state.chats.find(c => c.id === backendHash.chat_id);
+        
+        if (!localChat) {
+          console.log('[SYNC-VERIFY] Chat missing locally:', backendHash.chat_id);
+          desyncedChats.push(backendHash.chat_id);
+          continue;
+        }
+        
+        // Calculate local hash
+        const localHash = calculateChatHash(localChat);
+        
+        // Compare hashes
+        if (localHash !== backendHash.hash) {
+          console.log('[SYNC-VERIFY] Hash mismatch for chat:', backendHash.chat_id);
+          console.log('[SYNC-VERIFY]   Local hash:', localHash);
+          console.log('[SYNC-VERIFY]   Backend hash:', backendHash.hash);
+          console.log('[SYNC-VERIFY]   Local messages:', localChat.messages.length);
+          console.log('[SYNC-VERIFY]   Backend messages:', backendHash.message_count);
+          desyncedChats.push(backendHash.chat_id);
+        } else {
+          console.log('[SYNC-VERIFY] Chat in sync:', backendHash.chat_id);
+        }
+      }
+      
+      // Check for local chats not on backend
+      for (const localChat of state.chats) {
+        if (!backendHashes.find(h => h.chat_id === localChat.id)) {
+          console.log('[SYNC-VERIFY] Chat exists locally but not on backend:', localChat.id);
+          desyncedChats.push(localChat.id);
+        }
+      }
+      
+      // If any chats are desynced, force a full sync
+      if (desyncedChats.length > 0) {
+        console.log('[SYNC-VERIFY] Found', desyncedChats.length, 'desynced chats, forcing full sync...');
+        await get().syncWithServer();
+      } else {
+        console.log('[SYNC-VERIFY] All chats are in sync');
+      }
+    } catch (error) {
+      console.error('[SYNC-VERIFY] Failed to verify sync status:', error);
+      // On error, force a full sync to be safe
+      await get().syncWithServer();
+    }
+  },
+  
+  // Force sync a specific chat
+  forceSyncChat: async (chatId: string) => {
+    try {
+      console.log('[FORCE-SYNC] Force syncing chat:', chatId);
+      
+      // Get the chat from the server
+      const serverChat = await get_chat({ chat_id: chatId });
+      console.log('[FORCE-SYNC] Got chat from server with', serverChat.messages.length, 'messages');
+      
+      // Update local state
+      set(state => {
+        const updatedChats = state.chats.map(chat => 
+          chat.id === chatId ? serverChat : chat
+        );
+        
+        // Also update activeChat if it's the same
+        const updatedActiveChat = state.activeChat?.id === chatId 
+          ? serverChat 
+          : state.activeChat;
+        
+        return {
+          chats: updatedChats,
+          activeChat: updatedActiveChat
+        };
+      });
+      
+      // Save to IndexedDB
+      await idbStorage.saveChat(serverChat);
+      
+      console.log('[FORCE-SYNC] Chat synced successfully');
+    } catch (error) {
+      console.error('[FORCE-SYNC] Failed to force sync chat:', error);
+      set({ error: `Failed to sync chat: ${error}` });
+    }
+  },
 
   // Load user profile
   loadProfile: async () => {
@@ -290,9 +444,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Create optimistic message immediately
     const timestamp = Math.floor(Date.now() / 1000);
     const tempId = `temp-${timestamp}-${Math.random()}`;
+    const sender = (window as any).our?.node || '';
     const optimisticMessage = {
       id: tempId,
-      sender: (window as any).our?.node || '',
+      sender,
       content,
       timestamp,
       status: 'Sending' as const,
@@ -302,7 +457,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       file_info: null,
     };
     
-    console.log('[SEND] Creating optimistic message:', tempId, 'content:', content.substring(0, 30));
+    // Generate hash for this message to detect duplicates
+    const messageHash = generateMessageHash(content, sender, timestamp);
+    console.log('[SEND] Creating optimistic message:', tempId, 'hash:', messageHash, 'content:', content.substring(0, 30));
     
     // Immediately show the message with "Sending" status
     set(state => {
@@ -329,6 +486,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return {
         chats: updatedChats,
         activeChat: updatedActiveChat,
+        pendingMessageHashes: {
+          ...state.pendingMessageHashes,
+          [messageHash]: tempId
+        }
       };
     });
     
@@ -345,6 +506,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Store the mapping from temp ID to real ID
       set(state => {
         const newTempIdToRealId = { ...state.tempIdToRealId, [tempId]: message.id };
+        
+        // Clean up the pending hash since API confirmed the message
+        const cleanedPendingHashes = { ...state.pendingMessageHashes };
+        Object.entries(cleanedPendingHashes).forEach(([hash, tid]) => {
+          if (tid === tempId) {
+            delete cleanedPendingHashes[hash];
+          }
+        });
         
         // Clean up old temp ID mappings (older than 5 minutes)
         const fiveMinutesAgo = Date.now() / 1000 - 300;
@@ -395,6 +564,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           chats: updatedChats,
           activeChat: updatedActiveChat,
           tempIdToRealId: cleanedTempIdToRealId,
+          pendingMessageHashes: cleanedPendingHashes,
         };
       });
       
@@ -450,7 +620,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  // Delete a message
+  // Delete a message for both parties
   deleteMessage: async (messageId: string) => {
     try {
       const chatId = get().activeChat?.id;
@@ -458,7 +628,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       
       await api.delete_message({ 
         chat_id: chatId,
-        message_id: messageId 
+        message_id: messageId,
+        delete_for_both: true
       });
       
       // Update local state
@@ -488,6 +659,40 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (error) {
       set({ error: 'Failed to delete message' });
     }
+  },
+
+  // Delete a message locally only
+  deleteMessageLocally: (messageId: string) => {
+    const chatId = get().activeChat?.id;
+    if (!chatId) {
+      console.error('No active chat');
+      return;
+    }
+    
+    // Update local state only (no API call)
+    set(state => {
+      const updatedChats = state.chats.map(chat => ({
+        ...chat,
+        messages: chat.messages.filter(msg => msg.id !== messageId)
+      }));
+      
+      // Save the updated chat to IndexedDB
+      const updatedChat = updatedChats.find(c => c.id === chatId);
+      if (updatedChat) {
+        idbStorage.saveChat(updatedChat);
+      }
+      
+      return {
+        chats: updatedChats,
+        // Also update activeChat if it's the same chat
+        activeChat: state.activeChat?.id === chatId 
+          ? { 
+              ...state.activeChat, 
+              messages: state.activeChat.messages.filter(msg => msg.id !== messageId) 
+            }
+          : state.activeChat
+      };
+    });
   },
 
   // Delete a chat
@@ -606,26 +811,53 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // Start with all server messages
           const mergedMessages = [...serverChat.messages];
           
+          // Check server messages against pending hashes to detect duplicates early
+          const pendingHashes = { ...state.pendingMessageHashes };
+          const tempToRealMap = { ...state.tempIdToRealId };
+          let hashesUpdated = false;
+          
+          serverChat.messages.forEach(serverMsg => {
+            const serverHash = generateMessageHash(serverMsg.content, serverMsg.sender, serverMsg.timestamp);
+            const pendingTempId = pendingHashes[serverHash];
+            
+            if (pendingTempId) {
+              // Found a match! Map the temp ID to real ID immediately
+              console.log('[WS] Found pending message match via hash:', pendingTempId, '->', serverMsg.id);
+              tempToRealMap[pendingTempId] = serverMsg.id;
+              delete pendingHashes[serverHash];
+              hashesUpdated = true;
+            }
+          });
+          
+          // Update state with new mappings if any were found
+          if (hashesUpdated) {
+            state.tempIdToRealId = tempToRealMap;
+            state.pendingMessageHashes = pendingHashes;
+          }
+          
           // Preserve local messages that aren't on the server yet
           existingChat.messages.forEach(localMsg => {
             // Check if this is a temp message
             if (localMsg.id.startsWith('temp-')) {
               // Check if we have a real ID mapping for this temp message
-              const realId = state.tempIdToRealId[localMsg.id];
+              const realId = tempToRealMap[localMsg.id];
               
               if (realId && serverMessageIds.has(realId)) {
                 // The server has the real version, so we don't need the temp one
                 console.log('[WS] Temp message', localMsg.id, 'replaced by server version', realId);
+              } else if (realId) {
+                // We have a mapping but server doesn't have it yet (shouldn't happen)
+                console.log('[WS] Temp message has mapping but not in server update yet:', localMsg.id);
               } else {
-                // Keep the temp message - it hasn't been confirmed yet
+                // No mapping yet - keep the temp message
                 console.log('[WS] Keeping unconfirmed temp message:', localMsg.id);
                 mergedMessages.push(localMsg);
               }
             } else if (!serverMessageIds.has(localMsg.id)) {
               // This is a real message that's not in the server update
-              // This could happen if we just sent it and the server hasn't propagated it yet
-              console.log('[WS] Keeping local message not in server update:', localMsg.id);
-              mergedMessages.push(localMsg);
+              // This should NOT happen for reaction updates - the server should have all messages
+              console.log('[WS] WARNING: Local message not in server update:', localMsg.id);
+              // Don't keep it - trust the server for the complete state
             }
           });
           
@@ -669,6 +901,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       console.log('[WS] Processing NewMessage:', newMsg);
       const our = (window as any).our;
       console.log('[WS] Our node:', our?.node, 'Message sender:', newMsg.sender);
+      
+      // Check if this message already exists (by ID or temp ID mapping)
+      const messageAlreadyExists = get().tempIdToRealId[newMsg.id] || 
+        Object.values(get().tempIdToRealId).includes(newMsg.id);
+      
+      if (messageAlreadyExists) {
+        console.log('[WS] Message already exists via temp ID mapping, skipping:', newMsg.id);
+        return;
+      }
       
       // Only add the message if we didn't send it (prevents duplicates)
       if (newMsg.sender !== our?.node) {

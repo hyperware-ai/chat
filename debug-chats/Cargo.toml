@@ -1,0 +1,17 @@
+[package]
+name = "debug-chats"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", rev = "b9f1ead", features = ["hyperapp"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wit-bindgen = "0.41.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
