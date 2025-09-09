@@ -5,8 +5,8 @@ import './Message.css';
 import { add_reaction, remove_reaction } from '../../../../target/ui/caller-utils';
 import { useChatStore } from '../../store/chat';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import remarkHwProtocol from '../../utils/remarkHwProtocol';
 
 interface MessageProps {
   message: ChatMessage;
@@ -197,11 +197,21 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const renderMessageContent = useMemo(() => {
     return (
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
+        remarkPlugins={[remarkBreaks, remarkHwProtocol]}
+        urlTransform={(url: string) => {
+          // Allow hw:// protocol links to pass through unchanged
+          if (url.startsWith('hw://')) {
+            return url;
+          }
+          // For other URLs, return as-is (React Markdown will handle security)
+          return url;
+        }}
         components={{
           // Custom link rendering
           a: ({ href, children }) => {
             const imageRegex = /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i;
+            const isHwProtocol = href?.startsWith('hw://');
+            
             // Check if link is an image URL
             if (href && imageRegex.test(href) && settings?.show_images) {
               return (
@@ -234,6 +244,23 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
                 </div>
               );
             }
+            
+            // hw:// protocol links - let hw-protocol-watcher handle them
+            if (isHwProtocol) {
+              return (
+                <a 
+                  href={href}
+                  style={{ 
+                    color: isOwn ? '#ffffff' : '#4da6ff',
+                    textDecoration: 'underline',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
+            
             // Regular link
             return (
               <a 

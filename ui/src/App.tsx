@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import './App.css';
+import './styles/button-selectable.css';
 import { useChatStore } from './store/chat';
 import SplashScreen from './components/SplashScreen/SplashScreen';
 import ChatView from './components/Chat/ChatView';
