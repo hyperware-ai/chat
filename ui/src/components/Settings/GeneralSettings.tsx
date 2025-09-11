@@ -1,5 +1,6 @@
 import React from 'react';
 import { useChatStore } from '../../store/chat';
+import { CHAT_APP_VERSION } from '../../constants/version';
 import './GeneralSettings.css';
 
 const GeneralSettings: React.FC = () => {
@@ -39,7 +40,7 @@ const GeneralSettings: React.FC = () => {
           <span>Show images in chats</span>
         </label>
       </div>
-      
+
       <div className="setting-item">
         <label>
           <input
@@ -50,7 +51,7 @@ const GeneralSettings: React.FC = () => {
           <span>Show profile pictures</span>
         </label>
       </div>
-      
+
       <div className="setting-item">
         <label>
           <input
@@ -61,7 +62,7 @@ const GeneralSettings: React.FC = () => {
           <span>Combine Chats & Groups tabs</span>
         </label>
       </div>
-      
+
       <div className="setting-item">
         <label>
           <input
@@ -72,7 +73,7 @@ const GeneralSettings: React.FC = () => {
           <span>Allow browser chats</span>
         </label>
       </div>
-      
+
       <div className="setting-item">
         <label>
           <input
@@ -83,7 +84,7 @@ const GeneralSettings: React.FC = () => {
           <span>Enable Speech-to-Text for voice notes</span>
         </label>
       </div>
-      
+
       {settings.stt_enabled && (
         <div className="setting-item">
           <label>STT API Key:</label>
@@ -95,7 +96,7 @@ const GeneralSettings: React.FC = () => {
           />
         </div>
       )}
-      
+
       <div className="setting-item">
         <label>Max file size (MB):</label>
         <input
@@ -109,6 +110,10 @@ const GeneralSettings: React.FC = () => {
         <span style={{ marginLeft: '10px', fontSize: '0.9em', color: '#666' }}>
           (1-100 MB)
         </span>
+      </div>
+
+      <div className="setting-item">
+        <label>Version: {CHAT_APP_VERSION}</label>
       </div>
     </div>
   );

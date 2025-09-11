@@ -22,6 +22,9 @@ console.log('process.env.VITE_NODE_URL', process.env.VITE_NODE_URL, PROXY_URL);
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(metadata.properties.current_version),
+  },
   base: BASE_URL,
   build: {
     rollupOptions: {
