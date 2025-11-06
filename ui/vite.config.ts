@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { resolve } from 'node:path'
 
 /*
 If you are developing a UI outside of a Hyperware project,
@@ -24,6 +25,11 @@ export default defineConfig({
   plugins: [react()],
   define: {
     'import.meta.env.VITE_APP_VERSION': JSON.stringify(metadata.properties.current_version),
+  },
+  resolve: {
+    alias: {
+      '#caller-utils': resolve(__dirname, '../target/ui/caller-utils.ts'),
+    },
   },
   base: BASE_URL,
   build: {
