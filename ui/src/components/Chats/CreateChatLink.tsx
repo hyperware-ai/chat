@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { create_chat_link } from '../../../../target/ui/caller-utils';
+import * as Caller from '#caller-utils';
 import { useChatStore } from '../../store/chat';
 import './CreateChatLink.css';
+
+const { create_chat_link } = Caller.Chat;
 
 interface CreateChatLinkProps {
   onClose: () => void;

@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import './FileUpload.css';
 import { useChatStore } from '../../store/chat';
-import { upload_file } from '../../../../target/ui/caller-utils';
+import * as Caller from '#caller-utils';
 
 interface FileUploadProps {
   onClose: () => void;
 }
+
+const { upload_file } = Caller.Chat;
 
 const FileUpload: React.FC<FileUploadProps> = ({ onClose }) => {
   const { activeChat, settings } = useChatStore();

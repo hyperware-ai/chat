@@ -1,16 +1,18 @@
 import React, { useState } from 'react';
-import { ChatMessage } from '../../types/chat';
+import { Chat } from '#caller-utils';
 import { useChatStore } from '../../store/chat';
-import { add_reaction, forward_message } from '../../../../target/ui/caller-utils';
+import * as Caller from '#caller-utils';
 import DeleteMessageModal from './DeleteMessageModal';
 import './MessageMenu.css';
 
 interface MessageMenuProps {
-  message: ChatMessage;
+  message: Chat.ChatMessage;
   isOwn: boolean;
   position: { x: number; y: number };
   onClose: () => void;
 }
+
+const { add_reaction, forward_message } = Caller.Chat;
 
 const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onClose }) => {
   const { deleteMessage, deleteMessageLocally, editMessage, chats, activeChat } = useChatStore();

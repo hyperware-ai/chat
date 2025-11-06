@@ -4,11 +4,12 @@ import MessageList from './MessageList';
 import MessageInput from './MessageInput';
 import ChatHeader from './ChatHeader';
 import './ChatView.css';
+import { Chat } from '#caller-utils';
 
 const ChatView: React.FC = () => {
-  const { 
-    activeChat, 
-    markChatAsRead, 
+  const {
+    activeChat,
+    markChatAsRead,
     setActiveChat,
     forceSyncChat
   } = useChatStore();
@@ -36,7 +37,7 @@ const ChatView: React.FC = () => {
       const hasOnlySentMessages = activeChat.messages.length > 0 &&
         activeChat.messages.every(msg =>
           msg.sender !== activeChat.counterparty &&
-          (msg.status === 'Sent' || msg.status === 'Sending')
+          (msg.status === Chat.MessageStatus.Sent || msg.status === Chat.MessageStatus.Sending)
         );
 
       const isNewChat = activeChat.messages.length === 0 ||
@@ -62,12 +63,12 @@ const ChatView: React.FC = () => {
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = container;
-      
+
       // Check if at bottom
       const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
       isAtBottomRef.current = isAtBottom;
       setShowScrollButton(!isAtBottom);
-      
+
       // Store last scroll position
       lastScrollTopRef.current = scrollTop;
     };
@@ -87,62 +88,62 @@ const ChatView: React.FC = () => {
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
-  
+
   // Handle pull-to-refresh for syncing
   const handleMessagesTouchStart = (e: React.TouchEvent) => {
     const container = messagesContainerRef.current;
     if (!container) return;
-    
+
     // Check if we're at the bottom
     const { scrollTop, scrollHeight, clientHeight } = container;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
-    
+
     if (isAtBottom) {
       touchStartYRef.current = e.touches[0].clientY;
     }
   };
-  
+
   const handleMessagesTouchMove = (e: React.TouchEvent) => {
     if (touchStartYRef.current === 0 || isSyncing) return;
-    
+
     const container = messagesContainerRef.current;
     if (!container) return;
-    
+
     // Check if still at bottom
     const { scrollTop, scrollHeight, clientHeight } = container;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
-    
+
     if (!isAtBottom) {
       // User has scrolled up, cancel pull-to-refresh
       touchStartYRef.current = 0;
       setPullDistance(0);
       return;
     }
-    
+
     const currentY = e.touches[0].clientY;
     const deltaY = currentY - touchStartYRef.current; // Positive when pulling down
-    
+
     // If pulling down past the bottom
     if (deltaY > 10) {
       // Prevent default to stop bounce on iOS
       e.preventDefault();
-      
+
       const pull = Math.min(deltaY, 100);
       setPullDistance(pull);
-      
+
       // Add haptic feedback at threshold
       if (pull >= 60 && pull < 65 && 'vibrate' in navigator) {
         navigator.vibrate(10);
       }
     }
   };
-  
+
   const handleMessagesTouchEnd = async () => {
     if (pullDistance >= 60 && !isSyncing && activeChat) {
       // Trigger sync
       setIsSyncing(true);
       setPullDistance(0);
-      
+
       try {
         console.log('[PULL-REFRESH] Syncing chat:', activeChat.id);
         await forceSyncChat(activeChat.id);
@@ -152,7 +153,7 @@ const ChatView: React.FC = () => {
     } else {
       setPullDistance(0);
     }
-    
+
     // Reset touch start
     touchStartYRef.current = 0;
   };
@@ -232,8 +233,8 @@ const ChatView: React.FC = () => {
         </div>
       )}
 
-      <div 
-        className="messages-container" 
+      <div
+        className="messages-container"
         ref={messagesContainerRef}
         onTouchStart={handleMessagesTouchStart}
         onTouchMove={handleMessagesTouchMove}
@@ -241,7 +242,7 @@ const ChatView: React.FC = () => {
       >
         {/* Pull-to-refresh indicator */}
         {(pullDistance > 0 || isSyncing) && (
-          <div 
+          <div
             className="sync-indicator"
             style={{
               height: pullDistance > 0 ? `${pullDistance}px` : '60px',
@@ -268,13 +269,13 @@ const ChatView: React.FC = () => {
             </div>
           </div>
         )}
-        
+
         <MessageList messages={activeChat.messages} />
         <div ref={messagesEndRef} />
       </div>
 
       {showScrollButton && (
-        <button 
+        <button
           className="scroll-to-bottom-button"
           onClick={scrollToBottom}
           aria-label="Scroll to bottom"

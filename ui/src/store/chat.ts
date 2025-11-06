@@ -1,27 +1,18 @@
 import { create } from 'zustand';
-import { 
-  Chat, 
-  UserProfile, 
-  Settings, 
-  ChatKey,
-  MessageStatus 
-} from '../types/chat';
-import type { WsServerMessage } from '../types/chat';
-import type { SyncHashInfo } from '../../../target/ui/caller-utils';
-import * as api from '../utils/chatApi';
-import { get_sync_hash, get_all_sync_hashes, get_chat } from '../../../target/ui/caller-utils';
+import { Chat as api } from '#caller-utils';
 import { ChatWebSocket } from '../utils/websocket';
 import { idbStorage } from '../utils/indexeddb';
+import { WsServerMessage } from 'src/types/chat';
 
 interface ChatStore {
   // State
   nodeId: string | null;
   isConnected: boolean;
-  profile: UserProfile | null;
-  chats: Chat[];
-  activeChat: Chat | null;
-  settings: Settings;
-  chatKeys: ChatKey[];
+  profile: api.UserProfile | null;
+  chats: api.Chat[];
+  activeChat: api.Chat | null;
+  settings: api.Settings;
+  chatKeys: api.ChatKey[];
   wsConnection: ChatWebSocket | null;
   connectionStatus: 'connected' | 'disconnected' | 'connecting';
   error: string | null;
@@ -44,10 +35,10 @@ interface ChatStore {
   deleteMessage: (messageId: string) => Promise<void>;
   deleteMessageLocally: (messageId: string) => void;
   deleteChat: (chatId: string) => Promise<void>;
-  updateSettings: (settings: Settings) => Promise<void>;
-  updateProfile: (profile: UserProfile) => Promise<void>;
-  searchChats: (query: string) => Promise<Chat[]>;
-  setActiveChat: (chat: Chat | null) => void;
+  updateSettings: (settings: api.Settings) => Promise<void>;
+  updateProfile: (profile: api.UserProfile) => Promise<void>;
+  searchChats: (query: string) => Promise<api.Chat[]>;
+  setActiveChat: (chat: api.Chat | null) => void;
   markChatAsRead: (chatId: string) => Promise<void>;
   connectWebSocket: () => void;
   disconnectWebSocket: () => void;
@@ -71,7 +62,7 @@ function generateMessageHash(content: string, sender: string, timestamp: number)
 }
 
 // Helper function to calculate a simple hash for sync verification (matches backend)
-function calculateChatHash(chat: Chat): string {
+function calculateChatHash(chat: api.Chat): string {
   let hash = 0;
   
   // Hash message count
@@ -312,7 +303,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       console.log('[SYNC-VERIFY] Starting sync verification...');
       
       // Get all sync hashes from backend
-      const backendHashes = await get_all_sync_hashes();
+      const backendHashes = await api.get_all_sync_hashes();
       console.log('[SYNC-VERIFY] Got', backendHashes.length, 'hashes from backend');
       
       const state = get();
@@ -372,7 +363,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       console.log('[FORCE-SYNC] Force syncing chat:', chatId);
       
       // Get the chat from the server
-      const serverChat = await get_chat({ chat_id: chatId });
+      const serverChat = await api.get_chat({ chat_id: chatId });
       console.log('[FORCE-SYNC] Got chat from server with', serverChat.messages.length, 'messages');
       
       // Update local state
@@ -445,15 +436,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const timestamp = Math.floor(Date.now() / 1000);
     const tempId = `temp-${timestamp}-${Math.random()}`;
     const sender = (window as any).our?.node || '';
-    const optimisticMessage = {
+    const optimisticMessage: api.ChatMessage = {
       id: tempId,
       sender,
       content,
       timestamp,
-      status: 'Sending' as const,
+      status: api.MessageStatus.Sending,
       reply_to: replyTo || null,
       reactions: [],
-      message_type: 'Text' as const,
+      message_type: api.MessageType.Text,
       file_info: null,
     };
     
@@ -536,7 +527,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ? { 
                 ...chat, 
                 messages: chat.messages.map(m => 
-                  m.id === tempId ? { ...message, status: 'Sent' as const } : m
+                  m.id === tempId ? { ...message, status: api.MessageStatus.Sent } : m
                 ), 
                 last_activity: message.timestamp 
               }
@@ -553,7 +544,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ? { 
               ...state.activeChat, 
               messages: state.activeChat.messages.map(m => 
-                m.id === tempId ? { ...message, status: 'Sent' as const } : m
+                m.id === tempId ? { ...message, status: api.MessageStatus.Sent } : m
               ) 
             }
           : state.activeChat;
@@ -576,7 +567,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ? { 
                 ...chat, 
                 messages: chat.messages.map(m => 
-                  m.id === tempId ? { ...m, status: 'Failed' as const } : m
+                  m.id === tempId ? { ...m, status: api.MessageStatus.Failed } : m
                 )
               }
             : chat
@@ -585,7 +576,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ? { 
               ...state.activeChat, 
               messages: state.activeChat.messages.map(m => 
-                m.id === tempId ? { ...m, status: 'Failed' as const } : m
+                m.id === tempId ? { ...m, status: api.MessageStatus.Failed } : m
               )
             }
           : state.activeChat,
@@ -710,7 +701,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   // Update settings
-  updateSettings: async (settings: Settings) => {
+  updateSettings: async (settings: api.Settings) => {
     try {
       await api.update_settings(settings);
       set({ settings });
@@ -720,7 +711,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   // Update profile
-  updateProfile: async (profile: UserProfile) => {
+  updateProfile: async (profile: api.UserProfile) => {
     try {
       await api.update_profile(profile);
       set({ profile });
@@ -740,7 +731,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   // Set active chat
-  setActiveChat: (chat: Chat | null) => {
+  setActiveChat: (chat: api.Chat | null) => {
     set({ activeChat: chat });
     // Save active chat ID to IndexedDB
     if (chat) {
@@ -1000,7 +991,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             // Check if this message matches either the real ID or the temp ID
             if (msg.id === message_id || (tempIdForThisMessage && msg.id === tempIdForThisMessage)) {
               const oldStatus = msg.status;
-              const newStatus: MessageStatus = 'Delivered';
+              const newStatus: api.MessageStatus = api.MessageStatus.Delivered;
               console.log(`[WS] Updating message ${msg.id} status from ${oldStatus} to ${newStatus}`);
               return { ...msg, status: newStatus };
             }
@@ -1016,7 +1007,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: state.activeChat.messages.map(msg => {
               if (msg.id === message_id || (tempIdForThisMessage && msg.id === tempIdForThisMessage)) {
                 const oldStatus = msg.status;
-                const newStatus: MessageStatus = 'Delivered';
+                const newStatus: api.MessageStatus = api.MessageStatus.Delivered;
                 console.log(`[WS] Updating activeChat message ${msg.id} status from ${oldStatus} to ${newStatus}`);
                 return { ...msg, status: newStatus };
               }
