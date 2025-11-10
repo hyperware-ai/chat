@@ -69,9 +69,13 @@ fn init(our: Address, args: String) -> String {
                         continue;
                     }
                 };
-                
+
                 // Extract the chat ID from the Ok response
-                let chat_id = match response.get("Ok").and_then(|ok| ok.get("id")).and_then(|id| id.as_str()) {
+                let chat_id = match response
+                    .get("Ok")
+                    .and_then(|ok| ok.get("id"))
+                    .and_then(|id| id.as_str())
+                {
                     Some(id) => id.to_string(),
                     None => {
                         results.push(format!("✗ {}: Invalid chat response format", node));
@@ -79,9 +83,9 @@ fn init(our: Address, args: String) -> String {
                         continue;
                     }
                 };
-                
+
                 println!("Created/got chat with ID: {} for node: {}", chat_id, node);
-                
+
                 // Now send the message with typed request using the actual chat ID
                 let send_msg_request = serde_json::json!({
                     "SendMessage": {

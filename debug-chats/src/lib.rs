@@ -29,11 +29,9 @@ fn init(our: Address, args: String) -> String {
     }
 
     let chat_address = Address::new(our.node(), CHAT_PROCESS_ID);
-    
+
     match parts[0] {
-        "get_chats" => {
-            get_chats(&chat_address)
-        }
+        "get_chats" => get_chats(&chat_address),
         "get_chat" => {
             if parts.len() < 2 {
                 return format!("Error: get_chat requires a chat_id\n\n{}", USAGE);
@@ -86,16 +84,30 @@ fn get_chats(chat_address: &Address) -> String {
 
             for (i, chat) in chats_array.iter().enumerate() {
                 let id = chat.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let counterparty = chat.get("counterparty").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let messages = chat.get("messages").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-                let last_activity = chat.get("last_activity").and_then(|v| v.as_u64()).unwrap_or(0);
-                let unread = chat.get("unread_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let counterparty = chat
+                    .get("counterparty")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let messages = chat
+                    .get("messages")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let last_activity = chat
+                    .get("last_activity")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let unread = chat
+                    .get("unread_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
                 output.push_str(&format!("\n[Chat {}]\n", i + 1));
                 output.push_str(&format!("  ID: {}\n", id));
                 output.push_str(&format!("  Counterparty: {}\n", counterparty));
                 output.push_str(&format!("  Messages: {}\n", messages));
-                output.push_str(&format!("  Last Activity: {} ({})\n", 
+                output.push_str(&format!(
+                    "  Last Activity: {} ({})\n",
                     last_activity,
                     format_time_ago(last_activity)
                 ));
@@ -105,21 +117,27 @@ fn get_chats(chat_address: &Address) -> String {
                 if let Some(messages_array) = chat.get("messages").and_then(|v| v.as_array()) {
                     if !messages_array.is_empty() {
                         output.push_str("\n  Recent messages:\n");
-                        let start = if messages_array.len() > 2 { messages_array.len() - 2 } else { 0 };
-                        
+                        let start = if messages_array.len() > 2 {
+                            messages_array.len() - 2
+                        } else {
+                            0
+                        };
+
                         for msg in &messages_array[start..] {
                             let sender = msg.get("sender").and_then(|v| v.as_str()).unwrap_or("?");
                             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
                             let msg_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                            let timestamp = msg.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-                            
+                            let timestamp =
+                                msg.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+
                             let content_preview = if content.len() > 50 {
                                 format!("{}...", &content[..50])
                             } else {
                                 content.to_string()
                             };
-                            
-                            output.push_str(&format!("    [{} ago] {}: {}\n", 
+
+                            output.push_str(&format!(
+                                "    [{} ago] {}: {}\n",
                                 format_time_ago(timestamp),
                                 sender,
                                 content_preview
@@ -128,7 +146,7 @@ fn get_chats(chat_address: &Address) -> String {
                     }
                 }
             }
-            
+
             output.push_str(&format!("\n{}\n", "=".repeat(80)));
             output
         }
@@ -170,14 +188,30 @@ fn get_chat(chat_address: &Address, chat_id: &str) -> String {
             output.push_str(&"=".repeat(80));
             output.push_str("\n");
 
-            let counterparty = chat.get("counterparty").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let last_activity = chat.get("last_activity").and_then(|v| v.as_u64()).unwrap_or(0);
-            let unread = chat.get("unread_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            let is_blocked = chat.get("is_blocked").and_then(|v| v.as_bool()).unwrap_or(false);
+            let counterparty = chat
+                .get("counterparty")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let last_activity = chat
+                .get("last_activity")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let unread = chat
+                .get("unread_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let is_blocked = chat
+                .get("is_blocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let notify = chat.get("notify").and_then(|v| v.as_bool()).unwrap_or(true);
 
             output.push_str(&format!("Counterparty: {}\n", counterparty));
-            output.push_str(&format!("Last Activity: {} ({})\n", last_activity, format_time_ago(last_activity)));
+            output.push_str(&format!(
+                "Last Activity: {} ({})\n",
+                last_activity,
+                format_time_ago(last_activity)
+            ));
             output.push_str(&format!("Unread: {}\n", unread));
             output.push_str(&format!("Blocked: {}\n", is_blocked));
             output.push_str(&format!("Notifications: {}\n", notify));
@@ -185,52 +219,76 @@ fn get_chat(chat_address: &Address, chat_id: &str) -> String {
             // Show all messages
             if let Some(messages_array) = chat.get("messages").and_then(|v| v.as_array()) {
                 output.push_str(&format!("\n=== {} Messages ===\n", messages_array.len()));
-                
+
                 for (i, msg) in messages_array.iter().enumerate() {
-                    output.push_str(&format!("\n[Message {} of {}]\n", i + 1, messages_array.len()));
-                    
+                    output.push_str(&format!(
+                        "\n[Message {} of {}]\n",
+                        i + 1,
+                        messages_array.len()
+                    ));
+
                     let msg_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                     let sender = msg.get("sender").and_then(|v| v.as_str()).unwrap_or("?");
                     let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     let timestamp = msg.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
                     let status = msg.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                    let msg_type = msg.get("message_type").and_then(|v| v.as_str()).unwrap_or("Text");
-                    
+                    let msg_type = msg
+                        .get("message_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Text");
+
                     output.push_str(&format!("  ID: {}\n", msg_id));
                     output.push_str(&format!("  Sender: {}\n", sender));
-                    output.push_str(&format!("  Time: {} ({})\n", timestamp, format_time_ago(timestamp)));
+                    output.push_str(&format!(
+                        "  Time: {} ({})\n",
+                        timestamp,
+                        format_time_ago(timestamp)
+                    ));
                     output.push_str(&format!("  Status: {}\n", status));
                     output.push_str(&format!("  Type: {}\n", msg_type));
-                    
+
                     if let Some(reply_to) = msg.get("reply_to").and_then(|v| v.as_str()) {
                         output.push_str(&format!("  Reply To: {}\n", reply_to));
                     }
-                    
+
                     if let Some(reactions) = msg.get("reactions").and_then(|v| v.as_array()) {
                         if !reactions.is_empty() {
                             output.push_str("  Reactions: ");
                             for reaction in reactions {
-                                let emoji = reaction.get("emoji").and_then(|v| v.as_str()).unwrap_or("?");
-                                let user = reaction.get("user").and_then(|v| v.as_str()).unwrap_or("?");
+                                let emoji = reaction
+                                    .get("emoji")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("?");
+                                let user =
+                                    reaction.get("user").and_then(|v| v.as_str()).unwrap_or("?");
                                 output.push_str(&format!("{} ({}), ", emoji, user));
                             }
                             output.push_str("\n");
                         }
                     }
-                    
+
                     if let Some(file_info) = msg.get("file_info").and_then(|v| v.as_object()) {
-                        let filename = file_info.get("filename").and_then(|v| v.as_str()).unwrap_or("?");
+                        let filename = file_info
+                            .get("filename")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
                         let size = file_info.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let mime = file_info.get("mime_type").and_then(|v| v.as_str()).unwrap_or("?");
-                        output.push_str(&format!("  File: {} ({} bytes, {})\n", filename, size, mime));
+                        let mime = file_info
+                            .get("mime_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        output.push_str(&format!(
+                            "  File: {} ({} bytes, {})\n",
+                            filename, size, mime
+                        ));
                     }
-                    
+
                     output.push_str(&format!("  Content: {}\n", content));
                 }
             } else {
                 output.push_str("\n=== No messages ===\n");
             }
-            
+
             output.push_str(&format!("\n{}\n", "=".repeat(80)));
             output
         }
@@ -244,13 +302,13 @@ fn format_time_ago(timestamp: u64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     if timestamp > now {
         return "future".to_string();
     }
-    
+
     let diff = now - timestamp;
-    
+
     if diff < 60 {
         format!("{}s", diff)
     } else if diff < 3600 {
