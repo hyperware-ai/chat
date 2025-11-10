@@ -1589,50 +1589,66 @@ impl ChatState {
             }
         }
 
-        // Add message to chat
-        chat.messages.push(updated_message.clone());
-        chat.last_activity = updated_message.timestamp;
-        chat.unread_count += 1;
+        // Deduplicate by message ID so delivery retries don't create copies
+        let mut is_duplicate = false;
+        if let Some(existing) = chat.messages.iter_mut().find(|m| m.id == updated_message.id) {
+            is_duplicate = true;
+            existing.content = updated_message.content.clone();
+            existing.timestamp = updated_message.timestamp;
+            existing.reply_to = updated_message.reply_to.clone();
+            existing.reactions = updated_message.reactions.clone();
+            existing.message_type = updated_message.message_type.clone();
+            existing.file_info = updated_message.file_info.clone();
+            existing.sender = updated_message.sender.clone();
+            existing.status =
+                safe_update_message_status(&existing.status, updated_message.status.clone());
+        } else {
+            chat.messages.push(updated_message.clone());
+            chat.unread_count += 1;
+        }
+        chat.last_activity = chat.last_activity.max(updated_message.timestamp);
 
-        // Send to WebSocket connections if any
-        for &channel_id in self.ws_connections.keys() {
-            // If this is a new chat, send ChatUpdate first
-            if is_new_chat {
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+        if !is_duplicate {
+            // Send to WebSocket connections if any
+            for &channel_id in self.ws_connections.keys() {
+                // If this is a new chat, send ChatUpdate first
+                if is_new_chat {
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                    send_ws_push(
+                        channel_id,
+                        WsMessageType::Text,
+                        LazyLoadBlob {
+                            mime: Some("application/json".to_string()),
+                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        },
+                    );
+                }
+
+                // Then send the new message
+                let msg = WsServerMessage::NewMessage(updated_message.clone());
                 send_ws_push(
                     channel_id,
                     WsMessageType::Text,
                     LazyLoadBlob {
                         mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
                     },
                 );
             }
 
-            // Then send the new message
-            let msg = WsServerMessage::NewMessage(updated_message.clone());
-            send_ws_push(
-                channel_id,
-                WsMessageType::Text,
-                LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                },
-            );
-        }
-
-        // Send push notification if user has notifications enabled AND no active connections
-        // We only send notifications if the user is not actively viewing the app
-        if chat.notify && self.settings.notify_chats && self.active_connections.is_empty() {
-            // Try to send a push notification
-            spawn(async move {
-                send_push_notification_for_message(
-                    &updated_message.sender,
-                    &updated_message.content,
-                    &chat_id,
-                )
-                .await;
-            });
+            // Send push notification if user has notifications enabled AND no active connections
+            // We only send notifications if the user is not actively viewing the app
+            if chat.notify && self.settings.notify_chats && self.active_connections.is_empty() {
+                // Try to send a push notification
+                spawn(async move {
+                    send_push_notification_for_message(
+                        &updated_message.sender,
+                        &updated_message.content,
+                        &chat_id,
+                    )
+                    .await;
+                });
+            }
         }
 
         // Send acknowledgment back to sender using generated RPC
