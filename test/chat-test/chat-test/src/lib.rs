@@ -59,14 +59,14 @@ fn handle_message(our: &Address) {
     }
 
     let chat_address = chat_process_address(&our.node);
-    run_duplicate_message_test(&chat_address);
+    // run_duplicate_message_test(&chat_address);
     // run_pagination_timestamp_test(&chat_address, &our.node);
 
     if node_names.len() < 2 {
         fail_with("edit-message propagation test requires at least two nodes");
     }
     let remote_node = node_names[1].clone();
-    // run_edit_message_propagation_test(&our.node, &remote_node);
+    run_edit_message_propagation_test(&our.node, &remote_node);
     // run_counterparty_inference_test(&our.node, &remote_node);
 
     Response::new()
@@ -115,12 +115,20 @@ fn run_edit_message_propagation_test(local_node: &str, remote_node: &str) {
     let original_content = "Original content";
     let edited_content = "Edited content";
 
+    print_to_terminal(0, "1");
     let sent_message = send_chat_message(&local_address, &chat_id, original_content);
+    print_to_terminal(0, "1.5");
     wait_for_remote_message(&remote_address, &chat_id, &sent_message.id);
+    print_to_terminal(0, "2");
+
     edit_chat_message(&local_address, &chat_id, &sent_message.id, edited_content);
+    print_to_terminal(0, "3");
+
     thread::sleep(Duration::from_millis(200));
 
     let remote_messages = fetch_messages(&remote_address, &chat_id);
+    print_to_terminal(0, "4");
+
     let remote_message = remote_messages
         .iter()
         .find(|m| m.id == sent_message.id)
@@ -130,6 +138,7 @@ fn run_edit_message_propagation_test(local_node: &str, remote_node: &str) {
                 sent_message.id
             ))
         });
+    print_to_terminal(0, "5");
 
     if remote_message.content != edited_content {
         fail_with(format!(
@@ -297,12 +306,22 @@ fn fetch_messages_allow_missing(
             "limit": Value::Null
         }
     });
+    print_to_terminal(0, "DEBUGGING: send chat rpc GetMessages");
     send_chat_rpc(address, payload)
 }
 
 fn send_chat_rpc<T: DeserializeOwned>(address: &Address, payload: Value) -> Result<T, String> {
+    print_to_terminal(
+        0,
+        format!(
+            "chat_test: rpc -> {}@{} payload {}",
+            address.process, address.node, payload
+        )
+        .as_str(),
+    );
     let body = serde_json::to_vec(&payload)
         .unwrap_or_else(|e| fail_with(format!("failed to encode chat payload: {e}")));
+
     let response = Request::to(address.clone())
         .body(body)
         .send_and_await_response(15)

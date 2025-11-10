@@ -10,10 +10,9 @@ use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
     hyperapp::{send, sleep, spawn, SaveOptions},
-    our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
+    our, print_to_terminal, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -22,8 +21,8 @@ use std::sync::{Arc, Mutex};
 // Import generated RPC functions from caller-utils
 use chat_caller_utils::chat::{
     receive_chat_creation_remote_rpc, receive_message_ack_remote_rpc,
-    receive_message_deletion_remote_rpc, receive_message_remote_rpc,
-    receive_profile_update_remote_rpc, receive_reaction_remote_rpc,
+    receive_message_deletion_remote_rpc, receive_message_edit_remote_rpc,
+    receive_message_remote_rpc, receive_profile_update_remote_rpc, receive_reaction_remote_rpc,
 };
 use chat_caller_utils::ChatMessage as CUChatMessage;
 use chat_caller_utils::UserProfile as CUUserProfile;
@@ -408,14 +407,18 @@ impl ChatState {
             .ok_or_else(|| "Chat not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
+        print_to_terminal(0, "call to get_messages here");
         // Get the chat
         let chat = self
             .chats
             .get(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
+        print_to_terminal(0, "found chat");
 
         // Filter messages based on timestamp if provided
         let mut messages: Vec<ChatMessage> = if let Some(before_ts) = req.before_timestamp {
@@ -427,16 +430,20 @@ impl ChatState {
         } else {
             chat.messages.clone()
         };
+        print_to_terminal(0, "got msgs");
 
         // Sort by timestamp descending (newest first)
         messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        print_to_terminal(0, "got msgs2");
 
         // Apply limit (convert u64 to usize for truncate)
         let limit = req.limit.unwrap_or(50) as usize;
         messages.truncate(limit);
+        print_to_terminal(0, "got msgs3");
 
         // Return in ascending order (oldest first) for display
         messages.reverse();
+        print_to_terminal(0, "returning msgs");
 
         Ok(messages)
     }
@@ -638,12 +645,55 @@ impl ChatState {
         Ok(message)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
         // Find message in the specified chat
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
-                message.content = req.new_content;
+                if message.sender != our().node {
+                    return Ok("Ignoring edit for remote message".to_string());
+                }
+                // Modify message content
+                message.content = req.new_content.clone();
+
+                // Notify WebSocket connections about the updated chat
+                for &channel_id in self.ws_connections.keys() {
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                    send_ws_push(
+                        channel_id,
+                        WsMessageType::Text,
+                        LazyLoadBlob {
+                            mime: Some("application/json".to_string()),
+                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        },
+                    );
+                }
+
+                // Propagate edits for our own messages to the counterparty
+                let counterparty = chat.counterparty.clone();
+                spawn(async move {
+                    let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+                    match receive_message_edit_remote_rpc(
+                        &target,
+                        req.chat_id.clone(),
+                        req.message_id.clone(),
+                        req.new_content.clone(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => println!(
+                            "Counterparty {} rejected message edit: {}",
+                            counterparty, err
+                        ),
+                        Err(err) => {
+                            println!("Failed to send message edit to {}: {:?}", counterparty, err)
+                        }
+                    }
+                });
+
                 return Ok("Message edited".to_string());
             }
         }
@@ -1591,7 +1641,11 @@ impl ChatState {
 
         // Deduplicate by message ID so delivery retries don't create copies
         let mut is_duplicate = false;
-        if let Some(existing) = chat.messages.iter_mut().find(|m| m.id == updated_message.id) {
+        if let Some(existing) = chat
+            .messages
+            .iter_mut()
+            .find(|m| m.id == updated_message.id)
+        {
             is_duplicate = true;
             existing.content = updated_message.content.clone();
             existing.timestamp = updated_message.timestamp;
@@ -1716,6 +1770,46 @@ impl ChatState {
         }
 
         // Not an error - might be a reaction for a message we don't have
+        Ok(())
+    }
+
+    #[remote]
+    async fn receive_message_edit(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        new_content: String,
+    ) -> Result<(), String> {
+        let mut updated = false;
+
+        if let Some(chat) = self.chats.get_mut(&chat_id) {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                message.content = new_content;
+
+                // Broadcast updated chat state so clients refresh the edited message
+                for &channel_id in self.ws_connections.keys() {
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                    send_ws_push(
+                        channel_id,
+                        WsMessageType::Text,
+                        LazyLoadBlob {
+                            mime: Some("application/json".to_string()),
+                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+                        },
+                    );
+                }
+
+                updated = true;
+            }
+        }
+
+        if !updated {
+            println!(
+                "receive_message_edit: message {} in chat {} not found; dropping edit",
+                message_id, chat_id
+            );
+        }
+
         Ok(())
     }
 
