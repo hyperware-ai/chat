@@ -441,6 +441,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       sender,
       content,
       timestamp,
+      sequence: null,
       status: api.MessageStatus.Sending,
       reply_to: replyTo || null,
       reactions: [],

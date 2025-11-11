@@ -50,6 +50,8 @@ pub struct ChatMessage {
     pub sender: String,
     pub content: String,
     pub timestamp: u64,
+    #[serde(default)]
+    pub sequence: Option<u64>,
     pub status: MessageStatus,
     pub reply_to: Option<String>,
     pub reactions: Vec<MessageReaction>,
@@ -334,6 +336,8 @@ pub struct ChatState {
     pub chats: HashMap<String, Chat>,
     pub chat_keys: HashMap<String, ChatKey>,
     pub settings: Settings,
+    #[serde(default)]
+    pub message_sequence_counters: HashMap<String, u64>,
     #[serde(with = "crate::arc_mutex_serde")]
     pub delivery_queue: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     pub online_nodes: HashSet<String>,
@@ -353,6 +357,7 @@ impl Default for ChatState {
             chats: HashMap::new(),
             chat_keys: HashMap::new(),
             settings: Settings::default(),
+            message_sequence_counters: HashMap::new(),
             delivery_queue: default_delivery_queue(),
             online_nodes: HashSet::new(),
             ws_connections: HashMap::new(),

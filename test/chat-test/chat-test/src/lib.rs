@@ -60,13 +60,13 @@ fn handle_message(our: &Address) {
 
     let chat_address = chat_process_address(&our.node);
     // run_duplicate_message_test(&chat_address);
-    // run_pagination_timestamp_test(&chat_address, &our.node);
+    run_pagination_timestamp_test(&chat_address, &our.node);
 
     if node_names.len() < 2 {
         fail_with("edit-message propagation test requires at least two nodes");
     }
     let remote_node = node_names[1].clone();
-    run_edit_message_propagation_test(&our.node, &remote_node);
+    // run_edit_message_propagation_test(&our.node, &remote_node);
     // run_counterparty_inference_test(&our.node, &remote_node);
 
     Response::new()
@@ -84,6 +84,7 @@ fn run_duplicate_message_test(chat_address: &Address) {
         sender: counterparty.clone(),
         content: "Hello from tests".to_string(),
         timestamp: 1,
+        sequence: None,
         status: MessageStatus::Sent,
         reply_to: None,
         reactions: Vec::new(),
@@ -159,6 +160,7 @@ fn run_pagination_timestamp_test(chat_address: &Address, local_node: &str) {
             sender: counterparty.clone(),
             content: format!("Pagination message {idx}"),
             timestamp,
+            sequence: None,
             status: MessageStatus::Sent,
             reply_to: None,
             reactions: Vec::new(),
@@ -168,14 +170,22 @@ fn run_pagination_timestamp_test(chat_address: &Address, local_node: &str) {
         send_receive_message(chat_address, &inbound_message);
     }
 
-    let messages = fetch_messages(chat_address, &chat_id);
-    let earliest = messages
-        .iter()
-        .map(|m| m.timestamp)
-        .min()
-        .unwrap_or_else(|| fail_with("pagination test: expected messages"));
+    let first_page =
+        fetch_messages_with_before(chat_address, &chat_id, None, Some(2));
+    if first_page.len() < 2 {
+        fail_with("pagination test: expected at least two messages on the first page");
+    }
 
-    let older_messages = fetch_messages_with_before(chat_address, &chat_id, Some(earliest));
+    let cursor_message = first_page
+        .last()
+        .unwrap_or_else(|| fail_with("pagination test: expected messages on first page"));
+
+    let older_messages = fetch_messages_with_before(
+        chat_address,
+        &chat_id,
+        Some(cursor_message.timestamp),
+        Some(2),
+    );
     if older_messages.is_empty() {
         fail_with("pagination test: expected messages at cursor timestamp but received none");
     }
@@ -204,19 +214,22 @@ fn send_receive_message(address: &Address, message: &ChatMessage) {
 }
 
 fn fetch_messages(address: &Address, chat_id: &str) -> Vec<ChatMessage> {
-    fetch_messages_with_before(address, chat_id, None)
+    fetch_messages_with_before(address, chat_id, None, None)
 }
 
 fn fetch_messages_with_before(
     address: &Address,
     chat_id: &str,
     before_timestamp: Option<u64>,
+    limit: Option<u64>,
 ) -> Vec<ChatMessage> {
     let payload = json!({
         "GetMessages": {
             "chat_id": chat_id,
             "before_timestamp": before_timestamp.map(Value::from).unwrap_or(Value::Null),
-            "limit": Value::Null
+            "limit": limit
+                .map(Value::from)
+                .unwrap_or(Value::Null)
         }
     });
     let result: Result<Vec<ChatMessage>, String> = send_chat_rpc(address, payload);

@@ -31,6 +31,7 @@ class BrowserStorage {
           sender: msg.sender,
           content: msg.content.length > 500 ? msg.content.substring(0, 500) + '...' : msg.content,
           timestamp: msg.timestamp,
+          sequence: msg.sequence ?? null,
           status: msg.status,
           reply_to: msg.reply_to,
           reactions: msg.reactions?.slice(0, 5) || [], // Limit reactions
@@ -65,6 +66,7 @@ class BrowserStorage {
             sender: msg.sender,
             content: msg.content.substring(0, 200),
             timestamp: msg.timestamp,
+            sequence: msg.sequence ?? null,
             status: msg.status,
             reply_to: null,
             reactions: [],

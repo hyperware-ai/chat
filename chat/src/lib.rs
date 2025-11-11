@@ -13,6 +13,7 @@ use hyperware_process_lib::{
     our, print_to_terminal, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -260,6 +261,7 @@ impl ChatState {
                     sender: "System".to_string(),
                     content: "Welcome to Hyperware Chat! You can create new chats by clicking the + button.".to_string(),
                     timestamp,
+                    sequence: Some(0),
                     status: MessageStatus::Delivered,
                     reply_to: None,
                     reactions: Vec::new(),
@@ -275,6 +277,11 @@ impl ChatState {
 
             self.chats
                 .insert("system:welcome".to_string(), welcome_chat);
+        }
+
+        let existing_chat_ids: Vec<String> = self.chats.keys().cloned().collect();
+        for chat_id in existing_chat_ids {
+            self.ensure_sequence_state(&chat_id);
         }
 
         // Clone the delivery queue Arc for the spawn task
@@ -420,24 +427,46 @@ impl ChatState {
             .ok_or_else(|| "Chat not found".to_string())?;
         print_to_terminal(0, "found chat");
 
-        // Filter messages based on timestamp if provided
-        let mut messages: Vec<ChatMessage> = if let Some(before_ts) = req.before_timestamp {
-            chat.messages
-                .iter()
-                .filter(|msg| msg.timestamp < before_ts)
-                .cloned()
-                .collect()
-        } else {
-            chat.messages.clone()
-        };
+        // Sort by timestamp descending (newest first) and break ties via sequence/id
+        let mut messages: Vec<ChatMessage> = chat.messages.clone();
+        messages.sort_by(|a, b| match b.timestamp.cmp(&a.timestamp) {
+            Ordering::Equal => match (
+                b.sequence.unwrap_or(0).cmp(&a.sequence.unwrap_or(0)),
+                b.id.cmp(&a.id),
+            ) {
+                (Ordering::Equal, id_cmp) => id_cmp,
+                (seq_cmp, _) => seq_cmp,
+            },
+            other => other,
+        });
         print_to_terminal(0, "got msgs");
 
-        // Sort by timestamp descending (newest first)
-        messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        let limit = req.limit.unwrap_or(50) as usize;
+        if let Some(before_ts) = req.before_timestamp {
+            let newer_count = messages
+                .iter()
+                .filter(|msg| msg.timestamp > before_ts)
+                .count();
+            let mut to_skip_at_ts = limit.saturating_sub(newer_count);
+            messages = messages
+                .into_iter()
+                .filter(|msg| {
+                    if msg.timestamp > before_ts {
+                        false
+                    } else if msg.timestamp < before_ts {
+                        true
+                    } else if to_skip_at_ts > 0 {
+                        to_skip_at_ts -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+        }
         print_to_terminal(0, "got msgs2");
 
         // Apply limit (convert u64 to usize for truncate)
-        let limit = req.limit.unwrap_or(50) as usize;
         messages.truncate(limit);
         print_to_terminal(0, "got msgs3");
 
@@ -530,8 +559,9 @@ impl ChatState {
     async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
         self.chats
             .remove(&req.chat_id)
-            .ok_or_else(|| "Chat not found".to_string())
-            .map(|_| "Chat deleted".to_string())
+            .ok_or_else(|| "Chat not found".to_string())?;
+        self.message_sequence_counters.remove(&req.chat_id);
+        Ok("Chat deleted".to_string())
     }
 
     // MESSAGE OPERATIONS
@@ -546,11 +576,31 @@ impl ChatState {
 
         let message_id = format!("{}:{}", timestamp, rand::random::<u32>());
 
-        let message = ChatMessage {
+        let chat_id = req.chat_id.clone();
+
+        if !self.chats.contains_key(&chat_id) {
+            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            self.chats.insert(
+                chat_id.clone(),
+                Chat {
+                    id: chat_id.clone(),
+                    counterparty,
+                    messages: Vec::new(),
+                    last_activity: timestamp,
+                    unread_count: 0,
+                    is_blocked: false,
+                    notify: true,
+                    counterparty_profile: None,
+                },
+            );
+        }
+
+        let mut message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
             content: req.content,
             timestamp,
+            sequence: None,
             status: MessageStatus::Sending,
             reply_to: req.reply_to,
             reactions: Vec::new(),
@@ -558,26 +608,12 @@ impl ChatState {
             file_info: None,
         };
 
-        // Add to chat if it exists, or create new chat
-        let chat = self.chats.entry(req.chat_id.clone()).or_insert_with(|| {
-            let counterparty = req
-                .chat_id
-                .split(':')
-                .nth(1)
-                .unwrap_or("unknown")
-                .to_string();
-            Chat {
-                id: req.chat_id.clone(),
-                counterparty,
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: None,
-            }
-        });
+        self.assign_sequence_to_message(&chat_id, &mut message);
 
+        let chat = self
+            .chats
+            .get_mut(&chat_id)
+            .expect("chat should exist after insertion");
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
 
@@ -829,11 +865,32 @@ impl ChatState {
             .unwrap()
             .as_secs();
 
-        let forwarded_message = ChatMessage {
+        let chat_id = req.to_chat_id.clone();
+
+        if !self.chats.contains_key(&chat_id) {
+            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            let profile = self.node_profiles.get(&counterparty).cloned();
+            self.chats.insert(
+                chat_id.clone(),
+                Chat {
+                    id: chat_id.clone(),
+                    counterparty: counterparty.clone(),
+                    messages: Vec::new(),
+                    last_activity: timestamp,
+                    unread_count: 0,
+                    is_blocked: false,
+                    notify: true,
+                    counterparty_profile: profile,
+                },
+            );
+        }
+
+        let mut forwarded_message = ChatMessage {
             id: format!("{}:{}", timestamp, rand::random::<u32>()),
             sender: our().node.clone(),
             content: format!("Forwarded: {}", original_message.content),
             timestamp,
+            sequence: None,
             status: MessageStatus::Sending,
             reply_to: None,
             reactions: Vec::new(),
@@ -841,31 +898,17 @@ impl ChatState {
             file_info: original_message.file_info.clone(),
         };
 
-        // Add to destination chat
-        let chat = self.chats.entry(req.to_chat_id.clone()).or_insert_with(|| {
-            let counterparty = req
-                .to_chat_id
-                .split(':')
-                .nth(1)
-                .unwrap_or("unknown")
-                .to_string();
-            Chat {
-                id: req.to_chat_id.clone(),
-                counterparty: counterparty.clone(),
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: self.node_profiles.get(&counterparty).cloned(),
-            }
-        });
+        self.assign_sequence_to_message(&chat_id, &mut forwarded_message);
 
+        let chat = self
+            .chats
+            .get_mut(&chat_id)
+            .expect("chat exists after initialization");
         chat.messages.push(forwarded_message.clone());
         chat.last_activity = timestamp;
 
         // Send to counterparty if it's a node-to-node chat
-        if !req.to_chat_id.starts_with("browser:") {
+        if !chat_id.starts_with("browser:") {
             let counterparty = chat.counterparty.clone();
             let msg_to_send = forwarded_message.clone();
 
@@ -1197,11 +1240,30 @@ impl ChatState {
             url: file_url.clone(),
         };
 
-        let message = ChatMessage {
+        let chat_id = req.chat_id.clone();
+        if !self.chats.contains_key(&chat_id) {
+            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            self.chats.insert(
+                chat_id.clone(),
+                Chat {
+                    id: chat_id.clone(),
+                    counterparty,
+                    messages: Vec::new(),
+                    last_activity: timestamp,
+                    unread_count: 0,
+                    is_blocked: false,
+                    notify: true,
+                    counterparty_profile: None,
+                },
+            );
+        }
+
+        let mut message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
             content: req.filename,
             timestamp,
+            sequence: None,
             status: MessageStatus::Sending,
             reply_to: req.reply_to,
             reactions: Vec::new(),
@@ -1209,26 +1271,12 @@ impl ChatState {
             file_info: Some(file_info),
         };
 
-        // Add to chat
-        let chat = self.chats.entry(req.chat_id.clone()).or_insert_with(|| {
-            let counterparty = req
-                .chat_id
-                .split(':')
-                .nth(1)
-                .unwrap_or("unknown")
-                .to_string();
-            Chat {
-                id: req.chat_id.clone(),
-                counterparty,
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: None,
-            }
-        });
+        self.assign_sequence_to_message(&chat_id, &mut message);
 
+        let chat = self
+            .chats
+            .get_mut(&chat_id)
+            .expect("chat exists before pushing file message");
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
 
@@ -1317,11 +1365,30 @@ impl ChatState {
             url: file_url,
         };
 
-        let message = ChatMessage {
+        let chat_id = req.chat_id.clone();
+        if !self.chats.contains_key(&chat_id) {
+            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            self.chats.insert(
+                chat_id.clone(),
+                Chat {
+                    id: chat_id.clone(),
+                    counterparty,
+                    messages: Vec::new(),
+                    last_activity: timestamp,
+                    unread_count: 0,
+                    is_blocked: false,
+                    notify: true,
+                    counterparty_profile: None,
+                },
+            );
+        }
+
+        let mut message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
             content: format!("Voice note ({}s)", req.duration),
             timestamp,
+            sequence: None,
             status: MessageStatus::Sending,
             reply_to: req.reply_to,
             reactions: Vec::new(),
@@ -1329,26 +1396,12 @@ impl ChatState {
             file_info: Some(file_info),
         };
 
-        // Add to chat
-        let chat = self.chats.entry(req.chat_id.clone()).or_insert_with(|| {
-            let counterparty = req
-                .chat_id
-                .split(':')
-                .nth(1)
-                .unwrap_or("unknown")
-                .to_string();
-            Chat {
-                id: req.chat_id.clone(),
-                counterparty,
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: None,
-            }
-        });
+        self.assign_sequence_to_message(&chat_id, &mut message);
 
+        let chat = self
+            .chats
+            .get_mut(&chat_id)
+            .expect("chat exists before storing voice note");
         chat.messages.push(message.clone());
         chat.last_activity = timestamp;
 
@@ -1541,7 +1594,7 @@ impl ChatState {
         let chat_id = Self::normalize_chat_id(&message.sender, &our().node);
         let is_new_chat = !self.chats.contains_key(&chat_id);
 
-        let chat = self.chats.entry(chat_id.clone()).or_insert_with(|| Chat {
+        self.chats.entry(chat_id.clone()).or_insert_with(|| Chat {
             id: chat_id.clone(),
             counterparty: message.sender.clone(),
             messages: Vec::new(),
@@ -1556,6 +1609,7 @@ impl ChatState {
         let mut updated_message = message.clone();
         updated_message.status =
             safe_update_message_status(&message.status, MessageStatus::Delivered);
+        updated_message.sequence = None;
 
         // If message has a file, save it to our VFS
         if let Some(ref mut file_info) = updated_message.file_info {
@@ -1641,45 +1695,68 @@ impl ChatState {
 
         // Deduplicate by message ID so delivery retries don't create copies
         let mut is_duplicate = false;
-        if let Some(existing) = chat
-            .messages
-            .iter_mut()
-            .find(|m| m.id == updated_message.id)
+        let mut should_insert = false;
+        let mut stored_message: Option<ChatMessage> = None;
         {
-            is_duplicate = true;
-            existing.content = updated_message.content.clone();
-            existing.timestamp = updated_message.timestamp;
-            existing.reply_to = updated_message.reply_to.clone();
-            existing.reactions = updated_message.reactions.clone();
-            existing.message_type = updated_message.message_type.clone();
-            existing.file_info = updated_message.file_info.clone();
-            existing.sender = updated_message.sender.clone();
-            existing.status =
-                safe_update_message_status(&existing.status, updated_message.status.clone());
-        } else {
-            chat.messages.push(updated_message.clone());
-            chat.unread_count += 1;
+            let chat = self
+                .chats
+                .get_mut(&chat_id)
+                .expect("chat should exist after ensure");
+            if let Some(existing) = chat
+                .messages
+                .iter_mut()
+                .find(|m| m.id == updated_message.id)
+            {
+                is_duplicate = true;
+                existing.content = updated_message.content.clone();
+                existing.timestamp = updated_message.timestamp;
+                existing.reply_to = updated_message.reply_to.clone();
+                existing.reactions = updated_message.reactions.clone();
+                existing.message_type = updated_message.message_type.clone();
+                existing.file_info = updated_message.file_info.clone();
+                existing.sender = updated_message.sender.clone();
+                existing.status =
+                    safe_update_message_status(&existing.status, updated_message.status.clone());
+            } else {
+                should_insert = true;
+            }
+            chat.last_activity = chat.last_activity.max(updated_message.timestamp);
         }
-        chat.last_activity = chat.last_activity.max(updated_message.timestamp);
+
+        if should_insert {
+            let mut message_to_store = updated_message.clone();
+            self.assign_sequence_to_message(&chat_id, &mut message_to_store);
+            if let Some(chat) = self.chats.get_mut(&chat_id) {
+                chat.messages.push(message_to_store.clone());
+                chat.unread_count += 1;
+            }
+            stored_message = Some(message_to_store);
+        }
 
         if !is_duplicate {
+            let message_for_events = stored_message
+                .clone()
+                .expect("new messages should be stored before broadcasting");
+            let chat_snapshot = self.chats.get(&chat_id).cloned();
             // Send to WebSocket connections if any
             for &channel_id in self.ws_connections.keys() {
                 // If this is a new chat, send ChatUpdate first
                 if is_new_chat {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
+                    if let Some(chat_update) = chat_snapshot.clone() {
+                        let msg = WsServerMessage::ChatUpdate(chat_update);
+                        send_ws_push(
+                            channel_id,
+                            WsMessageType::Text,
+                            LazyLoadBlob {
+                                mime: Some("application/json".to_string()),
+                                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
+                            },
+                        );
+                    }
                 }
 
                 // Then send the new message
-                let msg = WsServerMessage::NewMessage(updated_message.clone());
+                let msg = WsServerMessage::NewMessage(message_for_events.clone());
                 send_ws_push(
                     channel_id,
                     WsMessageType::Text,
@@ -1691,14 +1768,21 @@ impl ChatState {
             }
 
             // Send push notification if user has notifications enabled AND no active connections
-            // We only send notifications if the user is not actively viewing the app
-            if chat.notify && self.settings.notify_chats && self.active_connections.is_empty() {
-                // Try to send a push notification
+            if self
+                .chats
+                .get(&chat_id)
+                .map(|chat| chat.notify)
+                .unwrap_or(true)
+                && self.settings.notify_chats
+                && self.active_connections.is_empty()
+            {
+                let chat_id_for_push = chat_id.clone();
+                let message_for_push = message_for_events.clone();
                 spawn(async move {
                     send_push_notification_for_message(
-                        &updated_message.sender,
-                        &updated_message.content,
-                        &chat_id,
+                        &message_for_push.sender,
+                        &message_for_push.content,
+                        &chat_id_for_push,
                     )
                     .await;
                 });
@@ -1716,7 +1800,6 @@ impl ChatState {
 
         Ok(())
     }
-
     // Remote handler for receiving reactions
     #[remote]
     async fn receive_reaction(
@@ -2115,6 +2198,77 @@ impl ChatState {
         }
     }
 
+    fn ensure_sequence_state(&mut self, chat_id: &str) {
+        if self.message_sequence_counters.contains_key(chat_id) {
+            return;
+        }
+
+        if !self.chats.contains_key(chat_id) {
+            self.message_sequence_counters
+                .insert(chat_id.to_string(), 0);
+            return;
+        }
+
+        let chat = self
+            .chats
+            .get_mut(chat_id)
+            .expect("chat must exist when ensuring sequences");
+
+        let mut next_seq = 0u64;
+        let mut indices: Vec<usize> = (0..chat.messages.len()).collect();
+        indices.sort_by(|&i, &j| {
+            chat.messages[i]
+                .timestamp
+                .cmp(&chat.messages[j].timestamp)
+                .then_with(|| chat.messages[i].id.cmp(&chat.messages[j].id))
+        });
+
+        let mut max_existing = chat
+            .messages
+            .iter()
+            .filter_map(|m| m.sequence)
+            .max()
+            .map(|val| val + 1);
+
+        if max_existing.is_some() {
+            next_seq = max_existing.take().unwrap();
+        }
+
+        for idx in indices {
+            if chat.messages[idx].sequence.is_none() {
+                chat.messages[idx].sequence = Some(next_seq);
+                next_seq += 1;
+            }
+        }
+
+        if next_seq == 0 {
+            next_seq = chat
+                .messages
+                .iter()
+                .filter_map(|m| m.sequence)
+                .max()
+                .map(|val| val + 1)
+                .unwrap_or(0);
+        }
+
+        self.message_sequence_counters
+            .insert(chat_id.to_string(), next_seq);
+    }
+
+    fn assign_sequence_to_message(&mut self, chat_id: &str, message: &mut ChatMessage) {
+        if message.sequence.is_some() {
+            return;
+        }
+
+        self.ensure_sequence_state(chat_id);
+
+        if let Some(counter) = self.message_sequence_counters.get_mut(chat_id) {
+            let seq = *counter;
+            *counter += 1;
+            message.sequence = Some(seq);
+        }
+    }
+
     async fn process_delivery_queue(&mut self) {
         let queue_len = {
             let queue = self.delivery_queue.lock().unwrap();
@@ -2217,11 +2371,12 @@ impl ChatState {
                     .cloned()
                     .unwrap_or_else(|| our().node.clone());
 
-                let message = ChatMessage {
+                let mut message = ChatMessage {
                     id: message_id.clone(),
                     sender,
                     content,
                     timestamp,
+                    sequence: None,
                     status: MessageStatus::Sending,
                     reply_to,
                     reactions: Vec::new(),
@@ -2230,6 +2385,9 @@ impl ChatState {
                 };
 
                 // Add to chat
+                if self.chats.contains_key(&chat_id) {
+                    self.assign_sequence_to_message(&chat_id, &mut message);
+                }
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.messages.push(message.clone());
                     chat.last_activity = timestamp;
@@ -2407,24 +2565,12 @@ impl ChatState {
                             .unwrap()
                             .as_secs();
 
-                        let message = ChatMessage {
-                            id: format!("{}:{}", timestamp, rand::random::<u32>()),
-                            sender: key_data.user_name.clone(),
-                            content,
-                            timestamp,
-                            status: MessageStatus::Sent,
-                            reply_to: None,
-                            reactions: Vec::new(),
-                            message_type: MessageType::Text,
-                            file_info: None,
-                        };
-
-                        // Add to chat
-                        let chat =
-                            self.chats
-                                .entry(key_data.chat_id.clone())
-                                .or_insert_with(|| Chat {
-                                    id: key_data.chat_id.clone(),
+                        let chat_id = key_data.chat_id.clone();
+                        if !self.chats.contains_key(&chat_id) {
+                            self.chats.insert(
+                                chat_id.clone(),
+                                Chat {
+                                    id: chat_id.clone(),
                                     counterparty: key_data.user_name.clone(),
                                     messages: Vec::new(),
                                     last_activity: timestamp,
@@ -2432,8 +2578,29 @@ impl ChatState {
                                     is_blocked: false,
                                     notify: true,
                                     counterparty_profile: None,
-                                });
+                                },
+                            );
+                        }
 
+                        let mut message = ChatMessage {
+                            id: format!("{}:{}", timestamp, rand::random::<u32>()),
+                            sender: key_data.user_name.clone(),
+                            content,
+                            timestamp,
+                            sequence: None,
+                            status: MessageStatus::Sent,
+                            reply_to: None,
+                            reactions: Vec::new(),
+                            message_type: MessageType::Text,
+                            file_info: None,
+                        };
+
+                        self.assign_sequence_to_message(&chat_id, &mut message);
+
+                        let chat = self
+                            .chats
+                            .get_mut(&chat_id)
+                            .expect("chat exists for browser message");
                         chat.messages.push(message.clone());
                         chat.last_activity = timestamp;
                         chat.unread_count += 1;

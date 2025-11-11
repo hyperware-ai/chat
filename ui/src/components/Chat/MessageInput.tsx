@@ -16,10 +16,8 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
   const { sendMessage, replyingTo, setReplyingTo } = useChatStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   
-  // Detect if user is on mobile device
-  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || 
-                   ('ontouchstart' in window) || 
-                   window.innerWidth <= 768;
+  // Detect if user is on mobile device (avoid touch-enabled laptops)
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
   
   // Focus input when replying
   useEffect(() => {
