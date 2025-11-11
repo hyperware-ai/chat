@@ -60,14 +60,14 @@ fn handle_message(our: &Address) {
 
     let chat_address = chat_process_address(&our.node);
     // run_duplicate_message_test(&chat_address);
-    run_pagination_timestamp_test(&chat_address, &our.node);
+    // run_pagination_timestamp_test(&chat_address, &our.node);
 
     if node_names.len() < 2 {
         fail_with("edit-message propagation test requires at least two nodes");
     }
     let remote_node = node_names[1].clone();
     // run_edit_message_propagation_test(&our.node, &remote_node);
-    // run_counterparty_inference_test(&our.node, &remote_node);
+    run_counterparty_inference_test(&our.node, &remote_node);
 
     Response::new()
         .body(TesterResponse::Run(Ok(())))
@@ -192,7 +192,16 @@ fn run_pagination_timestamp_test(chat_address: &Address, local_node: &str) {
 }
 
 fn run_counterparty_inference_test(local_node: &str, remote_node: &str) {
-    if local_node <= remote_node {
+    print_to_terminal(0, "running counterparty inference test");
+    print_to_terminal(0, "local_node");
+    print_to_terminal(0, local_node);
+    print_to_terminal(0, "remote_node");
+    print_to_terminal(0, remote_node);
+
+    // We only care about the case where the remote node sorts after the local node,
+    // since the remote will hit the fallback counterparty inference logic.
+    if remote_node <= local_node {
+        print_to_terminal(0, "remote does not sort after local; skipping");
         return;
     }
 
@@ -200,11 +209,18 @@ fn run_counterparty_inference_test(local_node: &str, remote_node: &str) {
     let remote_address = chat_process_address(remote_node);
     let chat_id = normalize_chat_id(local_node, remote_node);
 
-    let _ = delete_chat_if_exists(&local_address, &chat_id);
+    print_to_terminal(0, "normalized chat id ");
 
+    let _ = delete_chat_if_exists(&local_address, &chat_id);
+    let _ = delete_chat_if_exists(&remote_address, &chat_id);
+
+    print_to_terminal(0, "deleted chat");
     let sent_message =
-        send_chat_message(&local_address, &chat_id, "Counterparty inference message");
-    wait_for_remote_message(&remote_address, &chat_id, &sent_message.id);
+        send_chat_message(&remote_address, &chat_id, "Counterparty inference message");
+
+    print_to_terminal(0, "sent msg");
+    wait_for_remote_message(&local_address, &chat_id, &sent_message.id);
+    print_to_terminal(0, "received remote msg");
 }
 
 fn send_receive_message(address: &Address, message: &ChatMessage) {

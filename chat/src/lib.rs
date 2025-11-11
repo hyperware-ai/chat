@@ -555,6 +555,8 @@ impl ChatState {
         Ok(sync_hashes)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
         self.chats
@@ -566,6 +568,8 @@ impl ChatState {
 
     // MESSAGE OPERATIONS
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
@@ -579,7 +583,7 @@ impl ChatState {
         let chat_id = req.chat_id.clone();
 
         if !self.chats.contains_key(&chat_id) {
-            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            let counterparty: String = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
             self.chats.insert(
                 chat_id.clone(),
                 Chat {
@@ -868,7 +872,7 @@ impl ChatState {
         let chat_id = req.to_chat_id.clone();
 
         if !self.chats.contains_key(&chat_id) {
-            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            let counterparty = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
             let profile = self.node_profiles.get(&counterparty).cloned();
             self.chats.insert(
                 chat_id.clone(),
@@ -1242,7 +1246,7 @@ impl ChatState {
 
         let chat_id = req.chat_id.clone();
         if !self.chats.contains_key(&chat_id) {
-            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            let counterparty = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
             self.chats.insert(
                 chat_id.clone(),
                 Chat {
@@ -1367,7 +1371,7 @@ impl ChatState {
 
         let chat_id = req.chat_id.clone();
         if !self.chats.contains_key(&chat_id) {
-            let counterparty = chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
+            let counterparty = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
             self.chats.insert(
                 chat_id.clone(),
                 Chat {
@@ -2188,6 +2192,21 @@ impl ChatState {
 
 // Helper methods implementation
 impl ChatState {
+    fn infer_counterparty_from_chat_id(chat_id: &str, our_node: &str) -> String {
+        let mut parts = chat_id.splitn(2, ':');
+        let first = parts.next().unwrap_or_default();
+        let second = parts.next().unwrap_or_default();
+
+        if first == our_node {
+            second.to_string()
+        } else if second == our_node {
+            first.to_string()
+        } else {
+            // malformed ID; fall back to the tail for now
+            second.to_string()
+        }
+    }
+
     // Normalize chat ID to prevent duplicates
     // Always returns the ID in alphabetical order: "nodeA:nodeB"
     fn normalize_chat_id(node1: &str, node2: &str) -> String {
