@@ -10,7 +10,7 @@ use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
     hyperapp::{send, sleep, spawn, SaveOptions},
-    our, print_to_terminal, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
+    our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
@@ -419,13 +419,11 @@ impl ChatState {
     #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
-        print_to_terminal(0, "call to get_messages here");
         // Get the chat
         let chat = self
             .chats
             .get(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
-        print_to_terminal(0, "found chat");
 
         // Sort by timestamp descending (newest first) and break ties via sequence/id
         let mut messages: Vec<ChatMessage> = chat.messages.clone();
@@ -439,7 +437,6 @@ impl ChatState {
             },
             other => other,
         });
-        print_to_terminal(0, "got msgs");
 
         let limit = req.limit.unwrap_or(50) as usize;
         if let Some(before_ts) = req.before_timestamp {
@@ -464,15 +461,12 @@ impl ChatState {
                 })
                 .collect();
         }
-        print_to_terminal(0, "got msgs2");
 
         // Apply limit (convert u64 to usize for truncate)
         messages.truncate(limit);
-        print_to_terminal(0, "got msgs3");
 
         // Return in ascending order (oldest first) for display
         messages.reverse();
-        print_to_terminal(0, "returning msgs");
 
         Ok(messages)
     }
