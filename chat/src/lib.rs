@@ -576,23 +576,6 @@ impl ChatState {
 
         let chat_id = req.chat_id.clone();
 
-        if !self.chats.contains_key(&chat_id) {
-            let counterparty: String = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
-            self.chats.insert(
-                chat_id.clone(),
-                Chat {
-                    id: chat_id.clone(),
-                    counterparty,
-                    messages: Vec::new(),
-                    last_activity: timestamp,
-                    unread_count: 0,
-                    is_blocked: false,
-                    notify: true,
-                    counterparty_profile: None,
-                },
-            );
-        }
-
         let mut message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
@@ -608,21 +591,21 @@ impl ChatState {
 
         self.assign_sequence_to_message(&chat_id, &mut message);
 
-        let chat = self
-            .chats
-            .get_mut(&chat_id)
-            .expect("chat should exist after insertion");
-        chat.messages.push(message.clone());
-        chat.last_activity = timestamp;
+        let (counterparty, chat_snapshot) = {
+            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
+            chat.messages.push(message.clone());
+            chat.last_activity = timestamp;
 
-        // Immediately update status to Sent (backend has received the message)
-        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-            msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-        }
+            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
+            }
+
+            (chat.counterparty.clone(), chat.clone())
+        };
 
         // Send ChatUpdate immediately to show Sent status
         for &channel_id in self.ws_connections.keys() {
-            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+            let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
             send_ws_push(
                 channel_id,
                 WsMessageType::Text,
@@ -634,7 +617,6 @@ impl ChatState {
         }
 
         // Send to counterparty via P2P using generated RPC
-        let counterparty = chat.counterparty.clone();
         let msg_to_send = message.clone();
         let message_id_clone = message.id.clone();
         let delivery_queue = self.delivery_queue.clone();
@@ -865,24 +847,6 @@ impl ChatState {
 
         let chat_id = req.to_chat_id.clone();
 
-        if !self.chats.contains_key(&chat_id) {
-            let counterparty = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
-            let profile = self.node_profiles.get(&counterparty).cloned();
-            self.chats.insert(
-                chat_id.clone(),
-                Chat {
-                    id: chat_id.clone(),
-                    counterparty: counterparty.clone(),
-                    messages: Vec::new(),
-                    last_activity: timestamp,
-                    unread_count: 0,
-                    is_blocked: false,
-                    notify: true,
-                    counterparty_profile: profile,
-                },
-            );
-        }
-
         let mut forwarded_message = ChatMessage {
             id: format!("{}:{}", timestamp, rand::random::<u32>()),
             sender: our().node.clone(),
@@ -898,16 +862,15 @@ impl ChatState {
 
         self.assign_sequence_to_message(&chat_id, &mut forwarded_message);
 
-        let chat = self
-            .chats
-            .get_mut(&chat_id)
-            .expect("chat exists after initialization");
-        chat.messages.push(forwarded_message.clone());
-        chat.last_activity = timestamp;
+        let (counterparty, chat_snapshot) = {
+            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
+            chat.messages.push(forwarded_message.clone());
+            chat.last_activity = timestamp;
+            (chat.counterparty.clone(), chat.clone())
+        };
 
         // Send to counterparty if it's a node-to-node chat
         if !chat_id.starts_with("browser:") {
-            let counterparty = chat.counterparty.clone();
             let msg_to_send = forwarded_message.clone();
 
             let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
@@ -929,7 +892,7 @@ impl ChatState {
 
                         // Send ChatUpdate with the updated message status
                         for &channel_id in self.ws_connections.keys() {
-                            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                            let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
                             send_ws_push(
                                 channel_id,
                                 WsMessageType::Text,
@@ -1239,22 +1202,6 @@ impl ChatState {
         };
 
         let chat_id = req.chat_id.clone();
-        if !self.chats.contains_key(&chat_id) {
-            let counterparty = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
-            self.chats.insert(
-                chat_id.clone(),
-                Chat {
-                    id: chat_id.clone(),
-                    counterparty,
-                    messages: Vec::new(),
-                    last_activity: timestamp,
-                    unread_count: 0,
-                    is_blocked: false,
-                    notify: true,
-                    counterparty_profile: None,
-                },
-            );
-        }
 
         let mut message = ChatMessage {
             id: message_id,
@@ -1271,15 +1218,13 @@ impl ChatState {
 
         self.assign_sequence_to_message(&chat_id, &mut message);
 
-        let chat = self
-            .chats
-            .get_mut(&chat_id)
-            .expect("chat exists before pushing file message");
-        chat.messages.push(message.clone());
-        chat.last_activity = timestamp;
+        let (counterparty, chat_snapshot) = {
+            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
+            chat.messages.push(message.clone());
+            chat.last_activity = timestamp;
+            (chat.counterparty.clone(), chat.clone())
+        };
 
-        // Send to counterparty using generated RPC
-        let counterparty = chat.counterparty.clone();
         let mut msg_to_send = message.clone();
 
         // For files (not images), replace URL with compressed data for transmission
@@ -1306,7 +1251,7 @@ impl ChatState {
 
                     // Send ChatUpdate with the updated message status
                     for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
                         send_ws_push(
                             channel_id,
                             WsMessageType::Text,
@@ -1364,22 +1309,6 @@ impl ChatState {
         };
 
         let chat_id = req.chat_id.clone();
-        if !self.chats.contains_key(&chat_id) {
-            let counterparty = Self::infer_counterparty_from_chat_id(&chat_id, &our().node);
-            self.chats.insert(
-                chat_id.clone(),
-                Chat {
-                    id: chat_id.clone(),
-                    counterparty,
-                    messages: Vec::new(),
-                    last_activity: timestamp,
-                    unread_count: 0,
-                    is_blocked: false,
-                    notify: true,
-                    counterparty_profile: None,
-                },
-            );
-        }
 
         let mut message = ChatMessage {
             id: message_id,
@@ -1396,15 +1325,13 @@ impl ChatState {
 
         self.assign_sequence_to_message(&chat_id, &mut message);
 
-        let chat = self
-            .chats
-            .get_mut(&chat_id)
-            .expect("chat exists before storing voice note");
-        chat.messages.push(message.clone());
-        chat.last_activity = timestamp;
+        let (counterparty, chat_snapshot) = {
+            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
+            chat.messages.push(message.clone());
+            chat.last_activity = timestamp;
+            (chat.counterparty.clone(), chat.clone())
+        };
 
-        // Send to counterparty using generated RPC
-        let counterparty = chat.counterparty.clone();
         let msg_to_send = message.clone();
 
         let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
@@ -1422,7 +1349,7 @@ impl ChatState {
 
                     // Send ChatUpdate with the updated message status
                     for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
                         send_ws_push(
                             channel_id,
                             WsMessageType::Text,
@@ -1833,9 +1760,10 @@ impl ChatState {
                 {
                     message.reactions.push(reaction);
 
+                    let chat_snapshot = chat.clone();
                     // Send ChatUpdate to WebSocket connections
                     for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
                         send_ws_push(
                             channel_id,
                             WsMessageType::Text,
@@ -2211,6 +2139,44 @@ impl ChatState {
         }
     }
 
+    fn get_or_create_chat<'a>(
+        &'a mut self,
+        chat_id: &str,
+        timestamp: u64,
+        counterparty_hint: Option<String>,
+        profile_hint: Option<UserProfile>,
+    ) -> &'a mut Chat {
+        if !self.chats.contains_key(chat_id) {
+            let counterparty = counterparty_hint
+                .or_else(|| Some(Self::infer_counterparty_from_chat_id(chat_id, &our().node)))
+                .unwrap_or_else(|| chat_id.to_string());
+
+            let profile = profile_hint
+                .or_else(|| self.node_profiles.get(&counterparty).cloned());
+
+            self.chats.insert(
+                chat_id.to_string(),
+                Chat {
+                    id: chat_id.to_string(),
+                    counterparty: counterparty.clone(),
+                    messages: Vec::new(),
+                    last_activity: timestamp,
+                    unread_count: 0,
+                    is_blocked: false,
+                    notify: true,
+                    counterparty_profile: profile,
+                },
+            );
+            self.message_sequence_counters
+                .entry(chat_id.to_string())
+                .or_insert(0);
+        }
+
+        self.chats
+            .get_mut(chat_id)
+            .expect("chat must exist after get_or_create_chat")
+    }
+
     fn ensure_sequence_state(&mut self, chat_id: &str) {
         if self.message_sequence_counters.contains_key(chat_id) {
             return;
@@ -2572,28 +2538,19 @@ impl ChatState {
                     .iter()
                     .find(|(_, &ch)| ch == channel_id)
                 {
-                    if let Some(key_data) = self.chat_keys.get(chat_key) {
+                    if let Some(key_data) = self.chat_keys.get(chat_key).cloned() {
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs();
 
                         let chat_id = key_data.chat_id.clone();
-                        if !self.chats.contains_key(&chat_id) {
-                            self.chats.insert(
-                                chat_id.clone(),
-                                Chat {
-                                    id: chat_id.clone(),
-                                    counterparty: key_data.user_name.clone(),
-                                    messages: Vec::new(),
-                                    last_activity: timestamp,
-                                    unread_count: 0,
-                                    is_blocked: false,
-                                    notify: true,
-                                    counterparty_profile: None,
-                                },
-                            );
-                        }
+                        self.get_or_create_chat(
+                            &chat_id,
+                            timestamp,
+                            Some(key_data.user_name.clone()),
+                            None,
+                        );
 
                         let mut message = ChatMessage {
                             id: format!("{}:{}", timestamp, rand::random::<u32>()),
@@ -2610,13 +2567,23 @@ impl ChatState {
 
                         self.assign_sequence_to_message(&chat_id, &mut message);
 
-                        let chat = self
-                            .chats
-                            .get_mut(&chat_id)
-                            .expect("chat exists for browser message");
-                        chat.messages.push(message.clone());
-                        chat.last_activity = timestamp;
-                        chat.unread_count += 1;
+                        self.get_or_create_chat(
+                            &chat_id,
+                            timestamp,
+                            Some(key_data.user_name.clone()),
+                            None,
+                        );
+                        {
+                            let chat = self.get_or_create_chat(
+                                &chat_id,
+                                timestamp,
+                                Some(key_data.user_name.clone()),
+                                None,
+                            );
+                            chat.messages.push(message.clone());
+                            chat.last_activity = timestamp;
+                            chat.unread_count += 1;
+                        }
 
                         // Send message to all participants
                         let msg = WsServerMessage::NewMessage(message);
