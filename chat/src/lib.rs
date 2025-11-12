@@ -5,6 +5,7 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use futures::{channel::mpsc::UnboundedReceiver, StreamExt};
 use hyperprocess_macro::*;
 use hyperware_process_lib::{
     homepage::add_to_homepage,
@@ -12,9 +13,8 @@ use hyperware_process_lib::{
     hyperapp::{send, sleep, spawn, SaveOptions},
     our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -284,54 +284,13 @@ impl ChatState {
             self.ensure_sequence_state(&chat_id);
         }
 
-        // Clone the delivery queue Arc for the spawn task
-        let delivery_queue = self.delivery_queue.clone();
-
-        // Spawn a task to periodically process the delivery queue
-        spawn(async move {
-            loop {
-                // Wait 30 seconds between delivery attempts
-                let _ = sleep(30000).await;
-
-                // Process the delivery queue
-                let queue_snapshot = {
-                    let queue = delivery_queue.lock().unwrap();
-                    queue.clone()
-                };
-
-                for (node, messages) in queue_snapshot {
-                    if let Some(msg) = messages.first() {
-                        let target = Address::from((node.as_str(), OUR_PROCESS_ID));
-
-                        // Try to send using generated RPC method
-                        let msg_json = serde_json::to_value(&msg).unwrap();
-                        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-
-                        match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
-                            Ok(_) => {
-                                println!(
-                                    "Successfully delivered queued message {} to {}",
-                                    msg.id, node
-                                );
-                                // Remove from queue if successful
-                                let mut queue = delivery_queue.lock().unwrap();
-                                if let Some(node_queue) = queue.get_mut(&node) {
-                                    node_queue.retain(|m| m.id != msg.id);
-                                    if node_queue.is_empty() {
-                                        queue.remove(&node);
-                                    }
-                                }
-                                // Note: Status update will happen when the ACK is received
-                            }
-                            Err(e) => {
-                                // Don't attempt more messages to this node if we get Offline or Timeout
-                                println!("Failed to deliver queued message to {}: {:?}", node, e);
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        if let Some(delivery_rx) = self.delivery_rx.take() {
+            let delivery_tx = self.delivery_tx.clone();
+            let pending_deliveries = self.pending_deliveries.clone();
+            spawn(async move {
+                ChatState::run_delivery_worker(delivery_rx, delivery_tx, pending_deliveries).await;
+            });
+        }
 
         println!(
             "Chat app initialized on node: {} with {} chats",
@@ -610,7 +569,8 @@ impl ChatState {
         // Send to counterparty via P2P using generated RPC
         let msg_to_send = message.clone();
         let message_id_clone = message.id.clone();
-        let delivery_queue = self.delivery_queue.clone();
+        let delivery_tx = self.delivery_tx.clone();
+        let pending_deliveries = self.pending_deliveries.clone();
 
         let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
 
@@ -632,12 +592,12 @@ impl ChatState {
                         "Failed to send message {} to {}, adding to delivery queue",
                         message_id_clone, counterparty
                     );
-                    // Failed to send immediately, add to delivery queue
-                    let mut queue = delivery_queue.lock().unwrap();
-                    queue
-                        .entry(counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(msg_to_send);
+                    ChatState::enqueue_delivery_message_inner(
+                        &delivery_tx,
+                        &pending_deliveries,
+                        &counterparty,
+                        msg_to_send,
+                    );
                 }
             }
         });
@@ -859,14 +819,7 @@ impl ChatState {
                     }
                 }
                 Err(_) => {
-                    {
-                        let mut queue = self.delivery_queue.lock().unwrap();
-                        queue
-                            .entry(counterparty.clone())
-                            .or_insert_with(Vec::new)
-                            .push(msg_to_send);
-                    }
-
+                    self.enqueue_delivery_message(&counterparty, msg_to_send);
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
                         if let Some(msg) = chat
                             .messages
@@ -1189,14 +1142,7 @@ impl ChatState {
                 }
             }
             Err(_) => {
-                {
-                    let mut queue = self.delivery_queue.lock().unwrap();
-                    queue
-                        .entry(counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(msg_to_send);
-                }
-
+                self.enqueue_delivery_message(&counterparty, msg_to_send);
                 // Still broadcast NewMessage for failed sends
                 let msg = WsServerMessage::NewMessage(message.clone());
                 self.broadcast_ws_message(&msg);
@@ -1269,14 +1215,7 @@ impl ChatState {
                 }
             }
             Err(_) => {
-                {
-                    let mut queue = self.delivery_queue.lock().unwrap();
-                    queue
-                        .entry(counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(msg_to_send);
-                }
-
+                self.enqueue_delivery_message(&counterparty, msg_to_send);
                 // Still broadcast NewMessage for failed sends
                 let msg = WsServerMessage::NewMessage(message.clone());
                 self.broadcast_ws_message(&msg);
@@ -1330,53 +1269,8 @@ impl ChatState {
             println!("receive_chat_creation: Chat {} already exists", chat_id);
         }
 
-        // Check if we have queued messages for this counterparty
-        let queued_messages = {
-            let mut queue = self.delivery_queue.lock().unwrap();
-            queue.remove(&counterparty).unwrap_or_default()
-        };
-
-        if !queued_messages.is_empty() {
-            println!(
-                "receive_chat_creation: Found {} queued messages for {}",
-                queued_messages.len(),
-                counterparty
-            );
-
-            // Try to deliver queued messages now that we know the counterparty is online
-            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-            let delivery_queue = self.delivery_queue.clone();
-            let counterparty_clone = counterparty.clone();
-
-            spawn(async move {
-                for msg in queued_messages {
-                    let msg_json = serde_json::to_value(&msg).unwrap();
-                    let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-
-                    match receive_message_remote_rpc(&target, msg_for_rpc).await {
-                        Ok(_) => {
-                            println!(
-                                "Successfully delivered queued message {} to {}",
-                                msg.id, counterparty_clone
-                            );
-                        }
-                        Err(e) => {
-                            println!(
-                                "Failed to deliver queued message {} to {}: {:?}",
-                                msg.id, counterparty_clone, e
-                            );
-                            // Re-add to queue if delivery fails
-                            let mut queue = delivery_queue.lock().unwrap();
-                            queue
-                                .entry(counterparty_clone.clone())
-                                .or_insert_with(Vec::new)
-                                .push(msg);
-                            break; // Stop trying to send more messages if one fails
-                        }
-                    }
-                }
-            });
-        }
+        // Signal the delivery worker (step 3) to flush anything pending to this node
+        self.enqueue_delivery_flush(&counterparty);
 
         // Share our profile with the counterparty
         let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
@@ -1679,17 +1573,27 @@ impl ChatState {
 
         // Look through all chats to find the message we sent
         for chat in self.chats.values_mut() {
-            // Only look for messages where WE are the sender
-            if let Some(message) = chat
-                .messages
-                .iter_mut()
-                .find(|m| m.id == message_id && m.sender == our().node)
-            {
-                println!("Updating sent message {} status to Delivered", message_id);
-                message.status =
-                    safe_update_message_status(&message.status, MessageStatus::Delivered);
+            let updated = {
+                if let Some(message) = chat
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == message_id && m.sender == our().node)
+                {
+                    println!("Updating sent message {} status to Delivered", message_id);
+                    message.status =
+                        safe_update_message_status(&message.status, MessageStatus::Delivered);
+                    true
+                } else {
+                    false
+                }
+            };
 
+            if updated {
+                let counterparty = chat.counterparty.clone();
                 let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+
+                self.enqueue_delivery_flush(&counterparty);
+
                 // Send ChatUpdate with the delivered status
                 for &channel_id in self.ws_connections.keys() {
                     println!(
@@ -1959,8 +1863,7 @@ impl ChatState {
                 .or_else(|| Some(Self::infer_counterparty_from_chat_id(chat_id, &our().node)))
                 .unwrap_or_else(|| chat_id.to_string());
 
-            let profile = profile_hint
-                .or_else(|| self.node_profiles.get(&counterparty).cloned());
+            let profile = profile_hint.or_else(|| self.node_profiles.get(&counterparty).cloned());
 
             self.chats.insert(
                 chat_id.to_string(),
@@ -2056,73 +1959,161 @@ impl ChatState {
         }
     }
 
-    async fn process_delivery_queue(&mut self) {
-        let queue_len = {
-            let queue = self.delivery_queue.lock().unwrap();
-            queue.len()
-        };
-        println!("Processing delivery queue with {} nodes", queue_len);
+    fn enqueue_delivery_message(&self, node: &str, message: ChatMessage) {
+        ChatState::enqueue_delivery_message_inner(
+            &self.delivery_tx,
+            &self.pending_deliveries,
+            node,
+            message,
+        );
+    }
 
-        // Process queued messages for each node
-        let nodes_to_process: Vec<String> = {
-            let queue = self.delivery_queue.lock().unwrap();
-            queue.keys().cloned().collect()
-        };
+    fn enqueue_delivery_flush(&self, node: &str) {
+        if let Err(err) = self
+            .delivery_tx
+            .unbounded_send(QueuedDelivery::flush(node.to_string()))
+        {
+            println!("Failed to enqueue delivery flush for {}: {:?}", node, err);
+        }
+    }
 
-        for node in nodes_to_process {
-            // Get the first message for this node
-            let msg_to_send = {
-                let queue = self.delivery_queue.lock().unwrap();
-                queue
-                    .get(&node)
-                    .and_then(|messages| messages.first().cloned())
-            };
+    fn enqueue_delivery_message_inner(
+        delivery_tx: &DeliveryTx,
+        pending_deliveries: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message: ChatMessage,
+    ) {
+        ChatState::record_pending_message(pending_deliveries, node, &message);
+        if let Err(err) =
+            delivery_tx.unbounded_send(QueuedDelivery::message(node.to_string(), message))
+        {
+            println!("Failed to enqueue delivery message for {}: {:?}", node, err);
+        }
+    }
 
-            if let Some(msg) = msg_to_send {
-                let target = Address::from((node.as_str(), OUR_PROCESS_ID));
+    fn record_pending_message(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message: &ChatMessage,
+    ) {
+        let mut guard = pending.lock().unwrap();
+        let entry = guard.entry(node.to_string()).or_default();
+        if let Some(existing) = entry.iter_mut().find(|m| m.id == message.id) {
+            *existing = message.clone();
+        } else {
+            entry.push(message.clone());
+        }
+    }
 
-                // Try to send using generated RPC method
-                let msg_json = serde_json::to_value(&msg).unwrap();
-                let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
+    fn remove_pending_message(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message_id: &str,
+    ) {
+        let mut guard = pending.lock().unwrap();
+        if let Some(entry) = guard.get_mut(node) {
+            entry.retain(|m| m.id != message_id);
+            if entry.is_empty() {
+                guard.remove(node);
+            }
+        }
+    }
 
-                match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
-                    Ok(_) => {
-                        println!(
-                            "Successfully delivered queued message {} to {}",
-                            msg.id, node
-                        );
-                        // Remove from queue if successful
+    fn pending_messages_for_node(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+    ) -> Vec<ChatMessage> {
+        let guard = pending.lock().unwrap();
+        guard.get(node).cloned().unwrap_or_default()
+    }
+
+    fn is_message_pending(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message_id: &str,
+    ) -> bool {
+        let guard = pending.lock().unwrap();
+        guard
+            .get(node)
+            .map(|messages| messages.iter().any(|m| m.id == message_id))
+            .unwrap_or(false)
+    }
+
+    async fn run_delivery_worker(
+        mut delivery_rx: UnboundedReceiver<QueuedDelivery>,
+        delivery_tx: DeliveryTx,
+        pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    ) {
+        while let Some(queued) = delivery_rx.next().await {
+            match queued.event {
+                DeliveryEvent::Message(message) => {
+                    ChatState::record_pending_message(&pending_deliveries, &queued.node, &message);
+                    ChatState::attempt_delivery(
+                        queued.node.clone(),
+                        message,
+                        delivery_tx.clone(),
+                        pending_deliveries.clone(),
+                    )
+                    .await;
+                }
+                DeliveryEvent::Flush => {
+                    let messages =
+                        ChatState::pending_messages_for_node(&pending_deliveries, &queued.node);
+                    for msg in messages {
+                        if let Err(err) = delivery_tx
+                            .unbounded_send(QueuedDelivery::message(queued.node.clone(), msg))
                         {
-                            let mut queue = self.delivery_queue.lock().unwrap();
-                            if let Some(node_queue) = queue.get_mut(&node) {
-                                node_queue.retain(|m| m.id != msg.id);
-                                if node_queue.is_empty() {
-                                    queue.remove(&node);
-                                }
-                            }
+                            println!(
+                                "Failed to enqueue message during flush for {}: {:?}",
+                                queued.node, err
+                            );
+                            break;
                         }
-
-                        // Update message status in our chat
-                        for chat in self.chats.values_mut() {
-                            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg.id)
-                            {
-                                message.status = safe_update_message_status(
-                                    &message.status,
-                                    MessageStatus::Sent,
-                                );
-
-                                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                                // Send ChatUpdate to WebSocket connections
-                                self.broadcast_ws_message(&chat_update);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Don't attempt more messages to this node if we get Offline or Timeout
-                        println!("Failed to deliver queued message to {}: {:?}", node, e);
                     }
                 }
+            }
+        }
+    }
+
+    async fn attempt_delivery(
+        node: String,
+        message: ChatMessage,
+        delivery_tx: DeliveryTx,
+        pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    ) {
+        let target = Address::from((node.as_str(), OUR_PROCESS_ID));
+
+        let msg_json = serde_json::to_value(&message).unwrap();
+        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
+
+        match receive_message_remote_rpc(&target, msg_for_rpc).await {
+            Ok(_) => {
+                ChatState::remove_pending_message(&pending_deliveries, &node, &message.id);
+            }
+            Err(err) => {
+                println!(
+                    "Failed to deliver message {} to {}: {:?}",
+                    message.id, node, err
+                );
+                let retry_tx = delivery_tx.clone();
+                let retry_pending = pending_deliveries.clone();
+                let retry_node = node.clone();
+                let retry_message = message.clone();
+                spawn(async move {
+                    let _ = sleep(30000).await;
+                    if ChatState::is_message_pending(&retry_pending, &retry_node, &retry_message.id)
+                    {
+                        if let Err(send_err) = retry_tx.unbounded_send(QueuedDelivery::message(
+                            retry_node.clone(),
+                            retry_message,
+                        )) {
+                            println!(
+                                "Failed to requeue message {} for {}: {:?}",
+                                message.id, retry_node, send_err
+                            );
+                        }
+                    }
+                });
             }
         }
     }
@@ -2165,6 +2156,7 @@ impl ChatState {
                     self.assign_sequence_to_message(&chat_id, &mut message);
                 }
                 let mut pending_pushes: Vec<(u32, WsServerMessage)> = Vec::new();
+                let mut queued_delivery: Option<(String, ChatMessage)> = None;
                 {
                     if let Some(chat) = self.chats.get_mut(&chat_id) {
                         chat.messages.push(message.clone());
@@ -2178,17 +2170,11 @@ impl ChatState {
                                 .iter()
                                 .find(|(_, node)| *node == &counterparty)
                             {
-                                pending_pushes.push((
-                                    ch_id,
-                                    WsServerMessage::NewMessage(message.clone()),
-                                ));
+                                pending_pushes
+                                    .push((ch_id, WsServerMessage::NewMessage(message.clone())));
                             }
                         } else {
-                            let mut queue = self.delivery_queue.lock().unwrap();
-                            queue
-                                .entry(counterparty)
-                                .or_insert_with(Vec::new)
-                                .push(message.clone());
+                            queued_delivery = Some((counterparty.clone(), message.clone()));
                         }
 
                         if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
@@ -2196,11 +2182,13 @@ impl ChatState {
                                 safe_update_message_status(&msg.status, MessageStatus::Sent);
                         }
 
-                        pending_pushes.push((
-                            channel_id,
-                            WsServerMessage::ChatUpdate(chat.clone()),
-                        ));
+                        pending_pushes
+                            .push((channel_id, WsServerMessage::ChatUpdate(chat.clone())));
                     }
+                }
+
+                if let Some((counterparty, queued_message)) = queued_delivery {
+                    self.enqueue_delivery_message(&counterparty, queued_message);
                 }
 
                 pending_pushes.push((channel_id, WsServerMessage::MessageAck { message_id }));
@@ -2430,30 +2418,5 @@ impl ChatState {
             name: profile.name,
             profile_pic: profile.profile_pic,
         }
-    }
-}
-
-mod arc_mutex_serde {
-    use super::*;
-
-    pub fn serialize<S, T>(val: &Arc<Mutex<T>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-        T: Serialize,
-    {
-        use serde::ser::Error;
-        match val.lock() {
-            Ok(guard) => guard.serialize(serializer),
-            Err(_) => Err(Error::custom("mutex poisoned")),
-        }
-    }
-
-    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Arc<Mutex<T>>, D::Error>
-    where
-        D: Deserializer<'de>,
-        T: Deserialize<'de>,
-    {
-        let data = T::deserialize(deserializer)?;
-        Ok(Arc::new(Mutex::new(data)))
     }
 }

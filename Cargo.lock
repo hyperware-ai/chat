@@ -945,6 +945,7 @@ dependencies = [
  "base64 0.21.7",
  "chat_caller_utils",
  "flate2",
+ "futures",
  "hyperprocess_macro",
  "hyperware_process_lib",
  "process_macros",

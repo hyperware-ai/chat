@@ -1,3 +1,4 @@
+use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -330,7 +331,7 @@ pub enum HomepageResponse {
     PushSubscription(Option<String>),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct ChatState {
     pub profile: UserProfile,
     pub chats: HashMap<String, Chat>,
@@ -338,8 +339,12 @@ pub struct ChatState {
     pub settings: Settings,
     #[serde(default)]
     pub message_sequence_counters: HashMap<String, u64>,
-    #[serde(with = "crate::arc_mutex_serde")]
-    pub delivery_queue: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    #[serde(skip)]
+    pub delivery_tx: DeliveryTx,
+    #[serde(skip)]
+    pub delivery_rx: Option<UnboundedReceiver<QueuedDelivery>>,
+    #[serde(skip)]
+    pub pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     pub online_nodes: HashSet<String>,
     pub ws_connections: HashMap<u32, String>,
     pub browser_connections: HashMap<String, u32>,
@@ -352,13 +357,18 @@ pub struct ChatState {
 
 impl Default for ChatState {
     fn default() -> Self {
+        let (delivery_tx, delivery_rx) = DeliveryTx::new();
+
         ChatState {
             profile: UserProfile::default(),
             chats: HashMap::new(),
             chat_keys: HashMap::new(),
             settings: Settings::default(),
             message_sequence_counters: HashMap::new(),
-            delivery_queue: default_delivery_queue(),
+            delivery_tx,
+            // represents "still available" versus "already consumed"
+            delivery_rx: Some(delivery_rx),
+            pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
             online_nodes: HashSet::new(),
             ws_connections: HashMap::new(),
             browser_connections: HashMap::new(),
@@ -369,6 +379,94 @@ impl Default for ChatState {
     }
 }
 
-pub fn default_delivery_queue() -> Arc<Mutex<HashMap<String, Vec<ChatMessage>>>> {
-    Arc::new(Mutex::new(HashMap::new()))
+#[derive(Clone, Debug)]
+pub enum DeliveryEvent {
+    Message(ChatMessage),
+    Flush,
+}
+
+#[derive(Clone, Debug)]
+pub struct QueuedDelivery {
+    pub node: String,
+    pub event: DeliveryEvent,
+}
+
+impl QueuedDelivery {
+    pub fn message(node: String, message: ChatMessage) -> Self {
+        Self {
+            node,
+            event: DeliveryEvent::Message(message),
+        }
+    }
+
+    pub fn flush(node: String) -> Self {
+        Self {
+            node,
+            event: DeliveryEvent::Flush,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DeliveryTx {
+    sender: UnboundedSender<QueuedDelivery>,
+}
+
+impl DeliveryTx {
+    pub fn new() -> (Self, UnboundedReceiver<QueuedDelivery>) {
+        let (sender, receiver) = mpsc::unbounded();
+        (DeliveryTx { sender }, receiver)
+    }
+
+    pub fn unbounded_send(
+        &self,
+        delivery: QueuedDelivery,
+    ) -> Result<(), mpsc::TrySendError<QueuedDelivery>> {
+        self.sender.unbounded_send(delivery)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ChatStateSerde {
+            profile: UserProfile,
+            chats: HashMap<String, Chat>,
+            chat_keys: HashMap<String, ChatKey>,
+            settings: Settings,
+            #[serde(default)]
+            message_sequence_counters: HashMap<String, u64>,
+            online_nodes: HashSet<String>,
+            ws_connections: HashMap<u32, String>,
+            browser_connections: HashMap<String, u32>,
+            last_heartbeat: HashMap<u32, u64>,
+            #[serde(default)]
+            active_connections: HashSet<u32>,
+            #[serde(default)]
+            node_profiles: HashMap<String, UserProfile>,
+        }
+
+        let data = ChatStateSerde::deserialize(deserializer)?;
+        let (delivery_tx, delivery_rx) = DeliveryTx::new();
+
+        Ok(ChatState {
+            profile: data.profile,
+            chats: data.chats,
+            chat_keys: data.chat_keys,
+            settings: data.settings,
+            message_sequence_counters: data.message_sequence_counters,
+            delivery_tx,
+            delivery_rx: Some(delivery_rx),
+            pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
+            online_nodes: data.online_nodes,
+            ws_connections: data.ws_connections,
+            browser_connections: data.browser_connections,
+            last_heartbeat: data.last_heartbeat,
+            active_connections: data.active_connections,
+            node_profiles: data.node_profiles,
+        })
+    }
 }
