@@ -604,17 +604,8 @@ impl ChatState {
         };
 
         // Send ChatUpdate immediately to show Sent status
-        for &channel_id in self.ws_connections.keys() {
-            let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-            send_ws_push(
-                channel_id,
-                WsMessageType::Text,
-                LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                },
-            );
-        }
+        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
+        self.broadcast_ws_message(&chat_update);
 
         // Send to counterparty via P2P using generated RPC
         let msg_to_send = message.clone();
@@ -674,21 +665,12 @@ impl ChatState {
                 // Modify message content
                 message.content = req.new_content.clone();
 
+                let counterparty = chat.counterparty.clone();
+                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                 // Notify WebSocket connections about the updated chat
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
-                }
+                self.broadcast_ws_message(&chat_update);
 
                 // Propagate edits for our own messages to the counterparty
-                let counterparty = chat.counterparty.clone();
                 spawn(async move {
                     let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
                     match receive_message_edit_remote_rpc(
@@ -731,18 +713,8 @@ impl ChatState {
                 // Remove the message
                 chat.messages.remove(pos);
 
-                // Notify all WebSocket connections about the updated chat
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
-                }
+                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                self.broadcast_ws_message(&chat_update);
 
                 // Only send deletion notification to counterparty if deleting for both
                 if delete_for_both {
@@ -806,18 +778,9 @@ impl ChatState {
                         }
                     });
 
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                     // Notify WebSocket connections
-                    for &channel_id in self.ws_connections.keys() {
-                        let msg = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                            },
-                        );
-                    }
+                    self.broadcast_ws_message(&chat_update);
 
                     return Ok("Reaction added".to_string());
                 } else {
@@ -891,19 +854,8 @@ impl ChatState {
                         }
 
                         // Send ChatUpdate with the updated message status
-                        for &channel_id in self.ws_connections.keys() {
-                            let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-                            send_ws_push(
-                                channel_id,
-                                WsMessageType::Text,
-                                LazyLoadBlob {
-                                    mime: Some("application/json".to_string()),
-                                    bytes: serde_json::to_string(&chat_update)
-                                        .unwrap()
-                                        .into_bytes(),
-                                },
-                            );
-                        }
+                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
+                        self.broadcast_ws_message(&chat_update);
                     }
                 }
                 Err(_) => {
@@ -946,18 +898,9 @@ impl ChatState {
                 {
                     message.reactions.remove(pos);
 
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                     // Notify WebSocket connections
-                    for &channel_id in self.ws_connections.keys() {
-                        let msg = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                            },
-                        );
-                    }
+                    self.broadcast_ws_message(&chat_update);
 
                     return Ok("Reaction removed".to_string());
                 }
@@ -1076,20 +1019,11 @@ impl ChatState {
         self.profile.profile_pic = Some(data_url.clone());
 
         // Notify all WebSocket connections about profile update
-        for &channel_id in self.ws_connections.keys() {
-            let msg = WsServerMessage::ProfileUpdate {
-                node: our().node.clone(),
-                profile: self.profile.clone(),
-            };
-            send_ws_push(
-                channel_id,
-                WsMessageType::Text,
-                LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                },
-            );
-        }
+        let profile_update = WsServerMessage::ProfileUpdate {
+            node: our().node.clone(),
+            profile: self.profile.clone(),
+        };
+        self.broadcast_ws_message(&profile_update);
 
         // Notify all chat counterparties about the profile update
         let our_node = our().node.clone();
@@ -1250,17 +1184,8 @@ impl ChatState {
                     }
 
                     // Send ChatUpdate with the updated message status
-                    for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                            },
-                        );
-                    }
+                    let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
+                    self.broadcast_ws_message(&chat_update);
                 }
             }
             Err(_) => {
@@ -1273,17 +1198,8 @@ impl ChatState {
                 }
 
                 // Still broadcast NewMessage for failed sends
-                for &channel_id in self.ws_connections.keys() {
-                    let msg = WsServerMessage::NewMessage(message.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                        },
-                    );
-                }
+                let msg = WsServerMessage::NewMessage(message.clone());
+                self.broadcast_ws_message(&msg);
             }
         }
 
@@ -1348,17 +1264,8 @@ impl ChatState {
                     }
 
                     // Send ChatUpdate with the updated message status
-                    for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                            },
-                        );
-                    }
+                    let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
+                    self.broadcast_ws_message(&chat_update);
                 }
             }
             Err(_) => {
@@ -1371,17 +1278,8 @@ impl ChatState {
                 }
 
                 // Still broadcast NewMessage for failed sends
-                for &channel_id in self.ws_connections.keys() {
-                    let msg = WsServerMessage::NewMessage(message.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                        },
-                    );
-                }
+                let msg = WsServerMessage::NewMessage(message.clone());
+                self.broadcast_ws_message(&msg);
             }
         }
 
@@ -1426,21 +1324,8 @@ impl ChatState {
                 "receive_chat_creation: WebSocket connections: {}",
                 self.ws_connections.len()
             );
-            for &channel_id in self.ws_connections.keys() {
-                println!(
-                    "receive_chat_creation: Sending ChatUpdate to channel {}",
-                    channel_id
-                );
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                send_ws_push(
-                    channel_id,
-                    WsMessageType::Text,
-                    LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                    },
-                );
-            }
+            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+            self.broadcast_ws_message(&chat_update);
         } else {
             println!("receive_chat_creation: Chat {} already exists", chat_id);
         }
@@ -1664,33 +1549,15 @@ impl ChatState {
                 .expect("new messages should be stored before broadcasting");
             let chat_snapshot = self.chats.get(&chat_id).cloned();
             // Send to WebSocket connections if any
-            for &channel_id in self.ws_connections.keys() {
-                // If this is a new chat, send ChatUpdate first
-                if is_new_chat {
-                    if let Some(chat_update) = chat_snapshot.clone() {
-                        let msg = WsServerMessage::ChatUpdate(chat_update);
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                            },
-                        );
-                    }
+            if is_new_chat {
+                if let Some(chat_update) = chat_snapshot.clone() {
+                    let msg = WsServerMessage::ChatUpdate(chat_update);
+                    self.broadcast_ws_message(&msg);
                 }
-
-                // Then send the new message
-                let msg = WsServerMessage::NewMessage(message_for_events.clone());
-                send_ws_push(
-                    channel_id,
-                    WsMessageType::Text,
-                    LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                    },
-                );
             }
+
+            let msg = WsServerMessage::NewMessage(message_for_events.clone());
+            self.broadcast_ws_message(&msg);
 
             // Send push notification if user has notifications enabled AND no active connections
             if self
@@ -1760,19 +1627,9 @@ impl ChatState {
                 {
                     message.reactions.push(reaction);
 
-                    let chat_snapshot = chat.clone();
+                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                     // Send ChatUpdate to WebSocket connections
-                    for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                            },
-                        );
-                    }
+                    self.broadcast_ws_message(&chat_update);
                     return Ok(());
                 }
             }
@@ -1795,18 +1652,9 @@ impl ChatState {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
                 message.content = new_content;
 
+                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                 // Broadcast updated chat state so clients refresh the edited message
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
-                }
+                self.broadcast_ws_message(&chat_update);
 
                 updated = true;
             }
@@ -1841,21 +1689,14 @@ impl ChatState {
                 message.status =
                     safe_update_message_status(&message.status, MessageStatus::Delivered);
 
+                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                 // Send ChatUpdate with the delivered status
                 for &channel_id in self.ws_connections.keys() {
                     println!(
                         "Sending ChatUpdate for delivered message to channel {}",
                         channel_id
                     );
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
+                    self.push_ws_message(channel_id, &chat_update);
                 }
                 return Ok(());
             }
@@ -1882,18 +1723,9 @@ impl ChatState {
                 chat.messages.remove(pos);
                 println!("Deleted message {} from chat {}", message_id, chat_id);
 
+                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                 // Notify all WebSocket connections about the updated chat
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
-                }
+                self.broadcast_ws_message(&chat_update);
             }
         }
 
@@ -1912,23 +1744,15 @@ impl ChatState {
         self.node_profiles.insert(node.clone(), profile.clone());
 
         // Update all chats with this counterparty
+        let mut updates = Vec::new();
         for chat in self.chats.values_mut() {
             if chat.counterparty == node {
                 chat.counterparty_profile = Some(profile.clone());
-
-                // Notify all WebSocket connections about the updated chat
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
-                }
+                updates.push(WsServerMessage::ChatUpdate(chat.clone()));
             }
+        }
+        for update in updates {
+            self.broadcast_ws_message(&update);
         }
 
         Ok(())
@@ -2012,7 +1836,7 @@ impl ChatState {
                         node: node.clone(),
                         status: "offline".to_string(),
                     };
-                    self.broadcast_to_all(serde_json::to_string(&status_msg).unwrap());
+                    self.broadcast_ws_message(&status_msg);
                 }
 
                 // Clean up browser connections
@@ -2303,20 +2127,9 @@ impl ChatState {
                                     MessageStatus::Sent,
                                 );
 
+                                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
                                 // Send ChatUpdate to WebSocket connections
-                                for &channel_id in self.ws_connections.keys() {
-                                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                                    send_ws_push(
-                                        channel_id,
-                                        WsMessageType::Text,
-                                        LazyLoadBlob {
-                                            mime: Some("application/json".to_string()),
-                                            bytes: serde_json::to_string(&chat_update)
-                                                .unwrap()
-                                                .into_bytes(),
-                                        },
-                                    );
-                                }
+                                self.broadcast_ws_message(&chat_update);
                                 break;
                             }
                         }
@@ -2456,7 +2269,7 @@ impl ChatState {
                         node: node.clone(),
                         status,
                     };
-                    self.broadcast_to_all(serde_json::to_string(&msg).unwrap());
+                    self.broadcast_ws_message(&msg);
                 }
             }
             WsClientMessage::Heartbeat => {
@@ -2613,16 +2426,23 @@ impl ChatState {
         }
     }
 
-    fn broadcast_to_all(&self, message: String) {
-        for &channel_id in self.ws_connections.keys() {
-            send_ws_push(
+    fn push_ws_message(&self, channel_id: u32, message: &WsServerMessage) {
+        match serde_json::to_vec(message) {
+            Ok(bytes) => send_ws_push(
                 channel_id,
                 WsMessageType::Text,
                 LazyLoadBlob {
                     mime: Some("application/json".to_string()),
-                    bytes: message.clone().into_bytes(),
+                    bytes,
                 },
-            );
+            ),
+            Err(err) => println!("Failed to serialize WS message: {:?}", err),
+        }
+    }
+
+    fn broadcast_ws_message(&self, message: &WsServerMessage) {
+        for &channel_id in self.ws_connections.keys() {
+            self.push_ws_message(channel_id, message);
         }
     }
 }
