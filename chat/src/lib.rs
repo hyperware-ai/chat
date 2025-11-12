@@ -1877,16 +1877,7 @@ impl ChatState {
                                         chat.messages.len()
                                     );
                                     let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                                    send_ws_push(
-                                        channel_id,
-                                        WsMessageType::Text,
-                                        LazyLoadBlob {
-                                            mime: Some("application/json".to_string()),
-                                            bytes: serde_json::to_string(&chat_update)
-                                                .unwrap()
-                                                .into_bytes(),
-                                        },
-                                    );
+                                    self.push_ws_message(channel_id, &chat_update);
                                 }
                                 println!(
                                     "WebSocket: Initial chat sync complete for channel {}",
@@ -1913,14 +1904,7 @@ impl ChatState {
                             let error = WsServerMessage::Error {
                                 message: format!("Invalid message format: {}", e),
                             };
-                            send_ws_push(
-                                channel_id,
-                                WsMessageType::Text,
-                                LazyLoadBlob {
-                                    mime: Some("application/json".to_string()),
-                                    bytes: serde_json::to_string(&error).unwrap().into_bytes(),
-                                },
-                            );
+                            self.push_ws_message(channel_id, &error);
                         }
                     }
                 }
@@ -2180,66 +2164,50 @@ impl ChatState {
                 if self.chats.contains_key(&chat_id) {
                     self.assign_sequence_to_message(&chat_id, &mut message);
                 }
-                if let Some(chat) = self.chats.get_mut(&chat_id) {
-                    chat.messages.push(message.clone());
-                    chat.last_activity = timestamp;
+                let mut pending_pushes: Vec<(u32, WsServerMessage)> = Vec::new();
+                {
+                    if let Some(chat) = self.chats.get_mut(&chat_id) {
+                        chat.messages.push(message.clone());
+                        chat.last_activity = timestamp;
 
-                    // Send to counterparty if online
-                    let counterparty = chat.counterparty.clone();
-                    if self.online_nodes.contains(&counterparty) {
-                        // Find counterparty's channel
-                        for (&ch_id, node) in &self.ws_connections {
-                            if node == &counterparty {
-                                let msg = WsServerMessage::NewMessage(message.clone());
-                                send_ws_push(
+                        let counterparty = chat.counterparty.clone();
+
+                        if self.online_nodes.contains(&counterparty) {
+                            if let Some((&ch_id, _)) = self
+                                .ws_connections
+                                .iter()
+                                .find(|(_, node)| *node == &counterparty)
+                            {
+                                pending_pushes.push((
                                     ch_id,
-                                    WsMessageType::Text,
-                                    LazyLoadBlob {
-                                        mime: Some("application/json".to_string()),
-                                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                                    },
-                                );
-                                break;
+                                    WsServerMessage::NewMessage(message.clone()),
+                                ));
                             }
-                        }
-                    } else {
-                        // Queue for delivery
-                        {
+                        } else {
                             let mut queue = self.delivery_queue.lock().unwrap();
                             queue
                                 .entry(counterparty)
                                 .or_insert_with(Vec::new)
                                 .push(message.clone());
                         }
-                    }
 
-                    // Update status to Sent now that BE has received and processed it
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-                    }
+                        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                            msg.status =
+                                safe_update_message_status(&msg.status, MessageStatus::Sent);
+                        }
 
-                    // Send ChatUpdate with the updated status
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        },
-                    );
+                        pending_pushes.push((
+                            channel_id,
+                            WsServerMessage::ChatUpdate(chat.clone()),
+                        ));
+                    }
                 }
 
-                // Send acknowledgment
-                let ack = WsServerMessage::MessageAck { message_id };
-                send_ws_push(
-                    channel_id,
-                    WsMessageType::Text,
-                    LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&ack).unwrap().into_bytes(),
-                    },
-                );
+                pending_pushes.push((channel_id, WsServerMessage::MessageAck { message_id }));
+
+                for (ch_id, payload) in pending_pushes {
+                    self.push_ws_message(ch_id, &payload);
+                }
             }
             WsClientMessage::Ack { message_id } => {
                 // Update message status
@@ -2274,14 +2242,7 @@ impl ChatState {
             }
             WsClientMessage::Heartbeat => {
                 let msg = WsServerMessage::Heartbeat;
-                send_ws_push(
-                    channel_id,
-                    WsMessageType::Text,
-                    LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                    },
-                );
+                self.push_ws_message(channel_id, &msg);
             }
             _ => {
                 // Other message types not handled in node-to-node
@@ -2309,39 +2270,18 @@ impl ChatState {
                             chat_id: key_data.chat_id.clone(),
                             history,
                         };
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                            },
-                        );
+                        self.push_ws_message(channel_id, &msg);
                     } else {
                         let msg = WsServerMessage::AuthFailed {
                             reason: "Chat key has been revoked".to_string(),
                         };
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                            },
-                        );
+                        self.push_ws_message(channel_id, &msg);
                     }
                 } else {
                     let msg = WsServerMessage::AuthFailed {
                         reason: "Invalid chat key".to_string(),
                     };
-                    send_ws_push(
-                        channel_id,
-                        WsMessageType::Text,
-                        LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                        },
-                    );
+                    self.push_ws_message(channel_id, &msg);
                 }
             }
             WsClientMessage::BrowserMessage { content } => {
@@ -2400,27 +2340,13 @@ impl ChatState {
 
                         // Send message to all participants
                         let msg = WsServerMessage::NewMessage(message);
-                        send_ws_push(
-                            channel_id,
-                            WsMessageType::Text,
-                            LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                            },
-                        );
+                        self.push_ws_message(channel_id, &msg);
                     }
                 }
             }
             WsClientMessage::Heartbeat => {
                 let msg = WsServerMessage::Heartbeat;
-                send_ws_push(
-                    channel_id,
-                    WsMessageType::Text,
-                    LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                    },
-                );
+                self.push_ws_message(channel_id, &msg);
             }
             _ => {}
         }
