@@ -2660,20 +2660,6 @@ impl ChatState {
     }
 }
 
-// Add rand for generating IDs
-mod rand {
-    pub fn random<T>() -> T
-    where
-        T: From<u32>,
-    {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u32;
-        T::from(timestamp)
-    }
-}
-
 // Simple base64 decoder
 mod base64 {
     pub fn decode(input: &str) -> Result<Vec<u8>, String> {
