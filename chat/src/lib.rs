@@ -2361,47 +2361,6 @@ impl ChatState {
     }
 }
 
-// Simple base64 decoder
-mod base64 {
-    pub fn decode(input: &str) -> Result<Vec<u8>, String> {
-        // Remove any whitespace
-        let input = input
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>();
-
-        // Base64 character set
-        const BASE64_CHARS: &str =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-        let mut output = Vec::new();
-        let mut buffer = 0u32;
-        let mut bits_collected = 0;
-
-        for c in input.chars() {
-            if c == '=' {
-                break; // Padding character, we're done
-            }
-
-            let value = BASE64_CHARS
-                .find(c)
-                .ok_or_else(|| format!("Invalid base64 character: {}", c))?
-                as u32;
-
-            buffer = (buffer << 6) | value;
-            bits_collected += 6;
-
-            while bits_collected >= 8 {
-                bits_collected -= 8;
-                output.push((buffer >> bits_collected) as u8);
-                buffer &= (1 << bits_collected) - 1;
-            }
-        }
-
-        Ok(output)
-    }
-}
-
 // Helper functions for converting between UserProfile types
 impl ChatState {
     // Helper function to convert our UserProfile to chat_caller_utils::UserProfile
