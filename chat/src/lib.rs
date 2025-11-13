@@ -292,6 +292,8 @@ impl ChatState {
             });
         }
 
+        self.bootstrap_pending_deliveries();
+
         println!(
             "Chat app initialized on node: {} with {} chats",
             our().node,
@@ -1974,6 +1976,19 @@ impl ChatState {
             .unbounded_send(QueuedDelivery::flush(node.to_string()))
         {
             println!("Failed to enqueue delivery flush for {}: {:?}", node, err);
+        }
+    }
+
+    fn bootstrap_pending_deliveries(&self) {
+        for chat in self.chats.values() {
+            let counterparty = chat.counterparty.clone();
+            for message in chat.messages.iter() {
+                if message.sender == our().node
+                    && matches!(message.status, MessageStatus::Sent | MessageStatus::Sending)
+                {
+                    self.enqueue_delivery_message(&counterparty, message.clone());
+                }
+            }
         }
     }
 
