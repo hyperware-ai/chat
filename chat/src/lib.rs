@@ -7,6 +7,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures::{channel::mpsc::UnboundedReceiver, StreamExt};
 use hyperprocess_macro::*;
+use hyperware_crdt::yrs::{Decode, Encode, StateVector};
 use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
@@ -18,6 +19,9 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) const CRDT_DUMP_ENABLED: bool = true;
 
 // Import generated RPC functions from caller-utils
 use chat_caller_utils::chat::{
@@ -28,8 +32,10 @@ use chat_caller_utils::chat::{
 use chat_caller_utils::ChatMessage as CUChatMessage;
 use chat_caller_utils::UserProfile as CUUserProfile;
 
+mod crdt;
 mod types;
 
+pub use crdt::ChatDocState;
 pub use types::*;
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
@@ -103,6 +109,58 @@ fn base64_encode(data: &[u8]) -> String {
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
     ::base64::decode(input)
+}
+
+pub(crate) fn log_crdt_event(
+    doc_id: &str,
+    context: &str,
+    state_vector: &StateVector,
+    update_len: Option<usize>,
+) {
+    let sv_len = state_vector.len();
+    match update_len {
+        Some(len) => println!(
+            "[CRDT][{}] context={} state_vector_len={} update_bytes={}",
+            doc_id, context, sv_len, len
+        ),
+        None => println!(
+            "[CRDT][{}] context={} state_vector_len={}",
+            doc_id, context, sv_len
+        ),
+    }
+}
+
+pub(crate) fn dump_crdt_snapshot(snapshot: &ChatDocState, context: &str) {
+    if !CRDT_DUMP_ENABLED {
+        return;
+    }
+    let package_id = our().package_id();
+    let dir_path = format!("/{}/crdt-dumps", package_id);
+    if let Err(err) = vfs::open_dir(&dir_path, true, Some(5)) {
+        println!("[CRDT] failed to open dump dir {}: {:?}", dir_path, err);
+        return;
+    }
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let sanitized = context.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+    let file_path = format!("{}/{}-{}.json", dir_path, sanitized, ts);
+    match vfs::create_file(&file_path, Some(5)) {
+        Ok(file) => {
+            if let Err(err) = file.write(
+                serde_json::to_string_pretty(snapshot)
+                    .unwrap_or_else(|_| "{}".to_string())
+                    .as_bytes(),
+            ) {
+                println!("[CRDT] failed to write dump {}: {:?}", file_path, err);
+            } else {
+                println!("[CRDT] wrote snapshot dump to {}", file_path);
+            }
+        }
+        Err(err) => println!("[CRDT] failed to create dump file {}: {:?}", file_path, err),
+    }
 }
 
 // Helper function to send push notification for a message
@@ -279,6 +337,10 @@ impl ChatState {
                 .insert("system:welcome".to_string(), welcome_chat);
         }
 
+        if let Err(err) = self.rebuild_crdt_manager() {
+            println!("Failed to initialise CRDT document: {:?}", err);
+        }
+
         let existing_chat_ids: Vec<String> = self.chats.keys().cloned().collect();
         for chat_id in existing_chat_ids {
             self.ensure_sequence_state(&chat_id);
@@ -299,6 +361,8 @@ impl ChatState {
             our().node,
             self.chats.len()
         );
+
+        self.commit_to_crdt_or_log("initialize");
     }
 
     // CHAT MANAGEMENT ENDPOINTS
@@ -328,6 +392,7 @@ impl ChatState {
         };
 
         self.chats.insert(chat_id, chat.clone());
+        self.commit_to_crdt_or_log("create_chat");
 
         // Notify the counterparty about the chat creation and our profile asynchronously
         let target = Address::from((req.counterparty.as_str(), OUR_PROCESS_ID));
@@ -376,7 +441,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
@@ -511,20 +576,21 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[http]
     async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
         self.chats
             .remove(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
         self.message_sequence_counters.remove(&req.chat_id);
+        self.commit_to_crdt_or_log("delete_chat");
         Ok("Chat deleted".to_string())
     }
 
     // MESSAGE OPERATIONS
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[local]
     #[http]
     async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
@@ -604,58 +670,68 @@ impl ChatState {
             }
         });
 
-        // Return the message with updated status
-        if let Some(chat) = self.chats.get(&req.chat_id) {
-            if let Some(updated_msg) = chat.messages.iter().find(|m| m.id == message.id) {
-                return Ok(updated_msg.clone());
-            }
+        let updated_msg = self
+            .chats
+            .get(&req.chat_id)
+            .and_then(|chat| chat.messages.iter().find(|m| m.id == message.id).cloned());
+
+        self.commit_to_crdt_or_log("send_message");
+
+        if let Some(updated_msg) = updated_msg {
+            return Ok(updated_msg);
         }
 
         Ok(message)
     }
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[http]
     async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
-        // Find message in the specified chat
+        let mut broadcast_update: Option<WsServerMessage> = None;
+        let mut remote_edit: Option<(String, String, String, String)> = None;
+
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
                 if message.sender != our().node {
                     return Ok("Ignoring edit for remote message".to_string());
                 }
-                // Modify message content
                 message.content = req.new_content.clone();
-
-                let counterparty = chat.counterparty.clone();
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                // Notify WebSocket connections about the updated chat
-                self.broadcast_ws_message(&chat_update);
-
-                // Propagate edits for our own messages to the counterparty
-                spawn(async move {
-                    let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-                    match receive_message_edit_remote_rpc(
-                        &target,
-                        req.chat_id.clone(),
-                        req.message_id.clone(),
-                        req.new_content.clone(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => println!(
-                            "Counterparty {} rejected message edit: {}",
-                            counterparty, err
-                        ),
-                        Err(err) => {
-                            println!("Failed to send message edit to {}: {:?}", counterparty, err)
-                        }
-                    }
-                });
-
-                return Ok("Message edited".to_string());
+                broadcast_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                remote_edit = Some((
+                    chat.counterparty.clone(),
+                    req.chat_id.clone(),
+                    req.message_id.clone(),
+                    req.new_content.clone(),
+                ));
             }
+        }
+
+        if let Some(update) = &broadcast_update {
+            self.broadcast_ws_message(update);
+        }
+
+        if let Some((counterparty, chat_id, message_id, new_content)) = remote_edit {
+            spawn(async move {
+                let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+                match receive_message_edit_remote_rpc(&target, chat_id, message_id, new_content)
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => println!(
+                        "Counterparty {} rejected message edit: {}",
+                        counterparty, err
+                    ),
+                    Err(err) => {
+                        println!("Failed to send message edit to {}: {:?}", counterparty, err)
+                    }
+                }
+            });
+        }
+
+        if broadcast_update.is_some() {
+            self.commit_to_crdt_or_log("edit_message");
+            return Ok("Message edited".to_string());
         }
 
         Err("Message not found".to_string())
@@ -663,32 +739,37 @@ impl ChatState {
 
     #[http]
     async fn delete_message(&mut self, req: DeleteMessageReq) -> Result<String, String> {
-        // Find and remove message from the specified chat
+        let mut chat_update: Option<WsServerMessage> = None;
+        let mut deletion_notice: Option<(String, String, String, bool)> = None;
+
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == req.message_id) {
-                // Store counterparty before removing message
                 let counterparty = chat.counterparty.clone();
                 let message_id = req.message_id.clone();
                 let chat_id = req.chat_id.clone();
                 let delete_for_both = req.delete_for_both.unwrap_or(false);
 
-                // Remove the message
                 chat.messages.remove(pos);
 
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                self.broadcast_ws_message(&chat_update);
-
-                // Only send deletion notification to counterparty if deleting for both
-                if delete_for_both {
-                    let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-                    spawn(async move {
-                        let _ =
-                            receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
-                    });
-                }
-
-                return Ok("Message deleted".to_string());
+                chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                deletion_notice = Some((counterparty, message_id, chat_id, delete_for_both));
             }
+        }
+
+        if let Some(update) = &chat_update {
+            self.broadcast_ws_message(update);
+        }
+
+        if let Some((counterparty, message_id, chat_id, delete_for_both)) = deletion_notice {
+            if delete_for_both {
+                let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+                spawn(async move {
+                    let _ = receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
+                });
+            }
+
+            self.commit_to_crdt_or_log("delete_message");
+            return Ok("Message deleted".to_string());
         }
 
         Err("Message not found".to_string())
@@ -707,6 +788,8 @@ impl ChatState {
             timestamp,
         };
 
+        let mut addition: Option<(WsServerMessage, String, String, String)> = None;
+
         // Find and add reaction to message in the specified chat
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
@@ -718,37 +801,36 @@ impl ChatState {
                 {
                     message.reactions.push(reaction.clone());
 
-                    // Send reaction to counterparty
-                    // If it's their message, they need to see our reaction
-                    // If it's our message, they still need to see we reacted to our own message
                     let target_node = if message.sender != our().node {
                         message.sender.clone()
                     } else {
-                        // It's our message, send to the counterparty of the chat
                         chat.counterparty.clone()
                     };
 
-                    let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
-                    let msg_id = req.message_id.clone();
-                    let emoji = req.emoji.clone();
-                    let user = our().node.clone();
-
-                    spawn(async move {
-                        match receive_reaction_remote_rpc(&target, msg_id, emoji, user).await {
-                            Ok(_) => println!("Successfully sent reaction to counterparty"),
-                            Err(e) => println!("Failed to send reaction to counterparty: {:?}", e),
-                        }
-                    });
-
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    // Notify WebSocket connections
-                    self.broadcast_ws_message(&chat_update);
-
-                    return Ok("Reaction added".to_string());
+                    addition = Some((
+                        WsServerMessage::ChatUpdate(chat.clone()),
+                        target_node,
+                        req.message_id.clone(),
+                        req.emoji.clone(),
+                    ));
                 } else {
                     return Ok("Already reacted".to_string());
                 }
             }
+        }
+
+        if let Some((chat_update, target_node, msg_id, emoji)) = addition {
+            self.broadcast_ws_message(&chat_update);
+            let user = our().node.clone();
+            spawn(async move {
+                let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
+                match receive_reaction_remote_rpc(&target, msg_id, emoji, user).await {
+                    Ok(_) => println!("Successfully sent reaction to counterparty"),
+                    Err(e) => println!("Failed to send reaction to counterparty: {:?}", e),
+                }
+            });
+            self.commit_to_crdt_or_log("add_reaction");
+            return Ok("Reaction added".to_string());
         }
 
         Err("Message not found".to_string())
@@ -836,12 +918,14 @@ impl ChatState {
             }
         }
 
+        self.commit_to_crdt_or_log("forward_message");
         Ok(forwarded_message)
     }
 
     #[http]
     async fn remove_reaction(&mut self, req: RemoveReactionReq) -> Result<String, String> {
         let user = our().node.clone();
+        let mut removal_update: Option<WsServerMessage> = None;
 
         // Find and remove reaction from message
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
@@ -852,14 +936,15 @@ impl ChatState {
                     .position(|r| r.user == user && r.emoji == req.emoji)
                 {
                     message.reactions.remove(pos);
-
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    // Notify WebSocket connections
-                    self.broadcast_ws_message(&chat_update);
-
-                    return Ok("Reaction removed".to_string());
+                    removal_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
                 }
             }
+        }
+
+        if let Some(chat_update) = removal_update {
+            self.broadcast_ws_message(&chat_update);
+            self.commit_to_crdt_or_log("remove_reaction");
+            return Ok("Reaction removed".to_string());
         }
 
         Err("Reaction not found".to_string())
@@ -884,6 +969,7 @@ impl ChatState {
         };
 
         self.chat_keys.insert(key.clone(), chat_key);
+        self.commit_to_crdt_or_log("create_chat_link");
 
         let link = format!("http://{}/public/join-{}", our().node, key);
         Ok(link)
@@ -901,13 +987,14 @@ impl ChatState {
 
     #[http]
     async fn revoke_chat_key(&mut self, req: RevokeChatKeyReq) -> Result<String, String> {
-        self.chat_keys
-            .get_mut(&req.key)
-            .ok_or_else(|| "Chat key not found".to_string())
-            .map(|key| {
-                key.is_revoked = true;
-                "Chat key revoked".to_string()
-            })
+        if let Some(key) = self.chat_keys.get_mut(&req.key) {
+            key.is_revoked = true;
+        } else {
+            return Err("Chat key not found".to_string());
+        }
+
+        self.commit_to_crdt_or_log("revoke_chat_key");
+        Ok("Chat key revoked".to_string())
     }
 
     // SETTINGS
@@ -920,6 +1007,7 @@ impl ChatState {
     #[http]
     async fn update_settings(&mut self, settings: Settings) -> Result<String, String> {
         self.settings = settings;
+        self.commit_to_crdt_or_log("update_settings");
         Ok("Settings updated".to_string())
     }
 
@@ -955,6 +1043,8 @@ impl ChatState {
                 }
             });
         }
+
+        self.commit_to_crdt_or_log("update_profile");
 
         Ok("Profile updated".to_string())
     }
@@ -1006,6 +1096,8 @@ impl ChatState {
                 }
             });
         }
+
+        self.commit_to_crdt_or_log("upload_profile_picture");
 
         Ok(data_url)
     }
@@ -1151,6 +1243,7 @@ impl ChatState {
             }
         }
 
+        self.commit_to_crdt_or_log("upload_file");
         Ok(message)
     }
     #[http]
@@ -1224,6 +1317,7 @@ impl ChatState {
             }
         }
 
+        self.commit_to_crdt_or_log("send_voice_note");
         Ok(message)
     }
 
@@ -1242,6 +1336,7 @@ impl ChatState {
 
         // Check if chat already exists
         let chat_exists = self.chats.contains_key(&chat_id);
+        let mut created_chat = false;
         if !chat_exists {
             // Get counterparty profile if we have it
             let counterparty_profile = self.node_profiles.get(&counterparty).cloned();
@@ -1259,6 +1354,7 @@ impl ChatState {
 
             self.chats.insert(chat_id.clone(), chat.clone());
             println!("receive_chat_creation: Created chat {}", chat_id);
+            created_chat = true;
 
             // Notify WebSocket connections about the new chat
             println!(
@@ -1269,6 +1365,10 @@ impl ChatState {
             self.broadcast_ws_message(&chat_update);
         } else {
             println!("receive_chat_creation: Chat {} already exists", chat_id);
+        }
+
+        if created_chat {
+            self.commit_to_crdt_or_log("receive_chat_creation");
         }
 
         // Signal the delivery worker (step 3) to flush anything pending to this node
@@ -1299,6 +1399,7 @@ impl ChatState {
         // Find or create chat for this message - normalize the ID
         let chat_id = Self::normalize_chat_id(&message.sender, &our().node);
         let is_new_chat = !self.chats.contains_key(&chat_id);
+        let mut state_changed = false;
 
         self.chats.entry(chat_id.clone()).or_insert_with(|| Chat {
             id: chat_id.clone(),
@@ -1310,6 +1411,9 @@ impl ChatState {
             notify: true,
             counterparty_profile: self.node_profiles.get(&message.sender).cloned(),
         });
+        if is_new_chat {
+            state_changed = true;
+        }
 
         // Update message status to Delivered
         let mut updated_message = message.clone();
@@ -1423,10 +1527,15 @@ impl ChatState {
                 existing.sender = updated_message.sender.clone();
                 existing.status =
                     safe_update_message_status(&existing.status, updated_message.status.clone());
+                state_changed = true;
             } else {
                 should_insert = true;
             }
+            let prev_last_activity = chat.last_activity;
             chat.last_activity = chat.last_activity.max(updated_message.timestamp);
+            if chat.last_activity != prev_last_activity {
+                state_changed = true;
+            }
         }
 
         if should_insert {
@@ -1435,6 +1544,7 @@ impl ChatState {
             if let Some(chat) = self.chats.get_mut(&chat_id) {
                 chat.messages.push(message_to_store.clone());
                 chat.unread_count += 1;
+                state_changed = true;
             }
             stored_message = Some(message_to_store);
         }
@@ -1477,6 +1587,10 @@ impl ChatState {
             }
         }
 
+        if state_changed {
+            self.commit_to_crdt_or_log("receive_message");
+        }
+
         // Send acknowledgment back to sender using generated RPC
         let sender = message.sender.clone();
         let msg_id = message.id.clone();
@@ -1512,23 +1626,26 @@ impl ChatState {
             timestamp,
         };
 
+        let mut update: Option<WsServerMessage> = None;
+
         // Find the message and add the reaction
         for chat in self.chats.values_mut() {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                // Check if user already reacted with this emoji
                 if !message
                     .reactions
                     .iter()
                     .any(|r| r.user == reaction.user && r.emoji == reaction.emoji)
                 {
-                    message.reactions.push(reaction);
-
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    // Send ChatUpdate to WebSocket connections
-                    self.broadcast_ws_message(&chat_update);
-                    return Ok(());
+                    message.reactions.push(reaction.clone());
+                    update = Some(WsServerMessage::ChatUpdate(chat.clone()));
                 }
+                break;
             }
+        }
+
+        if let Some(chat_update) = update {
+            self.broadcast_ws_message(&chat_update);
+            self.commit_to_crdt_or_log("receive_reaction");
         }
 
         // Not an error - might be a reaction for a message we don't have
@@ -1542,21 +1659,19 @@ impl ChatState {
         message_id: String,
         new_content: String,
     ) -> Result<(), String> {
-        let mut updated = false;
+        let mut chat_update: Option<WsServerMessage> = None;
 
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
                 message.content = new_content;
-
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                // Broadcast updated chat state so clients refresh the edited message
-                self.broadcast_ws_message(&chat_update);
-
-                updated = true;
+                chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
             }
         }
 
-        if !updated {
+        if let Some(update) = chat_update {
+            self.broadcast_ws_message(&update);
+            self.commit_to_crdt_or_log("receive_message_edit");
+        } else {
             println!(
                 "receive_message_edit: message {} in chat {} not found; dropping edit",
                 message_id, chat_id
@@ -1573,39 +1688,38 @@ impl ChatState {
         // This ACK is from the remote node confirming they received our message
         // We need to find OUR sent message and update its status to Delivered
 
-        // Look through all chats to find the message we sent
+        let mut update_payload: Option<(String, WsServerMessage)> = None;
+
         for chat in self.chats.values_mut() {
-            let updated = {
-                if let Some(message) = chat
-                    .messages
-                    .iter_mut()
-                    .find(|m| m.id == message_id && m.sender == our().node)
-                {
-                    println!("Updating sent message {} status to Delivered", message_id);
-                    message.status =
-                        safe_update_message_status(&message.status, MessageStatus::Delivered);
-                    true
-                } else {
-                    false
-                }
-            };
-
-            if updated {
-                let counterparty = chat.counterparty.clone();
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-
-                self.enqueue_delivery_flush(&counterparty);
-
-                // Send ChatUpdate with the delivered status
-                for &channel_id in self.ws_connections.keys() {
-                    println!(
-                        "Sending ChatUpdate for delivered message to channel {}",
-                        channel_id
-                    );
-                    self.push_ws_message(channel_id, &chat_update);
-                }
-                return Ok(());
+            if let Some(message) = chat
+                .messages
+                .iter_mut()
+                .find(|m| m.id == message_id && m.sender == our().node)
+            {
+                println!("Updating sent message {} status to Delivered", message_id);
+                message.status =
+                    safe_update_message_status(&message.status, MessageStatus::Delivered);
+                update_payload = Some((
+                    chat.counterparty.clone(),
+                    WsServerMessage::ChatUpdate(chat.clone()),
+                ));
+                break;
             }
+        }
+
+        if let Some((counterparty, chat_update)) = update_payload {
+            self.enqueue_delivery_flush(&counterparty);
+
+            // Send ChatUpdate with the delivered status
+            for &channel_id in self.ws_connections.keys() {
+                println!(
+                    "Sending ChatUpdate for delivered message to channel {}",
+                    channel_id
+                );
+                self.push_ws_message(channel_id, &chat_update);
+            }
+            self.commit_to_crdt_or_log("receive_message_ack");
+            return Ok(());
         }
         println!("Sent message {} not found for ACK", message_id);
         // Not an error - might be an ACK for a message we don't have anymore
@@ -1623,16 +1737,19 @@ impl ChatState {
             message_id, chat_id
         );
 
-        // Find the chat and delete the message
+        let mut chat_update: Option<WsServerMessage> = None;
+
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == message_id) {
                 chat.messages.remove(pos);
                 println!("Deleted message {} from chat {}", message_id, chat_id);
-
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                // Notify all WebSocket connections about the updated chat
-                self.broadcast_ws_message(&chat_update);
+                chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
             }
+        }
+
+        if let Some(update) = chat_update {
+            self.broadcast_ws_message(&update);
+            self.commit_to_crdt_or_log("receive_message_deletion");
         }
 
         Ok(())
@@ -1660,6 +1777,8 @@ impl ChatState {
         for update in updates {
             self.broadcast_ws_message(&update);
         }
+
+        self.commit_to_crdt_or_log("receive_profile_update");
 
         Ok(())
     }
@@ -1724,6 +1843,123 @@ impl ChatState {
             .collect();
 
         Ok(results)
+    }
+
+    // CRDT Diagnostics
+
+    #[local]
+    #[http]
+    async fn crdt_state_vector(&mut self) -> Result<CrdtStateVectorRes, String> {
+        let manager = self
+            .ensure_crdt_ready()
+            .map_err(|e| format!("Failed to init CRDT: {:?}", e))?;
+
+        let (doc_id, state_vector) = {
+            let doc = manager.doc();
+            (doc.id().to_string(), doc.state_vector())
+        };
+        log_crdt_event(&doc_id, "crdt_state_vector", &state_vector, None);
+        let encoded = base64_encode(&state_vector.encode_v1());
+        manager.set_last_state_vector(state_vector);
+
+        Ok(CrdtStateVectorRes {
+            state_vector: encoded,
+        })
+    }
+
+    #[local]
+    #[http]
+    async fn crdt_update(&mut self, req: CrdtUpdateReq) -> Result<CrdtUpdateRes, String> {
+        let manager = self
+            .ensure_crdt_ready()
+            .map_err(|e| format!("Failed to init CRDT: {:?}", e))?;
+
+        let state_vector =
+            if let Some(encoded_sv) = req.state_vector.as_ref().filter(|s| !s.trim().is_empty()) {
+                let trimmed = encoded_sv.trim();
+                let bytes = base64_decode(trimmed)
+                    .map_err(|e| format!("Invalid state vector payload: {e}"))?;
+                Some(
+                    StateVector::decode_v1(&bytes)
+                        .map_err(|e| format!("Invalid state vector bytes: {:?}", e))?,
+                )
+            } else {
+                None
+            };
+
+        let (doc_id, doc_vector, update_bytes) = {
+            let doc = manager.doc();
+            (
+                doc.id().to_string(),
+                doc.state_vector(),
+                doc.encode_update_since(state_vector.as_ref()),
+            )
+        };
+        log_crdt_event(
+            &doc_id,
+            "crdt_update",
+            &doc_vector,
+            Some(update_bytes.len()),
+        );
+
+        Ok(CrdtUpdateRes {
+            doc_id,
+            update_payload: base64_encode(&update_bytes),
+        })
+    }
+
+    #[local]
+    #[http]
+    async fn crdt_apply_update(
+        &mut self,
+        req: CrdtApplyReq,
+    ) -> Result<CrdtApplyRes, String> {
+        let update_bytes = base64_decode(&req.update_payload)
+            .map_err(|e| format!("Invalid update payload: {e}"))?;
+
+        let new_state = {
+            let manager = self
+                .ensure_crdt_ready()
+                .map_err(|e| format!("Failed to init CRDT: {:?}", e))?;
+
+            let doc_id = manager.doc().id().to_string();
+            println!(
+                "[CRDT][{}] context=crdt_apply_update incoming_update_bytes={}",
+                doc_id,
+                update_bytes.len()
+            );
+
+            {
+                let doc = manager.doc();
+                doc.apply_update(&update_bytes)
+                    .map_err(|e| format!("Failed to apply update: {:?}", e))?;
+            }
+
+            let doc_state = {
+                let doc = manager.doc();
+                doc.read_state()
+                    .map_err(|e| format!("Failed to read CRDT state: {:?}", e))?
+            };
+
+            let new_vector = {
+                let doc = manager.doc();
+                doc.state_vector()
+            };
+            log_crdt_event(
+                &doc_id,
+                "crdt_apply_update",
+                &new_vector,
+                Some(update_bytes.len()),
+            );
+            manager.set_last_state_vector(new_vector.clone());
+
+            doc_state
+        };
+
+        dump_crdt_snapshot(&new_state, "apply_update");
+        new_state.apply_into(self);
+
+        Ok(CrdtApplyRes { applied: true })
     }
 
     // WEBSOCKET HANDLERS
@@ -2211,6 +2447,8 @@ impl ChatState {
                 for (ch_id, payload) in pending_pushes {
                     self.push_ws_message(ch_id, &payload);
                 }
+
+                self.commit_to_crdt_or_log("ws_send_message");
             }
             WsClientMessage::Ack { message_id } => {
                 // Update message status
@@ -2221,11 +2459,13 @@ impl ChatState {
                         break;
                     }
                 }
+                self.commit_to_crdt_or_log("ws_ack");
             }
             WsClientMessage::MarkRead { chat_id } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.unread_count = 0;
                 }
+                self.commit_to_crdt_or_log("ws_mark_read");
             }
             WsClientMessage::UpdateStatus { status } => {
                 // Track whether this connection is active (user viewing the page)
@@ -2344,6 +2584,8 @@ impl ChatState {
                         // Send message to all participants
                         let msg = WsServerMessage::NewMessage(message);
                         self.push_ws_message(channel_id, &msg);
+
+                        self.commit_to_crdt_or_log("browser_message");
                     }
                 }
             }

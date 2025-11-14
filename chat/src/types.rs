@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::crdt::{ChatCrdtManager, ChatDocState, CHAT_DOC_ID};
+use crate::{dump_crdt_snapshot, log_crdt_event};
+use hyperware_crdt::CommitteeError;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PushSubscription {
     pub endpoint: String,
@@ -321,6 +325,33 @@ pub struct SearchChatsReq {
     pub query: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtStateVectorRes {
+    pub state_vector: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtUpdateReq {
+    #[serde(default)]
+    pub state_vector: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtUpdateRes {
+    pub doc_id: String,
+    pub update_payload: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtApplyReq {
+    pub update_payload: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtApplyRes {
+    pub applied: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, process_macros::SerdeJsonInto)]
 pub enum HomepageRequest {
     GetPushSubscription,
@@ -353,6 +384,8 @@ pub struct ChatState {
     pub active_connections: HashSet<u32>,
     #[serde(default)]
     pub node_profiles: HashMap<String, UserProfile>,
+    #[serde(skip)]
+    pub crdt: Option<ChatCrdtManager>,
 }
 
 impl Default for ChatState {
@@ -375,6 +408,7 @@ impl Default for ChatState {
             last_heartbeat: HashMap::new(),
             active_connections: HashSet::new(),
             node_profiles: HashMap::new(),
+            crdt: None,
         }
     }
 }
@@ -452,7 +486,7 @@ impl<'de> Deserialize<'de> for ChatState {
         let data = ChatStateSerde::deserialize(deserializer)?;
         let (delivery_tx, delivery_rx) = DeliveryTx::new();
 
-        Ok(ChatState {
+        let mut state = ChatState {
             profile: data.profile,
             chats: data.chats,
             chat_keys: data.chat_keys,
@@ -467,6 +501,57 @@ impl<'de> Deserialize<'de> for ChatState {
             last_heartbeat: data.last_heartbeat,
             active_connections: data.active_connections,
             node_profiles: data.node_profiles,
-        })
+            crdt: None,
+        };
+
+        if let Err(err) = state.rebuild_crdt_manager() {
+            println!("Failed to rebuild CRDT manager from snapshot: {:?}", err);
+        }
+
+        Ok(state)
+    }
+}
+
+impl ChatState {
+    pub fn rebuild_crdt_manager(&mut self) -> Result<(), CommitteeError> {
+        let snapshot = ChatDocState::from(&*self);
+        let manager = ChatCrdtManager::from_snapshot(CHAT_DOC_ID, snapshot)?;
+        self.crdt = Some(manager);
+        Ok(())
+    }
+
+    pub fn commit_to_crdt(&mut self) -> Result<(), CommitteeError> {
+        if self.crdt.is_none() {
+            self.rebuild_crdt_manager()?;
+        }
+
+        let snapshot = ChatDocState::from(&*self);
+        dump_crdt_snapshot(&snapshot, "commit");
+
+        if let Some(manager) = self.crdt.as_mut() {
+            manager.refresh_with_snapshot(snapshot)?;
+            let doc = manager.doc();
+            let state_vector = doc.state_vector();
+            log_crdt_event(doc.id(), "commit_to_crdt", &state_vector, None);
+            manager.set_last_state_vector(state_vector);
+        }
+
+        Ok(())
+    }
+
+    pub fn commit_to_crdt_or_log(&mut self, context: &str) {
+        if let Err(err) = self.commit_to_crdt() {
+            println!("Failed to commit CRDT state ({}): {:?}", context, err);
+        }
+    }
+
+    pub fn ensure_crdt_ready(&mut self) -> Result<&mut ChatCrdtManager, CommitteeError> {
+        if self.crdt.is_none() {
+            self.rebuild_crdt_manager()?;
+        }
+        Ok(self
+            .crdt
+            .as_mut()
+            .expect("CRDT manager must be initialised"))
     }
 }
