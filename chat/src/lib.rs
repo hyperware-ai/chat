@@ -441,7 +441,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
@@ -576,7 +576,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
         self.chats
@@ -590,7 +590,7 @@ impl ChatState {
     // MESSAGE OPERATIONS
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
@@ -685,7 +685,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
         let mut broadcast_update: Option<WsServerMessage> = None;
