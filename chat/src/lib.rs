@@ -1910,10 +1910,7 @@ impl ChatState {
 
     #[local]
     #[http]
-    async fn crdt_apply_update(
-        &mut self,
-        req: CrdtApplyReq,
-    ) -> Result<CrdtApplyRes, String> {
+    async fn crdt_apply_update(&mut self, req: CrdtApplyReq) -> Result<CrdtApplyRes, String> {
         let update_bytes = base64_decode(&req.update_payload)
             .map_err(|e| format!("Invalid update payload: {e}"))?;
 

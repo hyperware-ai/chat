@@ -71,7 +71,7 @@ pub struct MessageReaction {
     pub timestamp: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum MessageType {
     Text,
     Image,

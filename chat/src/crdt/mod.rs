@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{Chat, ChatKey, ChatState, Settings, UserProfile};
 
+pub mod schema;
+pub use schema::{
+    AttachmentDescriptor, GroupHubSet, GroupId, GroupMember, GroupMetadata, GroupPermissions,
+    GroupRole, GroupSubscriberSet, GroupThread, GroupTier, GroupVisibility, MembershipRuleConfig,
+    MembershipRuleId, MembershipStatus, MessageId, MessageMeta, MessageReactionMeta, NodeId,
+    StableIdAllocator, SubscriberSyncState, ThreadId, ThreadParentRef, ThreadSummary,
+};
+
 pub const CHAT_DOC_ID: &str = "chat:dm_state";
 
 /// Wraps the committee document plus helper metadata (like last state vectors).
@@ -119,12 +127,24 @@ impl ChatDocState {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct GroupDocState {
     #[serde(default)]
-    pub groups: HashMap<String, GroupScaffold>,
+    pub metadata: HashMap<GroupId, GroupMetadata>,
+    #[serde(default)]
+    pub roles: HashMap<GroupId, HashMap<String, GroupRole>>,
+    #[serde(default)]
+    pub members: HashMap<GroupId, HashMap<NodeId, GroupMember>>,
+    #[serde(default)]
+    pub hubs: HashMap<GroupId, GroupHubSet>,
+    #[serde(default)]
+    pub subscribers: HashMap<GroupId, GroupSubscriberSet>,
+    #[serde(default)]
+    pub membership_rules: HashMap<GroupId, Vec<MembershipRuleConfig>>,
+    #[serde(default)]
+    pub threads: HashMap<ThreadId, GroupThread>,
+    #[serde(default)]
+    pub messages: HashMap<MessageId, MessageMeta>,
+    #[serde(default)]
+    pub stable_id_allocator: StableIdAllocator,
 }
-
-/// Empty struct standing in for the future group metadata/thread/membership payloads.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct GroupScaffold {}
 
 #[cfg(test)]
 mod tests {
