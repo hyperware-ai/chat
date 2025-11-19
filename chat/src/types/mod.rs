@@ -7,11 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crdt::{
-    compile_membership_rules, AttachmentDescriptor, ChatCrdtManager, ChatDocState, Group, GroupId,
-    GroupMember, GroupMetadata, GroupPermissions, GroupTier, GroupVisibility, MembershipActionKind,
-    MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRuleBox,
-    MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId,
-    Role, StableIdAllocator, SubscriberSyncState, Thread, ThreadId, ThreadParentRef, CHAT_DOC_ID,
+    compile_membership_rules, AttachmentDescriptor, ChatCrdtManager, ChatDocState, Group,
+    GroupCounters, GroupCrdtManager, GroupDocState, GroupId, GroupMember, GroupMetadata,
+    GroupPermissions, GroupTier, GroupVisibility, MembershipActionKind, MembershipDecision,
+    MembershipDecisionStatus, MembershipProposal, MembershipRuleBox, MembershipRuleConfig,
+    MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId, Role,
+    SubscriberSyncState, Thread, ThreadId, ThreadParentRef, CHAT_DOC_ID,
 };
 use crate::{dump_crdt_snapshot, log_crdt_event, our};
 use hyperware_crdt::CommitteeError;
@@ -568,7 +569,19 @@ pub struct CrdtStateVectorRes {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtGroupStateVectorReq {
+    pub group_id: GroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CrdtUpdateReq {
+    #[serde(default)]
+    pub state_vector: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtGroupUpdateReq {
+    pub group_id: GroupId,
     #[serde(default)]
     pub state_vector: Option<String>,
 }
@@ -581,6 +594,12 @@ pub struct CrdtUpdateRes {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CrdtApplyReq {
+    pub update_payload: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtGroupApplyReq {
+    pub group_id: GroupId,
     pub update_payload: String,
 }
 
@@ -662,12 +681,14 @@ pub struct ChatState {
     pub node_profiles: HashMap<String, UserProfile>,
     #[serde(default)]
     pub groups: HashMap<GroupId, Group>,
-    #[serde(default)]
-    pub group_stable_id_allocator: StableIdAllocator,
     #[serde(skip)]
     pub membership_rule_cache: HashMap<GroupId, Vec<MembershipRuleBox>>,
     #[serde(skip)]
-    pub crdt: Option<ChatCrdtManager>,
+    pub dm_crdt_manager: Option<ChatCrdtManager>,
+    #[serde(skip)]
+    pub group_doc_managers: HashMap<GroupId, GroupCrdtManager>,
+    #[serde(skip)]
+    pub groups_pending_bootstrap: HashSet<GroupId>,
 }
 
 impl Default for ChatState {
@@ -691,9 +712,10 @@ impl Default for ChatState {
             active_connections: HashSet::new(),
             node_profiles: HashMap::new(),
             groups: HashMap::new(),
-            group_stable_id_allocator: StableIdAllocator::default(),
             membership_rule_cache: HashMap::new(),
-            crdt: None,
+            dm_crdt_manager: None,
+            group_doc_managers: HashMap::new(),
+            groups_pending_bootstrap: HashSet::new(),
         }
     }
 }
@@ -768,8 +790,6 @@ impl<'de> Deserialize<'de> for ChatState {
             node_profiles: HashMap<String, UserProfile>,
             #[serde(default)]
             groups: HashMap<GroupId, Group>,
-            #[serde(default)]
-            group_stable_id_allocator: StableIdAllocator,
         }
 
         let data = ChatStateSerde::deserialize(deserializer)?;
@@ -791,13 +811,20 @@ impl<'de> Deserialize<'de> for ChatState {
             active_connections: data.active_connections,
             node_profiles: data.node_profiles,
             groups: data.groups,
-            group_stable_id_allocator: data.group_stable_id_allocator,
             membership_rule_cache: HashMap::new(),
-            crdt: None,
+            dm_crdt_manager: None,
+            group_doc_managers: HashMap::new(),
+            groups_pending_bootstrap: HashSet::new(),
         };
 
-        if let Err(err) = state.rebuild_crdt_manager() {
-            println!("Failed to rebuild CRDT manager from snapshot: {:?}", err);
+        if let Err(err) = state.rebuild_dm_crdt_manager() {
+            println!("Failed to rebuild DM CRDT manager from snapshot: {:?}", err);
+        }
+        if let Err(err) = state.rebuild_group_doc_managers() {
+            println!(
+                "Failed to rebuild group CRDT managers from snapshot: {:?}",
+                err
+            );
         }
 
         Ok(state)
@@ -805,46 +832,125 @@ impl<'de> Deserialize<'de> for ChatState {
 }
 
 impl ChatState {
-    pub fn rebuild_crdt_manager(&mut self) -> Result<(), CommitteeError> {
+    pub fn rebuild_dm_crdt_manager(&mut self) -> Result<(), CommitteeError> {
         let snapshot = ChatDocState::from(&*self);
         let manager = ChatCrdtManager::from_snapshot(CHAT_DOC_ID, snapshot)?;
-        self.crdt = Some(manager);
+        self.dm_crdt_manager = Some(manager);
         Ok(())
     }
 
-    pub fn commit_to_crdt(&mut self) -> Result<(), CommitteeError> {
-        if self.crdt.is_none() {
-            self.rebuild_crdt_manager()?;
+    pub fn rebuild_group_doc_managers(&mut self) -> Result<(), CommitteeError> {
+        self.group_doc_managers.clear();
+        self.groups_pending_bootstrap.clear();
+        for (group_id, group) in &self.groups {
+            if self.should_seed_group_doc(group) {
+                let manager = GroupCrdtManager::from_group(group_id, group)?;
+                self.group_doc_managers.insert(group_id.clone(), manager);
+            } else {
+                self.groups_pending_bootstrap.insert(group_id.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn should_seed_group_doc(&self, group: &Group) -> bool {
+        group
+            .metadata
+            .as_ref()
+            .map(|meta| meta.creator_id == our().node)
+            .unwrap_or(false)
+    }
+
+    pub fn commit_dm_crdt(&mut self) -> Result<(), CommitteeError> {
+        if self.dm_crdt_manager.is_none() {
+            self.rebuild_dm_crdt_manager()?;
         }
 
         let snapshot = ChatDocState::from(&*self);
-        dump_crdt_snapshot(&snapshot, "commit");
+        dump_crdt_snapshot(&snapshot, "commit_dm");
 
-        if let Some(manager) = self.crdt.as_mut() {
+        if let Some(manager) = self.dm_crdt_manager.as_mut() {
             manager.refresh_with_snapshot(snapshot)?;
             let doc = manager.doc();
             let state_vector = doc.state_vector();
-            log_crdt_event(doc.id(), "commit_to_crdt", &state_vector, None);
+            log_crdt_event(doc.id(), "commit_dm_crdt", &state_vector, None);
             manager.set_last_state_vector(state_vector);
         }
 
         Ok(())
     }
 
-    pub fn commit_to_crdt_or_log(&mut self, context: &str) {
-        if let Err(err) = self.commit_to_crdt() {
-            println!("Failed to commit CRDT state ({}): {:?}", context, err);
+    pub fn commit_dm_crdt_or_log(&mut self, context: &str) {
+        if let Err(err) = self.commit_dm_crdt() {
+            println!("Failed to commit DM CRDT state ({}): {:?}", context, err);
         }
     }
 
-    pub fn ensure_crdt_ready(&mut self) -> Result<&mut ChatCrdtManager, CommitteeError> {
-        if self.crdt.is_none() {
-            self.rebuild_crdt_manager()?;
+    pub fn ensure_dm_crdt_ready(&mut self) -> Result<&mut ChatCrdtManager, CommitteeError> {
+        if self.dm_crdt_manager.is_none() {
+            self.rebuild_dm_crdt_manager()?;
         }
         Ok(self
-            .crdt
+            .dm_crdt_manager
             .as_mut()
-            .expect("CRDT manager must be initialised"))
+            .expect("DM CRDT manager must be initialised"))
+    }
+
+    pub fn group_needs_bootstrap(&self, group_id: &GroupId) -> bool {
+        self.groups_pending_bootstrap.contains(group_id) || !self.groups.contains_key(group_id)
+    }
+
+    pub fn mark_group_bootstrapped(&mut self, group_id: &GroupId) {
+        self.groups_pending_bootstrap.remove(group_id);
+    }
+
+    pub fn ensure_group_doc_manager(
+        &mut self,
+        group_id: &GroupId,
+    ) -> Result<&mut GroupCrdtManager, CommitteeError> {
+        if !self.group_doc_managers.contains_key(group_id) {
+            let group = self.groups.get(group_id).ok_or_else(|| {
+                CommitteeError::Observer(format!("missing group {} for CRDT", group_id))
+            })?;
+            let manager = GroupCrdtManager::from_group(group_id, group)?;
+            self.group_doc_managers
+                .insert(group_id.clone(), manager);
+        }
+
+        Ok(self
+            .group_doc_managers
+            .get_mut(group_id)
+            .expect("group manager initialised"))
+    }
+
+    pub fn commit_group_crdt(&mut self, group_id: &GroupId) -> Result<(), CommitteeError> {
+        if self.group_needs_bootstrap(group_id) {
+            return Err(CommitteeError::Observer(format!(
+                "group {} requires bootstrap before CRDT commit",
+                group_id
+            )));
+        }
+
+        let group = self.groups.get(group_id).ok_or_else(|| {
+            CommitteeError::Observer(format!("missing group {} for CRDT commit", group_id))
+        })?;
+        let snapshot: GroupDocState = (group_id, group).into();
+        let manager = self.ensure_group_doc_manager(group_id)?;
+        manager.refresh_with_snapshot(snapshot)?;
+        let doc = manager.doc();
+        let state_vector = doc.state_vector();
+        log_crdt_event(doc.id(), "commit_group_crdt", &state_vector, None);
+        manager.set_last_state_vector(state_vector);
+        Ok(())
+    }
+
+    pub fn commit_group_crdt_or_log(&mut self, group_id: &GroupId, context: &str) {
+        if let Err(err) = self.commit_group_crdt(group_id) {
+            println!(
+                "Failed to commit group CRDT state (group={} context={}): {:?}",
+                group_id, context, err
+            );
+        }
     }
 
     pub fn groups(&self) -> &HashMap<GroupId, Group> {
@@ -868,15 +974,27 @@ impl ChatState {
     }
 
     pub fn remove_group(&mut self, group_id: &GroupId) -> Option<Group> {
-        self.groups.remove(group_id)
+        let removed = self.groups.remove(group_id);
+        self.group_doc_managers.remove(group_id);
+        self.groups_pending_bootstrap.remove(group_id);
+        self.membership_rule_cache.remove(group_id);
+        removed
     }
 
-    pub fn group_allocator(&self) -> &StableIdAllocator {
-        &self.group_stable_id_allocator
+    fn next_group_thread_id(&mut self, group_id: &GroupId) -> Result<ThreadId, String> {
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| "Group not found".to_string())?;
+        Ok(group.counters.next_thread_id(group_id))
     }
 
-    pub fn group_allocator_mut(&mut self) -> &mut StableIdAllocator {
-        &mut self.group_stable_id_allocator
+    fn next_group_message_id(&mut self, group_id: &GroupId) -> Result<MessageId, String> {
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| "Group not found".to_string())?;
+        Ok(group.counters.next_message_id(group_id))
     }
 
     pub fn set_group_membership_rules(
@@ -890,7 +1008,7 @@ impl ChatState {
             .or_insert_with(Group::default);
         entry.membership_rules = rules;
         self.invalidate_group_rules(&group_id);
-        self.commit_to_crdt_or_log("set_group_membership_rules");
+        self.commit_group_crdt_or_log(&group_id, "set_group_membership_rules");
     }
 
     pub fn group_rules(
@@ -938,10 +1056,8 @@ impl ChatState {
 
         let now = current_timestamp();
         let creator = our().node.clone();
-        let root_thread_id = {
-            let allocator = self.group_allocator_mut();
-            allocator.next_thread_id(&group_id)
-        };
+        let mut counters = GroupCounters::default();
+        let root_thread_id = counters.next_thread_id(&group_id);
 
         let default_role_id = format!("{group_id}:member");
         let owner_role_id = format!("{group_id}:owner");
@@ -960,6 +1076,7 @@ impl ChatState {
         );
 
         let mut group = Group::new(metadata);
+        group.counters = counters;
 
         let owner_role = Role::new(
             owner_role_id.clone(),
@@ -1016,7 +1133,8 @@ impl ChatState {
         group.threads.insert(root_thread_id, root_thread);
 
         self.groups.insert(group_id.clone(), group);
-        self.commit_to_crdt_or_log("create_group");
+        self.mark_group_bootstrapped(&group_id);
+        self.commit_group_crdt_or_log(&group_id, "create_group");
 
         Ok(CreateGroupRes { group_id })
     }
@@ -1045,10 +1163,7 @@ impl ChatState {
         &mut self,
         mut req: CreateGroupThreadReq,
     ) -> Result<CreateGroupThreadRes, String> {
-        let thread_id = {
-            let allocator = self.group_allocator_mut();
-            allocator.next_thread_id(&req.group_id)
-        };
+        let thread_id = self.next_group_thread_id(&req.group_id)?;
         let now = current_timestamp();
         let creator = our().node.clone();
 
@@ -1101,7 +1216,7 @@ impl ChatState {
         }
 
         drop(group);
-        self.commit_to_crdt_or_log("create_group_thread");
+        self.commit_group_crdt_or_log(&req.group_id, "create_group_thread");
         Ok(CreateGroupThreadRes { thread_id })
     }
 
@@ -1109,10 +1224,7 @@ impl ChatState {
         &mut self,
         mut req: SendGroupMessageReq,
     ) -> Result<SendGroupMessageRes, String> {
-        let message_id = {
-            let allocator = self.group_allocator_mut();
-            allocator.next_message_id(&req.group_id)
-        };
+        let message_id = self.next_group_message_id(&req.group_id)?;
         let now = current_timestamp();
         let sender = our().node.clone();
 
@@ -1164,7 +1276,7 @@ impl ChatState {
         subscriber.last_seen_ts = now;
 
         drop(group);
-        self.commit_to_crdt_or_log("send_group_message");
+        self.commit_group_crdt_or_log(&req.group_id, "send_group_message");
         Ok(SendGroupMessageRes { message })
     }
 
@@ -1373,7 +1485,7 @@ impl ChatState {
         let decision = self.evaluate_membership(group_id, &proposal)?;
         let now = current_timestamp();
         self.apply_membership_decision(group_id, proposal, &decision, now)?;
-        self.commit_to_crdt_or_log("membership_proposal");
+        self.commit_group_crdt_or_log(group_id, "membership_proposal");
         Ok(decision)
     }
 }

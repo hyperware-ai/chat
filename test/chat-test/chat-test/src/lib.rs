@@ -70,10 +70,9 @@ fn handle_message(our: &Address) {
     run_edit_message_propagation_test(&our.node, &remote_node);
     run_counterparty_inference_test(&our.node, &remote_node);
 
-    // CRDT core tests: HTTP endpoints and basic replication/allocator checks
-    // crdt_core_tests::verify_incremental_vs_full_replication(&our.node, &remote_node);
-    // crdt_core_tests::run_crdt_http_endpoint_tests(&chat_address);
-    // crdt_core_tests::run_crdt_replication_allocator_tests(&our.node, &remote_node);
+    // CRDT core tests: HTTP endpoints plus group CRDT flows
+    crdt_core_tests::run_crdt_http_endpoint_tests(&chat_address);
+    crdt_core_tests::run_group_crdt_flow_tests(&our.node, &remote_node);
 
     Response::new()
         .body(TesterResponse::Run(Ok(())))

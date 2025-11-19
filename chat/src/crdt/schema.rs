@@ -676,7 +676,7 @@ pub struct ThreadSummary {
     pub last_sender: Option<NodeId>,
 }
 
-/// Represents a thread (root or nested) within a group. IDs should be minted via [`StableIdAllocator`]
+/// Represents a thread (root or nested) within a group. IDs should be minted via [`GroupCounters`]
 /// so replicas agree on ordering.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Thread {
@@ -732,7 +732,7 @@ pub struct AttachmentDescriptor {
 }
 
 /// CRDT-friendly description of a group message without heavyweight content blobs.
-/// Message IDs should be produced via [`StableIdAllocator`] to remain deterministic.
+/// Message IDs should be produced via [`GroupCounters`] to remain deterministic.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageMeta {
     pub message_id: MessageId,
@@ -803,6 +803,8 @@ pub struct Group {
     pub threads: HashMap<ThreadId, Thread>,
     #[serde(default)]
     pub messages: HashMap<MessageId, MessageMeta>,
+    #[serde(default)]
+    pub counters: GroupCounters,
 }
 
 impl Group {
@@ -814,60 +816,34 @@ impl Group {
     }
 }
 
-/// Tracks monotonically increasing counters per group so CRDT peers agree on thread/message IDs.
+/// Tracks monotonically increasing counters for deterministic thread/message IDs within a group.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StableIdAllocator {
+pub struct GroupCounters {
     #[serde(default)]
-    per_group: HashMap<GroupId, GroupCounters>,
+    pub next_thread: u64,
+    #[serde(default)]
+    pub next_message: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-struct GroupCounters {
-    next_thread: u64,
-    next_message: u64,
-}
-
-impl StableIdAllocator {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns the next stable thread ID for the provided group.
+impl GroupCounters {
     pub fn next_thread_id(&mut self, group_id: &GroupId) -> ThreadId {
-        let counters = self.counters_mut(group_id);
-        let id = Self::format_thread_id(group_id, counters.next_thread);
-        counters.next_thread += 1;
+        let id = Self::format_thread_id(group_id, self.next_thread);
+        self.next_thread += 1;
         id
     }
 
-    /// Returns the next stable message ID for the provided group.
     pub fn next_message_id(&mut self, group_id: &GroupId) -> MessageId {
-        let counters = self.counters_mut(group_id);
-        let id = Self::format_message_id(group_id, counters.next_message);
-        counters.next_message += 1;
+        let id = Self::format_message_id(group_id, self.next_message);
+        self.next_message += 1;
         id
     }
 
-    /// Peeks at the counter that will be used for the next thread ID without mutating state.
-    pub fn peek_thread_counter(&self, group_id: &GroupId) -> u64 {
-        self.per_group
-            .get(group_id)
-            .map(|counters| counters.next_thread)
-            .unwrap_or(0)
+    pub fn peek_thread_counter(&self) -> u64 {
+        self.next_thread
     }
 
-    /// Peeks at the counter that will be used for the next message ID without mutating state.
-    pub fn peek_message_counter(&self, group_id: &GroupId) -> u64 {
-        self.per_group
-            .get(group_id)
-            .map(|counters| counters.next_message)
-            .unwrap_or(0)
-    }
-
-    fn counters_mut(&mut self, group_id: &GroupId) -> &mut GroupCounters {
-        self.per_group
-            .entry(group_id.clone())
-            .or_insert_with(GroupCounters::default)
+    pub fn peek_message_counter(&self) -> u64 {
+        self.next_message
     }
 
     fn format_thread_id(group_id: &GroupId, counter: u64) -> ThreadId {
@@ -886,30 +862,28 @@ mod tests {
 
     #[test]
     fn thread_ids_are_unique_per_group() {
-        let mut allocator = StableIdAllocator::new();
+        let mut counters = GroupCounters::default();
         let group = "group-a".to_string();
-        let first = allocator.next_thread_id(&group);
-        let second = allocator.next_thread_id(&group);
+        let first = counters.next_thread_id(&group);
+        let second = counters.next_thread_id(&group);
 
         assert_ne!(first, second);
-        assert_eq!(allocator.peek_thread_counter(&group), 2);
+        assert_eq!(counters.peek_thread_counter(), 2);
         assert!(first.starts_with("group-a:thread:"));
     }
 
     #[test]
-    fn message_ids_are_isolated_between_groups() {
-        let mut allocator = StableIdAllocator::new();
-        let group_a = "group-a".to_string();
-        let group_b = "group-b".to_string();
+    fn message_ids_are_monotonic_per_group() {
+        let mut counters = GroupCounters::default();
+        let group = "group-a".to_string();
 
-        let msg_a = allocator.next_message_id(&group_a);
-        let msg_b = allocator.next_message_id(&group_b);
+        let msg_a = counters.next_message_id(&group);
+        let msg_b = counters.next_message_id(&group);
 
         assert_ne!(msg_a, msg_b);
         assert!(msg_a.starts_with("group-a:msg:"));
-        assert!(msg_b.starts_with("group-b:msg:"));
-        assert_eq!(allocator.peek_message_counter(&group_a), 1);
-        assert_eq!(allocator.peek_message_counter(&group_b), 1);
+        assert!(msg_b.starts_with("group-a:msg:"));
+        assert_eq!(counters.peek_message_counter(), 2);
     }
 
     fn sample_proposal() -> MembershipProposal {
@@ -992,10 +966,12 @@ mod tests {
     #[test]
     fn compile_unknown_rule_errors() {
         let config = MembershipRuleConfig::new("membership.rule.unknown", json!({}));
-        let err = compile_membership_rules(&[config]).unwrap_err();
-        match err {
-            MembershipRuleError::UnknownRule(name) => assert_eq!(name, "membership.rule.unknown"),
-            _ => panic!("expected unknown rule error"),
+        match compile_membership_rules(&[config]) {
+            Ok(_) => panic!("expected compile error for unknown rule"),
+            Err(MembershipRuleError::UnknownRule(name)) => {
+                assert_eq!(name, "membership.rule.unknown")
+            }
+            Err(other) => panic!("unexpected error pattern: {:?}", other),
         }
     }
 }

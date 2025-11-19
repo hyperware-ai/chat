@@ -35,8 +35,10 @@ use chat_caller_utils::UserProfile as CUUserProfile;
 mod crdt;
 mod types;
 
-pub use crdt::ChatDocState;
+pub use crdt::{ChatDocState, GroupDocState};
 pub use types::*;
+
+use crate::crdt::Group;
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
 const ICON: &str = include_str!("./icon");
@@ -337,7 +339,7 @@ impl ChatState {
                 .insert("system:welcome".to_string(), welcome_chat);
         }
 
-        if let Err(err) = self.rebuild_crdt_manager() {
+        if let Err(err) = self.rebuild_dm_crdt_manager() {
             println!("Failed to initialise CRDT document: {:?}", err);
         }
 
@@ -362,7 +364,7 @@ impl ChatState {
             self.chats.len()
         );
 
-        self.commit_to_crdt_or_log("initialize");
+        self.commit_dm_crdt_or_log("initialize");
     }
 
     // CHAT MANAGEMENT ENDPOINTS
@@ -394,7 +396,7 @@ impl ChatState {
         };
 
         self.chats.insert(chat_id, chat.clone());
-        self.commit_to_crdt_or_log("create_chat");
+        self.commit_dm_crdt_or_log("create_chat");
 
         // Notify the counterparty about the chat creation and our profile asynchronously
         let target = Address::from((req.counterparty.as_str(), OUR_PROCESS_ID));
@@ -593,7 +595,7 @@ impl ChatState {
             .remove(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
         self.message_sequence_counters.remove(&req.chat_id);
-        self.commit_to_crdt_or_log("delete_chat");
+        self.commit_dm_crdt_or_log("delete_chat");
         Ok("Chat deleted".to_string())
     }
 
@@ -772,7 +774,7 @@ impl ChatState {
             .get(&req.chat_id)
             .and_then(|chat| chat.messages.iter().find(|m| m.id == message.id).cloned());
 
-        self.commit_to_crdt_or_log("send_message");
+        self.commit_dm_crdt_or_log("send_message");
 
         if let Some(updated_msg) = updated_msg {
             return Ok(updated_msg);
@@ -827,7 +829,7 @@ impl ChatState {
         }
 
         if broadcast_update.is_some() {
-            self.commit_to_crdt_or_log("edit_message");
+            self.commit_dm_crdt_or_log("edit_message");
             return Ok("Message edited".to_string());
         }
 
@@ -867,7 +869,7 @@ impl ChatState {
                 });
             }
 
-            self.commit_to_crdt_or_log("delete_message");
+            self.commit_dm_crdt_or_log("delete_message");
             return Ok("Message deleted".to_string());
         }
 
@@ -930,7 +932,7 @@ impl ChatState {
                     Err(e) => println!("Failed to send reaction to counterparty: {:?}", e),
                 }
             });
-            self.commit_to_crdt_or_log("add_reaction");
+            self.commit_dm_crdt_or_log("add_reaction");
             return Ok("Reaction added".to_string());
         }
 
@@ -1021,7 +1023,7 @@ impl ChatState {
             }
         }
 
-        self.commit_to_crdt_or_log("forward_message");
+        self.commit_dm_crdt_or_log("forward_message");
         Ok(forwarded_message)
     }
 
@@ -1048,7 +1050,7 @@ impl ChatState {
 
         if let Some(chat_update) = removal_update {
             self.broadcast_ws_message(&chat_update);
-            self.commit_to_crdt_or_log("remove_reaction");
+            self.commit_dm_crdt_or_log("remove_reaction");
             return Ok("Reaction removed".to_string());
         }
 
@@ -1076,7 +1078,7 @@ impl ChatState {
         };
 
         self.chat_keys.insert(key.clone(), chat_key);
-        self.commit_to_crdt_or_log("create_chat_link");
+        self.commit_dm_crdt_or_log("create_chat_link");
 
         let link = format!("http://{}/public/join-{}", our().node, key);
         Ok(link)
@@ -1104,7 +1106,7 @@ impl ChatState {
             return Err("Chat key not found".to_string());
         }
 
-        self.commit_to_crdt_or_log("revoke_chat_key");
+        self.commit_dm_crdt_or_log("revoke_chat_key");
         Ok("Chat key revoked".to_string())
     }
 
@@ -1122,7 +1124,7 @@ impl ChatState {
     #[http]
     async fn update_settings(&mut self, settings: Settings) -> Result<String, String> {
         self.settings = settings;
-        self.commit_to_crdt_or_log("update_settings");
+        self.commit_dm_crdt_or_log("update_settings");
         Ok("Settings updated".to_string())
     }
 
@@ -1161,7 +1163,7 @@ impl ChatState {
             });
         }
 
-        self.commit_to_crdt_or_log("update_profile");
+        self.commit_dm_crdt_or_log("update_profile");
 
         Ok("Profile updated".to_string())
     }
@@ -1216,7 +1218,7 @@ impl ChatState {
             });
         }
 
-        self.commit_to_crdt_or_log("upload_profile_picture");
+        self.commit_dm_crdt_or_log("upload_profile_picture");
 
         Ok(data_url)
     }
@@ -1366,7 +1368,7 @@ impl ChatState {
             }
         }
 
-        self.commit_to_crdt_or_log("upload_file");
+        self.commit_dm_crdt_or_log("upload_file");
         Ok(message)
     }
     // uncomment #[remote] for tests
@@ -1442,7 +1444,7 @@ impl ChatState {
             }
         }
 
-        self.commit_to_crdt_or_log("send_voice_note");
+        self.commit_dm_crdt_or_log("send_voice_note");
         Ok(message)
     }
 
@@ -1493,7 +1495,7 @@ impl ChatState {
         }
 
         if created_chat {
-            self.commit_to_crdt_or_log("receive_chat_creation");
+            self.commit_dm_crdt_or_log("receive_chat_creation");
         }
 
         // Signal the delivery worker (step 3) to flush anything pending to this node
@@ -1713,7 +1715,7 @@ impl ChatState {
         }
 
         if state_changed {
-            self.commit_to_crdt_or_log("receive_message");
+            self.commit_dm_crdt_or_log("receive_message");
         }
 
         // Send acknowledgment back to sender using generated RPC
@@ -1770,7 +1772,7 @@ impl ChatState {
 
         if let Some(chat_update) = update {
             self.broadcast_ws_message(&chat_update);
-            self.commit_to_crdt_or_log("receive_reaction");
+            self.commit_dm_crdt_or_log("receive_reaction");
         }
 
         // Not an error - might be a reaction for a message we don't have
@@ -1795,7 +1797,7 @@ impl ChatState {
 
         if let Some(update) = chat_update {
             self.broadcast_ws_message(&update);
-            self.commit_to_crdt_or_log("receive_message_edit");
+            self.commit_dm_crdt_or_log("receive_message_edit");
         } else {
             println!(
                 "receive_message_edit: message {} in chat {} not found; dropping edit",
@@ -1843,7 +1845,7 @@ impl ChatState {
                 );
                 self.push_ws_message(channel_id, &chat_update);
             }
-            self.commit_to_crdt_or_log("receive_message_ack");
+            self.commit_dm_crdt_or_log("receive_message_ack");
             return Ok(());
         }
         println!("Sent message {} not found for ACK", message_id);
@@ -1874,7 +1876,7 @@ impl ChatState {
 
         if let Some(update) = chat_update {
             self.broadcast_ws_message(&update);
-            self.commit_to_crdt_or_log("receive_message_deletion");
+            self.commit_dm_crdt_or_log("receive_message_deletion");
         }
 
         Ok(())
@@ -1903,7 +1905,7 @@ impl ChatState {
             self.broadcast_ws_message(&update);
         }
 
-        self.commit_to_crdt_or_log("receive_profile_update");
+        self.commit_dm_crdt_or_log("receive_profile_update");
 
         Ok(())
     }
@@ -1980,7 +1982,7 @@ impl ChatState {
     #[http]
     async fn crdt_state_vector(&mut self) -> Result<CrdtStateVectorRes, String> {
         let manager = self
-            .ensure_crdt_ready()
+            .ensure_dm_crdt_ready()
             .map_err(|e| format!("Failed to init CRDT: {:?}", e))?;
 
         let (doc_id, state_vector) = {
@@ -2002,7 +2004,7 @@ impl ChatState {
     #[http]
     async fn crdt_update(&mut self, req: CrdtUpdateReq) -> Result<CrdtUpdateRes, String> {
         let manager = self
-            .ensure_crdt_ready()
+            .ensure_dm_crdt_ready()
             .map_err(|e| format!("Failed to init CRDT: {:?}", e))?;
 
         let state_vector =
@@ -2034,7 +2036,7 @@ impl ChatState {
         );
 
         Ok(CrdtUpdateRes {
-            doc_id,
+            doc_id: doc_id.to_string(),
             update_payload: base64_encode(&update_bytes),
         })
     }
@@ -2049,7 +2051,7 @@ impl ChatState {
 
         let new_state = {
             let manager = self
-                .ensure_crdt_ready()
+                .ensure_dm_crdt_ready()
                 .map_err(|e| format!("Failed to init CRDT: {:?}", e))?;
 
             let doc_id = manager.doc().id().to_string();
@@ -2088,6 +2090,150 @@ impl ChatState {
 
         dump_crdt_snapshot(&new_state, "apply_update");
         new_state.apply_into(self);
+
+        Ok(CrdtApplyRes { applied: true })
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_state_vector(
+        &mut self,
+        req: CrdtGroupStateVectorReq,
+    ) -> Result<CrdtStateVectorRes, String> {
+        if self.group_needs_bootstrap(&req.group_id) {
+            return Err(format!(
+                "Group {} is pending bootstrap and cannot serve CRDT requests",
+                req.group_id
+            ));
+        }
+
+        let manager = self
+            .ensure_group_doc_manager(&req.group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+
+        let (doc_id, state_vector) = {
+            let doc = manager.doc();
+            (doc.id().to_string(), doc.state_vector())
+        };
+        log_crdt_event(&doc_id, "crdt_group_state_vector", &state_vector, None);
+        let encoded = base64_encode(&state_vector.encode_v1());
+        manager.set_last_state_vector(state_vector);
+
+        Ok(CrdtStateVectorRes {
+            state_vector: encoded,
+        })
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_update(
+        &mut self,
+        req: CrdtGroupUpdateReq,
+    ) -> Result<CrdtUpdateRes, String> {
+        if self.group_needs_bootstrap(&req.group_id) {
+            return Err(format!(
+                "Group {} is pending bootstrap and cannot serve CRDT requests",
+                req.group_id
+            ));
+        }
+
+        let manager = self
+            .ensure_group_doc_manager(&req.group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+
+        let state_vector =
+            if let Some(encoded_sv) = req.state_vector.as_ref().filter(|s| !s.trim().is_empty()) {
+                let trimmed = encoded_sv.trim();
+                let bytes = base64_decode(trimmed)
+                    .map_err(|e| format!("Invalid state vector payload: {e}"))?;
+                Some(
+                    StateVector::decode_v1(&bytes)
+                        .map_err(|e| format!("Invalid state vector bytes: {:?}", e))?,
+                )
+            } else {
+                None
+            };
+
+        let (doc_id, doc_vector, update_bytes) = {
+            let doc = manager.doc();
+            (
+                doc.id().to_string(),
+                doc.state_vector(),
+                doc.encode_update_since(state_vector.as_ref()),
+            )
+        };
+        log_crdt_event(
+            &doc_id,
+            "crdt_group_update",
+            &doc_vector,
+            Some(update_bytes.len()),
+        );
+
+        Ok(CrdtUpdateRes {
+            doc_id,
+            update_payload: base64_encode(&update_bytes),
+        })
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_apply_update(
+        &mut self,
+        req: CrdtGroupApplyReq,
+    ) -> Result<CrdtApplyRes, String> {
+        let update_bytes = base64_decode(req.update_payload.trim())
+            .map_err(|e| format!("Invalid update payload: {e}"))?;
+        let group_id = req.group_id.clone();
+        let was_missing = !self.groups.contains_key(&group_id);
+        self.groups
+            .entry(group_id.clone())
+            .or_insert_with(Group::default);
+        if was_missing {
+            self.groups_pending_bootstrap.insert(group_id.clone());
+        }
+
+        let manager = self
+            .ensure_group_doc_manager(&group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+
+        let doc_id = manager.doc().id().to_string();
+        println!(
+            "[CRDT][{}] context=crdt_group_apply_update incoming_update_bytes={}",
+            doc_id,
+            update_bytes.len()
+        );
+
+        {
+            let doc = manager.doc();
+            doc.apply_update(&update_bytes)
+                .map_err(|e| format!("Failed to apply update: {:?}", e))?;
+        }
+
+        let group_state = {
+            let doc = manager.doc();
+            doc.read_state()
+                .map_err(|e| format!("Failed to read CRDT state: {:?}", e))?
+        };
+
+        let new_vector = {
+            let doc = manager.doc();
+            doc.state_vector()
+        };
+        log_crdt_event(
+            &doc_id,
+            "crdt_group_apply_update",
+            &new_vector,
+            Some(update_bytes.len()),
+        );
+        manager.set_last_state_vector(new_vector);
+
+        group_state.apply_into(self);
+        self.mark_group_bootstrapped(&group_id);
 
         Ok(CrdtApplyRes { applied: true })
     }
@@ -2578,7 +2724,7 @@ impl ChatState {
                     self.push_ws_message(ch_id, &payload);
                 }
 
-                self.commit_to_crdt_or_log("ws_send_message");
+                self.commit_dm_crdt_or_log("ws_send_message");
             }
             WsClientMessage::Ack { message_id } => {
                 // Update message status
@@ -2589,13 +2735,13 @@ impl ChatState {
                         break;
                     }
                 }
-                self.commit_to_crdt_or_log("ws_ack");
+                self.commit_dm_crdt_or_log("ws_ack");
             }
             WsClientMessage::MarkRead { chat_id } => {
                 if let Some(chat) = self.chats.get_mut(&chat_id) {
                     chat.unread_count = 0;
                 }
-                self.commit_to_crdt_or_log("ws_mark_read");
+                self.commit_dm_crdt_or_log("ws_mark_read");
             }
             WsClientMessage::UpdateStatus { status } => {
                 // Track whether this connection is active (user viewing the page)
@@ -2715,7 +2861,7 @@ impl ChatState {
                         let msg = WsServerMessage::NewMessage(message);
                         self.push_ws_message(channel_id, &msg);
 
-                        self.commit_to_crdt_or_log("browser_message");
+                        self.commit_dm_crdt_or_log("browser_message");
                     }
                 }
             }

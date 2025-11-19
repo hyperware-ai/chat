@@ -60,51 +60,84 @@ pub fn run_crdt_http_endpoint_tests(chat_address: &Address) {
     print_to_terminal(0, "crdt_core: http endpoints test done");
 }
 
-pub fn run_crdt_replication_allocator_tests(local_node: &str, remote_node: &str) {
-    print_to_terminal(0, "crdt_core: replication/allocator test start");
+pub fn run_group_crdt_flow_tests(local_node: &str, remote_node: &str) {
+    print_to_terminal(0, "crdt_core: group crdt flow test start");
     let local = chat_process_address(local_node);
     let remote = chat_process_address(remote_node);
 
-    // Create a new group on local; expect root thread counter = 0
-    let create_group_res = create_group(&local, "CRDT Core Group");
+    let create_group_res = create_group(&local, "Split CRDT Group");
     let group_id = create_group_res.group_id.clone();
 
-    // let groups_summaries = 
-
-    // Create one child thread on local to advance next_thread to 1
     let child = create_group_thread(&local, &group_id, None);
     assert_thread_suffix(&child.thread_id, 1);
 
-    // Send one message on local to advance next_message to 1
     let msg = send_group_message(&local, &group_id, None, "hello world");
-    assert_message_suffix(&msg.message.message_id, 0); // first message is :msg:0
+    assert_message_suffix(&msg.message.message_id, 0);
 
-    // Get remote SV then fetch update from local since that SV
-    let remote_sv = get_crdt_state_vector(&remote);
-    let update = crdt_update(&local, Some(remote_sv.state_vector)).unwrap_or_else(|e| {
-        fail_with(format!("crdt_update from local failed: {e}"))
-    });
-    if update.update_payload.is_empty() {
-        fail_with("expected non-empty update payload for replication");
+    let sv_err = crdt_group_state_vector(&remote, &group_id)
+        .err()
+        .unwrap_or_else(|| fail_with("expected state vector error before bootstrap"));
+    if !sv_err.contains("pending bootstrap") {
+        fail_with(format!(
+            "expected pending bootstrap error for state vector, got: {sv_err}"
+        ));
     }
 
-    // Apply update on remote
-    let applied = crdt_apply_update(&remote, &update.update_payload).unwrap_or_else(|e| {
-        fail_with(format!("crdt_apply_update on remote failed: {e}"))
-    });
+    let bad_sv_err = crdt_group_update(&local, &group_id, Some("!!bad!!".to_string()))
+        .err()
+        .unwrap_or_else(|| fail_with("expected error for bad group state vector"));
+    if !bad_sv_err.contains("Invalid state vector payload") {
+        fail_with(format!(
+            "expected invalid state vector payload error, got: {bad_sv_err}"
+        ));
+    }
+
+    let bad_apply_err = crdt_group_apply_update(&remote, &group_id, "!!bad!!")
+        .err()
+        .unwrap_or_else(|| fail_with("expected error for bad group update payload"));
+    if !bad_apply_err.contains("Invalid update payload") {
+        fail_with(format!(
+            "expected invalid update payload error, got: {bad_apply_err}"
+        ));
+    }
+
+    let full = crdt_group_update(&local, &group_id, None)
+        .unwrap_or_else(|e| fail_with(format!("crdt_group_update failed: {e}")));
+    if full.update_payload.is_empty() {
+        fail_with("expected non-empty full group update payload");
+    }
+
+    let applied = crdt_group_apply_update(&remote, &group_id, &full.update_payload)
+        .unwrap_or_else(|e| fail_with(format!("crdt_group_apply_update failed: {e}")));
     if !applied.applied {
-        fail_with("expected crdt_apply_update.applied = true on remote");
+        fail_with("expected crdt_group_apply_update.applied = true");
     }
 
-    // After replication: creating another thread on remote should continue counter (-> 2)
-    let new_child = create_group_thread(&remote, &group_id, None);
-    assert_thread_suffix(&new_child.thread_id, 2);
+    let remote_sv = crdt_group_state_vector(&remote, &group_id)
+        .unwrap_or_else(|e| fail_with(format!("state vector after bootstrap failed: {e}")));
 
-    // And sending another message on remote should continue message counter (-> 1)
+    let local_child = create_group_thread(&local, &group_id, None);
+    assert_thread_suffix(&local_child.thread_id, 2);
+
+    let incremental = crdt_group_update(&local, &group_id, Some(remote_sv.state_vector))
+        .unwrap_or_else(|e| fail_with(format!("incremental group update failed: {e}")));
+    if incremental.update_payload.is_empty() {
+        fail_with("expected non-empty incremental update payload");
+    }
+
+    let applied_inc = crdt_group_apply_update(&remote, &group_id, &incremental.update_payload)
+        .unwrap_or_else(|e| fail_with(format!("apply incremental update failed: {e}")));
+    if !applied_inc.applied {
+        fail_with("expected incremental apply to succeed");
+    }
+
+    let new_child = create_group_thread(&remote, &group_id, None);
+    assert_thread_suffix(&new_child.thread_id, 3);
+
     let new_msg = send_group_message(&remote, &group_id, None, "from remote");
     assert_message_suffix(&new_msg.message.message_id, 1);
 
-    print_to_terminal(0, "crdt_core: replication/allocator test done");
+    print_to_terminal(0, "crdt_core: group crdt flow test done");
 }
 
 // ---------- Local helpers ----------
@@ -145,77 +178,6 @@ struct MessageMetaLite {
     message_id: String,
 }
 
-#[derive(Deserialize)]
-struct GetGroupRes {
-    group: Option<serde_json::Value>,
-}
-
-/// Verifies the hypothesis: an incremental update (using remote SV) may not seed
-/// the remote with freshly created groups, whereas a full update (SV = None) does.
-/// This function logs the presence/absence of the group after each path and only
-/// fails if the full update does not populate the group.
-pub fn verify_incremental_vs_full_replication(local_node: &str, remote_node: &str) {
-    print_to_terminal(0, "crdt_core: verify incremental vs full replication start");
-    let local = chat_process_address(local_node);
-    let remote = chat_process_address(remote_node);
-
-    // 1) Create a new group on local
-    let create_group_res = create_group(&local, "CRDT Verify Group");
-    let group_id = create_group_res.group_id.clone();
-
-    // 2) Attempt to seed remote via INCREMENTAL update
-    let remote_sv = get_crdt_state_vector(&remote);
-    let inc = crdt_update(&local, Some(remote_sv.state_vector))
-        .unwrap_or_else(|e| fail_with(format!("incremental update failed: {e}")));
-    if inc.update_payload.is_empty() {
-        print_to_terminal(0, "crdt_core: WARN incremental update returned empty payload");
-    }
-    let _ = crdt_apply_update(&remote, &inc.update_payload)
-        .unwrap_or_else(|e| fail_with(format!("apply incremental failed: {e}")));
-    let exists_after_inc = get_group_exists(&remote, &group_id);
-    print_to_terminal(0, &format!(
-        "crdt_core: group present after incremental? {}",
-        exists_after_inc
-    ));
-
-    // 3) Seed remote via FULL update
-    let full = crdt_update(&local, None)
-        .unwrap_or_else(|e| fail_with(format!("full update failed: {e}")));
-    if full.update_payload.is_empty() {
-        print_to_terminal(0, "crdt_core: WARN full update returned empty payload");
-    }
-    let _ = crdt_apply_update(&remote, &full.update_payload)
-        .unwrap_or_else(|e| fail_with(format!("apply full failed: {e}")));
-    let exists_after_full = get_group_exists(&remote, &group_id);
-    print_to_terminal(0, &format!(
-        "crdt_core: group present after full? {}",
-        exists_after_full
-    ));
-
-    if !exists_after_full {
-        fail_with("expected group to be present on remote after full update");
-    }
-
-    print_to_terminal(0, "crdt_core: verify incremental vs full replication done");
-}
-
-fn get_group_exists(address: &Address, group_id: &str) -> bool {
-    let payload = json!({
-        "GetGroup": { "group_id": group_id }
-    });
-    let result: Result<GetGroupRes, String> = send_chat_rpc(address, payload);
-    match result {
-        Ok(res) => res.group.is_some(),
-        Err(err) => {
-            print_to_terminal(0, &format!(
-                "crdt_core: get_group_exists RPC error: {}",
-                err
-            ));
-            false
-        }
-    }
-}
-
 fn get_crdt_state_vector(address: &Address) -> CrdtStateVectorRes {
     let payload = json!({ "CrdtStateVector": null });
     let result: Result<CrdtStateVectorRes, String> = send_chat_rpc(address, payload);
@@ -238,6 +200,45 @@ fn crdt_update(address: &Address, state_vector: Option<String>) -> Result<CrdtUp
 fn crdt_apply_update(address: &Address, update_payload: &str) -> Result<CrdtApplyRes, String> {
     let payload = json!({
         "CrdtApplyUpdate": { "update_payload": update_payload }
+    });
+    send_chat_rpc(address, payload)
+}
+
+fn crdt_group_state_vector(
+    address: &Address,
+    group_id: &str,
+) -> Result<CrdtStateVectorRes, String> {
+    let payload = json!({
+        "CrdtGroupStateVector": { "group_id": group_id }
+    });
+    send_chat_rpc(address, payload)
+}
+
+fn crdt_group_update(
+    address: &Address,
+    group_id: &str,
+    state_vector: Option<String>,
+) -> Result<CrdtUpdateRes, String> {
+    let sv_value = state_vector.map(Value::from).unwrap_or(Value::Null);
+    let payload = json!({
+        "CrdtGroupUpdate": {
+            "group_id": group_id,
+            "state_vector": sv_value
+        }
+    });
+    send_chat_rpc(address, payload)
+}
+
+fn crdt_group_apply_update(
+    address: &Address,
+    group_id: &str,
+    update_payload: &str,
+) -> Result<CrdtApplyRes, String> {
+    let payload = json!({
+        "CrdtGroupApplyUpdate": {
+            "group_id": group_id,
+            "update_payload": update_payload
+        }
     });
     send_chat_rpc(address, payload)
 }
