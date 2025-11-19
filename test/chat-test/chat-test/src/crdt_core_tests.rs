@@ -1,64 +1,7 @@
-use hyperware_process_lib::{print_to_terminal, Address, ProcessId, Request, Response};
+use hyperware_process_lib::{print_to_terminal, Address, ProcessId, Request};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
-
-// ---------- Public entry points ----------
-
-pub fn run_crdt_http_endpoint_tests(chat_address: &Address) {
-    print_to_terminal(0, "crdt_core: http endpoints test start");
-
-    // 1) Get initial state vector
-    let sv = get_crdt_state_vector(chat_address);
-
-    // 2) Update with no state vector -> expect non-empty payload
-    let upd_no_sv = crdt_update(chat_address, None).unwrap_or_else(|e| fail_with(format!(
-        "crdt_update without SV returned error: {e}"
-    )));
-    if upd_no_sv.update_payload.is_empty() {
-        fail_with("crdt_update without SV should return non-empty payload");
-    }
-
-    // 3) Update with state vector -> expect empty payload (no new changes)
-    let upd_with_sv = crdt_update(chat_address, Some(sv.state_vector.clone()))
-        .unwrap_or_else(|e| fail_with(format!("crdt_update with SV returned error: {e}")));
-    if !upd_with_sv.update_payload.is_empty() {
-        print_to_terminal(0, &format!(
-            "WARN: expected empty update with SV; got {} bytes",
-            upd_with_sv.update_payload.len()
-        ));
-    }
-
-    // 4) Bad base64 for state vector -> error
-    let bad_sv_err = crdt_update(chat_address, Some("!!not-base64!!".to_string()))
-        .err()
-        .unwrap_or_else(|| fail_with("expected crdt_update error for bad SV"));
-    if !bad_sv_err.contains("Invalid state vector payload") {
-        fail_with(format!(
-            "expected 'Invalid state vector payload' in error, got: {bad_sv_err}"
-        ));
-    }
-
-    // 5) Bad base64 for apply update -> error
-    let bad_apply_err = crdt_apply_update(chat_address, "!!not-base64!!").err().unwrap_or_else(|| {
-        fail_with("expected crdt_apply_update error for bad update payload")
-    });
-    if !bad_apply_err.contains("Invalid update payload") {
-        fail_with(format!(
-            "expected 'Invalid update payload' in error, got: {bad_apply_err}"
-        ));
-    }
-
-    // 6) Apply a valid update payload -> applied = true
-    let good_update = upd_no_sv.update_payload;
-    let applied = crdt_apply_update(chat_address, &good_update)
-        .unwrap_or_else(|e| fail_with(format!("crdt_apply_update failed: {e}")));
-    if !applied.applied {
-        fail_with("expected crdt_apply_update.applied = true");
-    }
-
-    print_to_terminal(0, "crdt_core: http endpoints test done");
-}
 
 pub fn run_group_crdt_flow_tests(local_node: &str, remote_node: &str) {
     print_to_terminal(0, "crdt_core: group crdt flow test start");
@@ -177,33 +120,6 @@ struct SendGroupMessageRes {
 struct MessageMetaLite {
     message_id: String,
 }
-
-fn get_crdt_state_vector(address: &Address) -> CrdtStateVectorRes {
-    let payload = json!({ "CrdtStateVector": null });
-    let result: Result<CrdtStateVectorRes, String> = send_chat_rpc(address, payload);
-    unwrap_chat_result(result)
-}
-
-fn crdt_update(address: &Address, state_vector: Option<String>) -> Result<CrdtUpdateRes, String> {
-    let sv_value = match state_vector {
-        Some(s) => Value::String(s),
-        None => Value::Null,
-    };
-    let payload = json!({
-        "CrdtUpdate": {
-            "state_vector": sv_value
-        }
-    });
-    send_chat_rpc(address, payload)
-}
-
-fn crdt_apply_update(address: &Address, update_payload: &str) -> Result<CrdtApplyRes, String> {
-    let payload = json!({
-        "CrdtApplyUpdate": { "update_payload": update_payload }
-    });
-    send_chat_rpc(address, payload)
-}
-
 fn crdt_group_state_vector(
     address: &Address,
     group_id: &str,

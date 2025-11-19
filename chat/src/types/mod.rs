@@ -7,14 +7,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crdt::{
-    compile_membership_rules, AttachmentDescriptor, ChatCrdtManager, ChatDocState, Group,
-    GroupCounters, GroupCrdtManager, GroupDocState, GroupId, GroupMember, GroupMetadata,
-    GroupPermissions, GroupTier, GroupVisibility, MembershipActionKind, MembershipDecision,
-    MembershipDecisionStatus, MembershipProposal, MembershipRuleBox, MembershipRuleConfig,
-    MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId, Role,
-    SubscriberSyncState, Thread, ThreadId, ThreadParentRef, CHAT_DOC_ID,
+    compile_membership_rules, AttachmentDescriptor, Group, GroupCounters, GroupCrdtManager,
+    GroupDocState, GroupId, GroupMember, GroupMetadata, GroupPermissions, GroupTier,
+    GroupVisibility, MembershipActionKind, MembershipDecision, MembershipDecisionStatus,
+    MembershipProposal, MembershipRuleBox, MembershipRuleConfig, MembershipRuleError,
+    MembershipStatus, MessageId, MessageMeta, NodeId, Role, SubscriberSyncState, Thread, ThreadId,
+    ThreadParentRef,
 };
-use crate::{dump_crdt_snapshot, log_crdt_event, our};
+use crate::{log_crdt_event, our};
 use hyperware_crdt::CommitteeError;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -574,12 +574,6 @@ pub struct CrdtGroupStateVectorReq {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct CrdtUpdateReq {
-    #[serde(default)]
-    pub state_vector: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 pub struct CrdtGroupUpdateReq {
     pub group_id: GroupId,
     #[serde(default)]
@@ -589,11 +583,6 @@ pub struct CrdtGroupUpdateReq {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CrdtUpdateRes {
     pub doc_id: String,
-    pub update_payload: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct CrdtApplyReq {
     pub update_payload: String,
 }
 
@@ -684,8 +673,6 @@ pub struct ChatState {
     #[serde(skip)]
     pub membership_rule_cache: HashMap<GroupId, Vec<MembershipRuleBox>>,
     #[serde(skip)]
-    pub dm_crdt_manager: Option<ChatCrdtManager>,
-    #[serde(skip)]
     pub group_doc_managers: HashMap<GroupId, GroupCrdtManager>,
     #[serde(skip)]
     pub groups_pending_bootstrap: HashSet<GroupId>,
@@ -713,7 +700,6 @@ impl Default for ChatState {
             node_profiles: HashMap::new(),
             groups: HashMap::new(),
             membership_rule_cache: HashMap::new(),
-            dm_crdt_manager: None,
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
         }
@@ -812,14 +798,10 @@ impl<'de> Deserialize<'de> for ChatState {
             node_profiles: data.node_profiles,
             groups: data.groups,
             membership_rule_cache: HashMap::new(),
-            dm_crdt_manager: None,
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
         };
 
-        if let Err(err) = state.rebuild_dm_crdt_manager() {
-            println!("Failed to rebuild DM CRDT manager from snapshot: {:?}", err);
-        }
         if let Err(err) = state.rebuild_group_doc_managers() {
             println!(
                 "Failed to rebuild group CRDT managers from snapshot: {:?}",
@@ -832,13 +814,6 @@ impl<'de> Deserialize<'de> for ChatState {
 }
 
 impl ChatState {
-    pub fn rebuild_dm_crdt_manager(&mut self) -> Result<(), CommitteeError> {
-        let snapshot = ChatDocState::from(&*self);
-        let manager = ChatCrdtManager::from_snapshot(CHAT_DOC_ID, snapshot)?;
-        self.dm_crdt_manager = Some(manager);
-        Ok(())
-    }
-
     pub fn rebuild_group_doc_managers(&mut self) -> Result<(), CommitteeError> {
         self.group_doc_managers.clear();
         self.groups_pending_bootstrap.clear();
@@ -859,41 +834,6 @@ impl ChatState {
             .as_ref()
             .map(|meta| meta.creator_id == our().node)
             .unwrap_or(false)
-    }
-
-    pub fn commit_dm_crdt(&mut self) -> Result<(), CommitteeError> {
-        if self.dm_crdt_manager.is_none() {
-            self.rebuild_dm_crdt_manager()?;
-        }
-
-        let snapshot = ChatDocState::from(&*self);
-        dump_crdt_snapshot(&snapshot, "commit_dm");
-
-        if let Some(manager) = self.dm_crdt_manager.as_mut() {
-            manager.refresh_with_snapshot(snapshot)?;
-            let doc = manager.doc();
-            let state_vector = doc.state_vector();
-            log_crdt_event(doc.id(), "commit_dm_crdt", &state_vector, None);
-            manager.set_last_state_vector(state_vector);
-        }
-
-        Ok(())
-    }
-
-    pub fn commit_dm_crdt_or_log(&mut self, context: &str) {
-        if let Err(err) = self.commit_dm_crdt() {
-            println!("Failed to commit DM CRDT state ({}): {:?}", context, err);
-        }
-    }
-
-    pub fn ensure_dm_crdt_ready(&mut self) -> Result<&mut ChatCrdtManager, CommitteeError> {
-        if self.dm_crdt_manager.is_none() {
-            self.rebuild_dm_crdt_manager()?;
-        }
-        Ok(self
-            .dm_crdt_manager
-            .as_mut()
-            .expect("DM CRDT manager must be initialised"))
     }
 
     pub fn group_needs_bootstrap(&self, group_id: &GroupId) -> bool {
