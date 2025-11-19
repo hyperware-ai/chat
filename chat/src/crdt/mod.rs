@@ -7,11 +7,15 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Chat, ChatKey, ChatState, Settings, UserProfile};
 
 pub mod schema;
+pub use schema::compile_membership_rules;
 pub use schema::{
-    AttachmentDescriptor, GroupHubSet, GroupId, GroupMember, GroupMetadata, GroupPermissions,
-    GroupRole, GroupSubscriberSet, GroupThread, GroupTier, GroupVisibility, MembershipRuleConfig,
-    MembershipRuleId, MembershipStatus, MessageId, MessageMeta, MessageReactionMeta, NodeId,
-    StableIdAllocator, SubscriberSyncState, ThreadId, ThreadParentRef, ThreadSummary,
+    AttachmentDescriptor, DictatorRule, Group, GroupHubSet, GroupId, GroupMember, GroupMetadata,
+    GroupPermissions, GroupSubscriberSet, GroupTier, GroupVisibility, MembershipActionKind,
+    MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRule,
+    MembershipRuleBox, MembershipRuleConfig, MembershipRuleError, MembershipRuleId,
+    MembershipStatus, MessageId, MessageMeta, MessageReactionMeta, MultiDictatorRule, NodeId, Role,
+    StableIdAllocator, SubscriberSyncState, TallyVoteRule, Thread, ThreadId, ThreadParentRef,
+    ThreadSummary, TokenThresholdRule,
 };
 
 pub const CHAT_DOC_ID: &str = "chat:dm_state";
@@ -69,7 +73,7 @@ impl ChatCrdtManager {
 }
 
 /// Snapshot of the chat application state that is safe to replicate via CRDT.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct ChatDocState {
     pub profile: UserProfile,
     pub chats: HashMap<String, Chat>,
@@ -80,21 +84,9 @@ pub struct ChatDocState {
     #[serde(default)]
     pub node_profiles: HashMap<String, UserProfile>,
     #[serde(default)]
-    pub groups: GroupDocState,
-}
-
-impl Default for ChatDocState {
-    fn default() -> Self {
-        ChatDocState {
-            profile: UserProfile::default(),
-            chats: HashMap::new(),
-            chat_keys: HashMap::new(),
-            settings: Settings::default(),
-            message_sequence_counters: HashMap::new(),
-            node_profiles: HashMap::new(),
-            groups: GroupDocState::default(),
-        }
-    }
+    pub groups: HashMap<GroupId, Group>,
+    #[serde(default)]
+    pub group_stable_id_allocator: StableIdAllocator,
 }
 
 impl From<&ChatState> for ChatDocState {
@@ -106,7 +98,8 @@ impl From<&ChatState> for ChatDocState {
             settings: runtime.settings.clone(),
             message_sequence_counters: runtime.message_sequence_counters.clone(),
             node_profiles: runtime.node_profiles.clone(),
-            groups: GroupDocState::default(),
+            groups: runtime.groups.clone(),
+            group_stable_id_allocator: runtime.group_stable_id_allocator.clone(),
         }
     }
 }
@@ -120,30 +113,10 @@ impl ChatDocState {
         runtime.settings = self.settings.clone();
         runtime.message_sequence_counters = self.message_sequence_counters.clone();
         runtime.node_profiles = self.node_profiles.clone();
+        runtime.groups = self.groups.clone();
+        runtime.group_stable_id_allocator = self.group_stable_id_allocator.clone();
+        runtime.membership_rule_cache.clear();
     }
-}
-
-/// Placeholder for upcoming group-chat replication data.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct GroupDocState {
-    #[serde(default)]
-    pub metadata: HashMap<GroupId, GroupMetadata>,
-    #[serde(default)]
-    pub roles: HashMap<GroupId, HashMap<String, GroupRole>>,
-    #[serde(default)]
-    pub members: HashMap<GroupId, HashMap<NodeId, GroupMember>>,
-    #[serde(default)]
-    pub hubs: HashMap<GroupId, GroupHubSet>,
-    #[serde(default)]
-    pub subscribers: HashMap<GroupId, GroupSubscriberSet>,
-    #[serde(default)]
-    pub membership_rules: HashMap<GroupId, Vec<MembershipRuleConfig>>,
-    #[serde(default)]
-    pub threads: HashMap<ThreadId, GroupThread>,
-    #[serde(default)]
-    pub messages: HashMap<MessageId, MessageMeta>,
-    #[serde(default)]
-    pub stable_id_allocator: StableIdAllocator,
 }
 
 #[cfg(test)]

@@ -1,28 +1,31 @@
-#[allow(unused_imports)]
-use crate::hyperware::process::tester::{FailResponse, Response as TesterResponse};
+// Use absolute paths within the macro to avoid requiring imports at call sites.
 
 #[macro_export]
 macro_rules! fail {
     ($test:expr) => {
-        Response::new()
-            .body(TesterResponse::Run(Err(FailResponse {
+        ::hyperware_process_lib::Response::new()
+            .body($crate::hyperware::process::tester::Response::Run(Err(
+                $crate::hyperware::process::tester::FailResponse {
                 test: $test.into(),
                 file: file!().into(),
                 line: line!(),
                 column: column!(),
-            })))
+            },
+            )))
             .send()
             .unwrap();
         panic!("")
     };
     ($test:expr, $file:expr, $line:expr, $column:expr) => {
-        Response::new()
-            .body(TesterResponse::Run(Err(FailResponse {
+        ::hyperware_process_lib::Response::new()
+            .body($crate::hyperware::process::tester::Response::Run(Err(
+                $crate::hyperware::process::tester::FailResponse {
                 test: $test.into(),
                 file: $file.into(),
                 line: $line,
                 column: $column,
-            })))
+            },
+            )))
             .send()
             .unwrap();
         panic!("")

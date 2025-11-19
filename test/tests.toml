@@ -1,7 +1,7 @@
 runtime = { FetchVersion = "latest" }
 persist_home = false
 runtime_build_release = false
-always_print_node_output = true
+always_print_node_output = false
 
 [[tests]]
 dependency_package_paths = [".."]

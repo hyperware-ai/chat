@@ -367,6 +367,8 @@ impl ChatState {
 
     // CHAT MANAGEMENT ENDPOINTS
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[local]
     #[http]
     async fn create_chat(&mut self, req: CreateChatReq) -> Result<Chat, String> {
@@ -418,6 +420,8 @@ impl ChatState {
         Ok(chat)
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[local]
     #[http]
     async fn get_chats(&self) -> Result<Vec<Chat>, String> {
@@ -431,6 +435,8 @@ impl ChatState {
         Ok(chats)
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[local]
     #[http]
     async fn get_chat(&self, req: GetChatReq) -> Result<Chat, String> {
@@ -441,7 +447,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
@@ -497,6 +503,8 @@ impl ChatState {
         Ok(messages)
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn get_sync_hash(&self, req: GetSyncHashReq) -> Result<SyncHashInfo, String> {
         let chat = self
@@ -536,6 +544,8 @@ impl ChatState {
         })
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn get_all_sync_hashes(&self) -> Result<Vec<SyncHashInfo>, String> {
         let mut sync_hashes = Vec::new();
@@ -576,7 +586,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[http]
     async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
         self.chats
@@ -587,10 +597,97 @@ impl ChatState {
         Ok("Chat deleted".to_string())
     }
 
+    // GROUP OPERATIONS
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn create_group(&mut self, req: CreateGroupReq) -> Result<CreateGroupRes, String> {
+        self.create_group_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn list_groups(&self) -> Result<ListGroupsRes, String> {
+        Ok(self.list_groups_state())
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn get_group(&self, req: GetGroupReq) -> Result<GetGroupRes, String> {
+        Ok(self.get_group_state(req))
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn create_group_thread(
+        &mut self,
+        req: CreateGroupThreadReq,
+    ) -> Result<CreateGroupThreadRes, String> {
+        self.create_group_thread_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn send_group_message(
+        &mut self,
+        req: SendGroupMessageReq,
+    ) -> Result<SendGroupMessageRes, String> {
+        self.send_group_message_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn invite_group_member(
+        &mut self,
+        req: InviteGroupMemberReq,
+    ) -> Result<MembershipDecisionRes, String> {
+        let decision = self
+            .invite_member(
+                &req.group_id,
+                our().node.clone(),
+                req.candidate,
+                req.role_id,
+            )
+            .map_err(|err| err.to_string())?;
+        Ok(MembershipDecisionRes { decision })
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn approve_group_membership(
+        &mut self,
+        req: ApproveGroupMembershipReq,
+    ) -> Result<MembershipDecisionRes, String> {
+        let decision = self
+            .approve_membership(&req.group_id, &req.proposal_id, our().node.clone())
+            .map_err(|err| err.to_string())?;
+        Ok(MembershipDecisionRes { decision })
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn remove_group_member(
+        &mut self,
+        req: RemoveGroupMemberReq,
+    ) -> Result<MembershipDecisionRes, String> {
+        let decision = self
+            .remove_member(&req.group_id, our().node.clone(), req.member)
+            .map_err(|err| err.to_string())?;
+        Ok(MembershipDecisionRes { decision })
+    }
+
     // MESSAGE OPERATIONS
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[local]
     #[http]
     async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
@@ -685,7 +782,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    // #[remote]
+    #[remote]
     #[http]
     async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
         let mut broadcast_update: Option<WsServerMessage> = None;
@@ -737,6 +834,8 @@ impl ChatState {
         Err("Message not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn delete_message(&mut self, req: DeleteMessageReq) -> Result<String, String> {
         let mut chat_update: Option<WsServerMessage> = None;
@@ -775,6 +874,8 @@ impl ChatState {
         Err("Message not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn add_reaction(&mut self, req: AddReactionReq) -> Result<String, String> {
         let timestamp = std::time::SystemTime::now()
@@ -836,6 +937,8 @@ impl ChatState {
         Err("Message not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn forward_message(&mut self, req: ForwardMessageReq) -> Result<ChatMessage, String> {
         // Find the message to forward from the specified chat
@@ -922,6 +1025,8 @@ impl ChatState {
         Ok(forwarded_message)
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn remove_reaction(&mut self, req: RemoveReactionReq) -> Result<String, String> {
         let user = our().node.clone();
@@ -952,6 +1057,8 @@ impl ChatState {
 
     // BROWSER CHAT MANAGEMENT
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn create_chat_link(&mut self, req: CreateChatLinkReq) -> Result<String, String> {
         let key = format!("{:x}", rand::random::<u128>());
@@ -975,6 +1082,8 @@ impl ChatState {
         Ok(link)
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn get_chat_keys(&self) -> Result<Vec<ChatKey>, String> {
         Ok(self
@@ -985,6 +1094,8 @@ impl ChatState {
             .collect())
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn revoke_chat_key(&mut self, req: RevokeChatKeyReq) -> Result<String, String> {
         if let Some(key) = self.chat_keys.get_mut(&req.key) {
@@ -999,11 +1110,15 @@ impl ChatState {
 
     // SETTINGS
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn get_settings(&self) -> Result<Settings, String> {
         Ok(self.settings.clone())
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn update_settings(&mut self, settings: Settings) -> Result<String, String> {
         self.settings = settings;
@@ -1011,6 +1126,8 @@ impl ChatState {
         Ok("Settings updated".to_string())
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn update_profile(&mut self, profile: UserProfile) -> Result<String, String> {
         self.profile = profile.clone();
@@ -1049,6 +1166,8 @@ impl ChatState {
         Ok("Profile updated".to_string())
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn upload_profile_picture(
         &mut self,
@@ -1102,6 +1221,8 @@ impl ChatState {
         Ok(data_url)
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn get_profile(&self) -> Result<UserProfile, String> {
         Ok(self.profile.clone())
@@ -1109,6 +1230,8 @@ impl ChatState {
 
     // FILE AND VOICE NOTE OPERATIONS
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn upload_file(&mut self, req: UploadFileReq) -> Result<ChatMessage, String> {
         // Decode base64 data
@@ -1246,6 +1369,8 @@ impl ChatState {
         self.commit_to_crdt_or_log("upload_file");
         Ok(message)
     }
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn send_voice_note(&mut self, req: SendVoiceNoteReq) -> Result<ChatMessage, String> {
         let timestamp = std::time::SystemTime::now()
@@ -1826,6 +1951,8 @@ impl ChatState {
     }
     // SEARCH
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[http]
     async fn search_chats(&self, req: SearchChatsReq) -> Result<Vec<Chat>, String> {
         let query = req.query.to_lowercase();
@@ -1847,6 +1974,8 @@ impl ChatState {
 
     // CRDT Diagnostics
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[local]
     #[http]
     async fn crdt_state_vector(&mut self) -> Result<CrdtStateVectorRes, String> {
@@ -1867,6 +1996,8 @@ impl ChatState {
         })
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[local]
     #[http]
     async fn crdt_update(&mut self, req: CrdtUpdateReq) -> Result<CrdtUpdateRes, String> {
@@ -1908,6 +2039,8 @@ impl ChatState {
         })
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[local]
     #[http]
     async fn crdt_apply_update(&mut self, req: CrdtApplyReq) -> Result<CrdtApplyRes, String> {
