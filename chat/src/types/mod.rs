@@ -1,7 +1,7 @@
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,7 +17,7 @@ use crate::crdt::{
 use crate::pubsub::PubSubRegistry;
 use crate::log_crdt_event;
 use hyperware_process_lib::{our, Address, ProcessId, Request};
-use hyperware_crdt::CommitteeError;
+use hyperware_crdt::{CommitteeError, yrs::{StateVector, Encode, Decode}};
 use hyperware_pubsub_core::{
     whitelist::NodeId as BrokerNodeId,
     TopicId as BrokerTopicId,
@@ -596,6 +596,13 @@ pub struct CrdtUpdateRes {
 pub struct CrdtGroupApplyReq {
     pub group_id: GroupId,
     pub update_payload: String,
+    #[serde(default)]
+    pub acl_version: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CrdtGroupSnapshotReq {
+    pub group_id: GroupId,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -669,6 +676,12 @@ pub struct ChatState {
     #[serde(skip)]
     pub delivery_rx: Option<UnboundedReceiver<QueuedDelivery>>,
     #[serde(skip)]
+    pub replication_tx: ReplicationTx,
+    #[serde(skip)]
+    pub replication_rx: Option<UnboundedReceiver<ReplicationTask>>,
+    #[serde(skip)]
+    pub replication_queue: VecDeque<ReplicationTask>,
+    #[serde(skip)]
     pub pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     pub online_nodes: HashSet<String>,
     pub ws_connections: HashMap<u32, String>,
@@ -693,6 +706,7 @@ pub struct ChatState {
 impl Default for ChatState {
     fn default() -> Self {
         let (delivery_tx, delivery_rx) = DeliveryTx::new();
+        let (replication_tx, replication_rx) = ReplicationTx::new();
 
         ChatState {
             profile: UserProfile::default(),
@@ -703,6 +717,9 @@ impl Default for ChatState {
             delivery_tx,
             // represents "still available" versus "already consumed"
             delivery_rx: Some(delivery_rx),
+            replication_tx,
+            replication_rx: Some(replication_rx),
+            replication_queue: VecDeque::new(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
             online_nodes: HashSet::new(),
             ws_connections: HashMap::new(),
@@ -744,6 +761,43 @@ impl QueuedDelivery {
             node,
             event: DeliveryEvent::Flush,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ReplicationKind {
+    PushDelta,
+    PushSnapshot,
+    PullSnapshot,
+    PullDelta,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReplicationTask {
+    pub group_id: GroupId,
+    pub peer: String,
+    pub kind: ReplicationKind,
+    pub since: Option<Vec<u8>>,
+    pub attempt: u32,
+    pub not_before: u64,
+}
+
+#[derive(Clone)]
+pub struct ReplicationTx {
+    sender: UnboundedSender<ReplicationTask>,
+}
+
+impl ReplicationTx {
+    pub fn new() -> (Self, UnboundedReceiver<ReplicationTask>) {
+        let (sender, receiver) = mpsc::unbounded();
+        (ReplicationTx { sender }, receiver)
+    }
+
+    pub fn unbounded_send(
+        &self,
+        task: ReplicationTask,
+    ) -> Result<(), mpsc::TrySendError<ReplicationTask>> {
+        self.sender.unbounded_send(task)
     }
 }
 
@@ -793,6 +847,7 @@ impl<'de> Deserialize<'de> for ChatState {
 
         let data = ChatStateSerde::deserialize(deserializer)?;
         let (delivery_tx, delivery_rx) = DeliveryTx::new();
+        let (replication_tx, replication_rx) = ReplicationTx::new();
 
         let mut state = ChatState {
             profile: data.profile,
@@ -802,6 +857,9 @@ impl<'de> Deserialize<'de> for ChatState {
             message_sequence_counters: data.message_sequence_counters,
             delivery_tx,
             delivery_rx: Some(delivery_rx),
+            replication_tx,
+            replication_rx: Some(replication_rx),
+            replication_queue: VecDeque::new(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
             online_nodes: data.online_nodes,
             ws_connections: data.ws_connections,
@@ -828,6 +886,13 @@ impl<'de> Deserialize<'de> for ChatState {
 }
 
 impl ChatState {
+    pub(crate) fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
     pub fn rebuild_group_doc_managers(&mut self) -> Result<(), CommitteeError> {
         self.ensure_routing_defaults_for_all();
         self.group_doc_managers.clear();
@@ -844,6 +909,36 @@ impl ChatState {
         Ok(())
     }
 
+    pub(crate) fn enqueue_replication_task(&mut self, task: ReplicationTask) {
+        self.replication_queue.push_back(task);
+    }
+
+    pub(crate) fn next_ready_replication_task(&mut self, now: u64) -> Option<ReplicationTask> {
+        let mut rotate = 0usize;
+        while let Some(task) = self.replication_queue.pop_front() {
+            if task.not_before <= now {
+                return Some(task);
+            }
+            self.replication_queue.push_back(task);
+            rotate += 1;
+            if rotate >= self.replication_queue.len() {
+                break;
+            }
+        }
+        None
+    }
+
+    pub(crate) fn has_replication_task(
+        &self,
+        group_id: &GroupId,
+        peer: &str,
+        kind: ReplicationKind,
+    ) -> bool {
+        self.replication_queue.iter().any(|t| {
+            &t.group_id == group_id && t.peer == peer && std::mem::discriminant(&t.kind) == std::mem::discriminant(&kind)
+        })
+    }
+
     pub fn rebuild_pubsub_for_group(&mut self, group_id: &GroupId) {
         if let Some(group) = self.groups.get(group_id) {
             self.pubsub.rebuild_group(group_id, group);
@@ -857,6 +952,132 @@ impl ChatState {
             if group.routing.hub_topic.is_empty() || group.routing.subscriber_topic.is_empty() {
                 group.routing = GroupRoutingConfig::for_group(group_id);
             }
+        }
+    }
+
+    pub(crate) fn peer_state_vector(
+        &self,
+        group_id: &GroupId,
+        peer: &str,
+    ) -> Option<StateVector> {
+        let group = self.groups.get(group_id)?;
+        let sync = group.hubs.sync.get(peer)?;
+        let bytes = sync.last_state_vector.as_ref()?;
+        StateVector::decode_v1(bytes).ok()
+    }
+
+    pub(crate) fn update_peer_state_vector(
+        &mut self,
+        group_id: &GroupId,
+        peer: &str,
+        sv: &StateVector,
+    ) {
+        if let Some(group) = self.groups.get_mut(group_id) {
+            let now = Self::now_secs();
+            group.hubs.upsert_sync(
+                peer.to_string(),
+                HubSyncState {
+                    last_state_vector: Some(sv.encode_v1()),
+                    last_seen_ts: now,
+                    ..HubSyncState::default()
+                },
+            );
+        }
+    }
+
+    pub(crate) fn update_local_hub_sync_state(&mut self, group_id: &GroupId, sv: &StateVector) {
+        if let Some(group) = self.groups.get_mut(group_id) {
+            let now = Self::now_secs();
+            group.hubs.upsert_sync(
+                our().node.clone(),
+                HubSyncState {
+                    last_state_vector: Some(sv.encode_v1()),
+                    last_seen_ts: now,
+                    ..HubSyncState::default()
+                },
+            );
+        }
+    }
+
+    pub(crate) fn update_delivery_cursor(
+        &mut self,
+        group_id: &GroupId,
+        peer: &str,
+        is_hub: bool,
+        queue_id: String,
+    ) {
+        if let Some(group) = self.groups.get_mut(group_id) {
+            let now = Self::now_secs();
+            let cursors = if is_hub {
+                &mut group.delivery.hub_cursors
+            } else {
+                &mut group.delivery.subscriber_cursors
+            };
+            let entry = cursors.entry(peer.to_string()).or_insert_with(|| DeliveryCursor {
+                queue_id: queue_id.clone(),
+                last_offset: 0,
+                updated_at: now,
+            });
+            entry.queue_id = queue_id;
+            entry.last_offset = entry.last_offset.saturating_add(1);
+            entry.updated_at = now;
+        }
+    }
+
+    pub(crate) fn enqueue_replication_pushes(
+        &mut self,
+        group_id: &GroupId,
+        state_vector_bytes: Vec<u8>,
+    ) {
+        let now = Self::now_secs();
+        let Some(group) = self.groups.get(group_id) else {
+            return;
+        };
+        // Hubs
+        for hub in &group.hubs.active {
+            if hub == &our().node {
+                continue;
+            }
+            let since = self
+                .peer_state_vector(group_id, hub)
+                .map(|sv| sv.encode_v1());
+            let task = ReplicationTask {
+                group_id: group_id.clone(),
+                peer: hub.clone(),
+                kind: ReplicationKind::PushDelta,
+                since,
+                attempt: 0,
+                not_before: now,
+            };
+            self.replication_queue.push_back(task);
+        }
+
+        // Subscribers
+        for (node_id, member) in &group.members {
+            if node_id == &our().node {
+                continue;
+            }
+            if let Some(role) = group.roles.get(&member.role_id) {
+                if role.tier == GroupTier::Hub {
+                    continue;
+                }
+            }
+            let since = self
+                .peer_state_vector(group_id, node_id)
+                .map(|sv| sv.encode_v1());
+            self.replication_queue.push_back(ReplicationTask {
+                group_id: group_id.clone(),
+                peer: node_id.clone(),
+                kind: ReplicationKind::PushDelta,
+                since,
+                attempt: 0,
+                not_before: now,
+            });
+        }
+
+        // Ensure we have our own sync recorded
+        if let Ok(sv) = StateVector::decode_v1(&state_vector_bytes) {
+            self.update_local_hub_sync_state(group_id, &sv);
         }
     }
 
@@ -1077,15 +1298,16 @@ impl ChatState {
         let snapshot: GroupDocState = (group_id, group).into();
         let manager = self.ensure_group_doc_manager(group_id)?;
         manager.refresh_with_snapshot(snapshot)?;
-        let (state_vector, update_payload) = {
+        let state_vector = {
             let doc = manager.doc();
             let state_vector = doc.state_vector();
             log_crdt_event(doc.id(), "commit_group_crdt", &state_vector, None);
-            let update_payload = crate::base64_encode(&doc.encode_update_since(None));
-            (state_vector, update_payload)
+            state_vector
         };
-        manager.set_last_state_vector(state_vector);
-        self.publish_group_delta(group_id, &update_payload);
+        manager.set_last_state_vector(state_vector.clone());
+        self.update_local_hub_sync_state(group_id, &state_vector);
+        // enqueue per-peer fanout for hubs and subscribers
+        self.enqueue_replication_pushes(group_id, state_vector.encode_v1());
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use hyperware_crdt::yrs::{Decode, Encode, StateVector};
 use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
-    hyperapp::{send, sleep, spawn, source, SaveOptions},
+    hyperapp::{send, sleep, spawn, SaveOptions},
     our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use std::cmp::Ordering;
@@ -36,7 +36,7 @@ mod types;
 pub use crdt::GroupDocState;
 pub use types::*;
 
-use crate::crdt::Group;
+use crate::crdt::{Group, GroupId};
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
 const ICON: &str = include_str!("./icon");
@@ -318,6 +318,17 @@ impl ChatState {
         }
 
         self.bootstrap_pending_deliveries();
+
+        // Kick off replication worker loop (drives hub/subscriber fanout + bootstrap pulls)
+        let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
+        spawn(async move {
+            loop {
+                let body = serde_json::to_vec(&serde_json::json!({"ReplicationWork": {}}))
+                    .unwrap_or_default();
+                let _ = Request::new().target(self_addr.clone()).body(body).send();
+                let _ = sleep(5000).await;
+            }
+        });
 
         println!(
             "Chat app initialized on node: {} with {} chats",
@@ -2001,10 +2012,385 @@ impl ChatState {
         &mut self,
         req: CrdtGroupApplyReq,
     ) -> Result<CrdtApplyRes, String> {
-        let update_bytes = base64_decode(req.update_payload.trim())
-            .map_err(|e| format!("Invalid update payload: {e}"))?;
         let group_id = req.group_id.clone();
-        let was_missing = !self.groups.contains_key(&group_id);
+        self.apply_group_update_payload(
+            &group_id,
+            &req.update_payload,
+            "crdt_group_apply_update",
+            req.acl_version,
+        )?;
+        Ok(CrdtApplyRes { applied: true })
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_snapshot(
+        &mut self,
+        req: CrdtGroupSnapshotReq,
+    ) -> Result<CrdtUpdateRes, String> {
+        if self.group_needs_bootstrap(&req.group_id) {
+            return Err(format!(
+                "Group {} is pending bootstrap and cannot serve CRDT requests",
+                req.group_id
+            ));
+        }
+
+        self.require_hub_access(&req.group_id, &our().node)
+            .map_err(|err| format!("hub access denied: {}", err))?;
+
+        let manager = self
+            .ensure_group_doc_manager(&req.group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+
+        let (doc_id, state_vector, update_bytes) = {
+            let doc = manager.doc();
+            (
+                doc.id().to_string(),
+                doc.state_vector(),
+                doc.encode_update_since(None),
+            )
+        };
+
+        log_crdt_event(
+            &doc_id,
+            "crdt_group_snapshot",
+            &state_vector,
+            Some(update_bytes.len()),
+        );
+
+        let update_payload = base64_encode(&update_bytes);
+        Ok(CrdtUpdateRes {
+            doc_id,
+            update_payload,
+        })
+    }
+
+    #[local]
+    #[http]
+    async fn replication_work(&mut self) -> Result<String, String> {
+        let now = ChatState::now_secs();
+        self.enqueue_bootstrap_pulls(now);
+
+        let mut processed = 0usize;
+        while processed < 16 {
+            let Some(task) = self.next_ready_replication_task(now) else {
+                break;
+            };
+            self.process_replication_task(task).await;
+            processed += 1;
+        }
+
+        Ok(format!("replication processed {}", processed))
+    }
+
+    async fn process_replication_task(&mut self, task: ReplicationTask) {
+        let now = ChatState::now_secs();
+        match task.kind {
+            ReplicationKind::PushDelta | ReplicationKind::PushSnapshot => {
+                let is_hub = self
+                    .groups
+                    .get(&task.group_id)
+                    .map(|g| g.hubs.active.contains(&task.peer))
+                    .unwrap_or(false);
+
+                if is_hub {
+                    if let Err(err) = self.require_hub_access(&task.group_id, &our().node) {
+                        println!(
+                            "[REPL][{}] skip push to {} (local hub publish denied): {}",
+                            task.group_id, task.peer, err
+                        );
+                        return;
+                    }
+                } else if let Err(err) =
+                    self.require_subscriber_access(&task.group_id, &our().node)
+                {
+                    println!(
+                        "[REPL][{}] skip push to subscriber {} (local publish denied): {}",
+                        task.group_id, task.peer, err
+                    );
+                    return;
+                }
+
+                let sv_hint = task
+                    .since
+                    .as_ref()
+                    .and_then(|b| StateVector::decode_v1(b).ok())
+                    .or_else(|| self.peer_state_vector(&task.group_id, &task.peer));
+                let acl_version = self
+                    .pubsub
+                    .whitelist(&task.group_id)
+                    .map(|w| w.version());
+
+                let manager = match self.ensure_group_doc_manager(&task.group_id) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        println!(
+                            "[REPL][{}] cannot load doc for {}: {:?}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                        return;
+                    }
+                };
+                let doc = manager.doc();
+                let update_bytes = if let ReplicationKind::PushSnapshot = task.kind {
+                    doc.encode_update_since(None)
+                } else {
+                    doc.encode_update_since(sv_hint.as_ref())
+                };
+                let state_vector = doc.state_vector();
+                if update_bytes.is_empty() {
+                    self.update_peer_state_vector(&task.group_id, &task.peer, &state_vector);
+                    self.update_delivery_cursor(
+                        &task.group_id,
+                        &task.peer,
+                        is_hub,
+                        if is_hub {
+                            self.groups
+                                .get(&task.group_id)
+                                .map(|g| g.routing.hub_topic.clone())
+                                .unwrap_or_default()
+                        } else {
+                            self.groups
+                                .get(&task.group_id)
+                                .map(|g| g.routing.subscriber_topic.clone())
+                                .unwrap_or_default()
+                        },
+                    );
+                    return;
+                }
+
+                let payload = base64_encode(&update_bytes);
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "CrdtGroupApplyUpdate": {
+                        "group_id": task.group_id,
+                        "update_payload": payload,
+                        "acl_version": acl_version,
+                    }
+                }))
+                .unwrap_or_default();
+
+                let target = Address::from((task.peer.as_str(), OUR_PROCESS_ID));
+                let req = Request::new().target(target).body(body).expects_response(5);
+                match send::<CrdtApplyRes>(req).await {
+                    Ok(res) => {
+                        if res.applied {
+                            self.update_peer_state_vector(
+                                &task.group_id,
+                                &task.peer,
+                                &state_vector,
+                            );
+                            let queue_id = if is_hub {
+                                self.groups
+                                    .get(&task.group_id)
+                                    .map(|g| g.routing.hub_topic.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                self.groups
+                                    .get(&task.group_id)
+                                    .map(|g| g.routing.subscriber_topic.clone())
+                                    .unwrap_or_default()
+                            };
+                            self.update_delivery_cursor(
+                                &task.group_id,
+                                &task.peer,
+                                is_hub,
+                                queue_id,
+                            );
+                        } else {
+                            self.schedule_backoff(task, now);
+                        }
+                    }
+                    Err(err) => {
+                        println!(
+                            "[REPL][{}] push to {} failed: {:?}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                    }
+                }
+            }
+            ReplicationKind::PullSnapshot => {
+                if let Some(res) = self
+                    .fetch_snapshot_from_peer(&task.group_id, &task.peer)
+                    .await
+                {
+                    if let Err(err) = self.apply_group_update_payload(
+                        &task.group_id,
+                        &res.update_payload,
+                        "replication_pull_snapshot",
+                        None,
+                    ) {
+                        println!(
+                            "[REPL][{}] failed to apply snapshot from {}: {}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                    } else {
+                        self.groups_pending_bootstrap.remove(&task.group_id);
+                    }
+                } else {
+                    self.schedule_backoff(task, now);
+                }
+            }
+            ReplicationKind::PullDelta => {
+                let sv = self
+                    .group_doc_managers
+                    .get(&task.group_id)
+                    .and_then(|mgr| mgr.last_state_vector().cloned());
+                if let Some(res) = self
+                    .fetch_update_from_peer(&task.group_id, &task.peer, sv)
+                    .await
+                {
+                    if res.update_payload.is_empty() {
+                        return;
+                    }
+                    if let Err(err) = self.apply_group_update_payload(
+                        &task.group_id,
+                        &res.update_payload,
+                        "replication_pull_delta",
+                        None,
+                    ) {
+                        println!(
+                            "[REPL][{}] failed to apply delta from {}: {}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                    }
+                } else {
+                    self.schedule_backoff(task, now);
+                }
+            }
+        }
+    }
+
+    fn schedule_backoff(&mut self, mut task: ReplicationTask, now: u64) {
+        let delay = (1u64 << (task.attempt.min(6))) * 2;
+        task.attempt = task.attempt.saturating_add(1);
+        task.not_before = now + delay;
+        self.replication_queue.push_back(task);
+    }
+
+    fn enqueue_bootstrap_pulls(&mut self, now: u64) {
+        let pending: Vec<GroupId> = self
+            .groups
+            .keys()
+            .cloned()
+            .filter(|g| self.group_needs_bootstrap(g))
+            .collect();
+        for group_id in pending {
+            let peers: Vec<String> = self
+                .groups
+                .get(&group_id)
+                .map(|g| {
+                    g.hubs
+                        .active
+                        .iter()
+                        .filter(|p| *p != &our().node)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for peer in peers {
+                if self.has_replication_task(&group_id, &peer, ReplicationKind::PullSnapshot) {
+                    continue;
+                }
+                self.replication_queue.push_back(ReplicationTask {
+                    group_id: group_id.clone(),
+                    peer,
+                    kind: ReplicationKind::PullSnapshot,
+                    since: None,
+                    attempt: 0,
+                    not_before: now,
+                });
+            }
+        }
+    }
+
+    async fn fetch_update_from_peer(
+        &self,
+        group_id: &GroupId,
+        peer: &str,
+        state_vector: Option<StateVector>,
+    ) -> Option<CrdtUpdateRes> {
+        let target = Address::from((peer, OUR_PROCESS_ID));
+        let sv_encoded = state_vector
+            .as_ref()
+            .map(|sv| base64_encode(&sv.encode_v1()));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "CrdtGroupUpdate": {
+                "group_id": group_id,
+                "state_vector": sv_encoded,
+            }
+        }))
+        .ok()?;
+        let request = Request::new()
+            .target(target)
+            .body(body)
+            .expects_response(5);
+
+        match send::<CrdtUpdateRes>(request).await {
+            Ok(res) => Some(res),
+            Err(err) => {
+                println!(
+                    "[REPL][{}] failed to fetch delta from {}: {:?}",
+                    group_id, peer, err
+                );
+                None
+            }
+        }
+    }
+
+    async fn fetch_snapshot_from_peer(
+        &self,
+        group_id: &GroupId,
+        peer: &str,
+    ) -> Option<CrdtUpdateRes> {
+        let target = Address::from((peer, OUR_PROCESS_ID));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "CrdtGroupSnapshot": { "group_id": group_id }
+        }))
+        .ok()?;
+        let request = Request::new()
+            .target(target)
+            .body(body)
+            .expects_response(10);
+
+        match send::<CrdtUpdateRes>(request).await {
+            Ok(res) => Some(res),
+            Err(err) => {
+                println!(
+                    "[REPL][{}] failed to fetch snapshot from {}: {:?}",
+                    group_id, peer, err
+                );
+                None
+            }
+        }
+    }
+
+    fn apply_group_update_payload(
+        &mut self,
+        group_id: &GroupId,
+        update_payload: &str,
+        context: &str,
+        incoming_acl_version: Option<u64>,
+    ) -> Result<(), String> {
+        if let Some(in_acl) = incoming_acl_version {
+            if let Some(local_wl) = self.pubsub.whitelist(group_id) {
+                let local_version = local_wl.version();
+                if in_acl != local_version {
+                    println!(
+                        "[CRDT][{}] ACL version drift: incoming={} local={}",
+                        group_id, in_acl, local_version
+                    );
+                }
+            }
+        }
+
+        let update_bytes = base64_decode(update_payload.trim())
+            .map_err(|e| format!("Invalid update payload: {e}"))?;
+        let was_missing = !self.groups.contains_key(group_id);
         self.groups
             .entry(group_id.clone())
             .or_insert_with(Group::default);
@@ -2012,20 +2398,21 @@ impl ChatState {
             self.groups_pending_bootstrap.insert(group_id.clone());
         }
 
-        let enforce_acl = !was_missing && !self.group_needs_bootstrap(&group_id);
+        let enforce_acl = !was_missing && !self.group_needs_bootstrap(group_id);
         if enforce_acl {
-            self.require_hub_subscription(&group_id, &our().node)
+            self.require_hub_subscription(group_id, &our().node)
                 .map_err(|err| format!("hub subscription denied: {}", err))?;
         }
 
         let manager = self
-            .ensure_group_doc_manager(&group_id)
+            .ensure_group_doc_manager(group_id)
             .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
 
         let doc_id = manager.doc().id().to_string();
         println!(
-            "[CRDT][{}] context=crdt_group_apply_update incoming_update_bytes={}",
+            "[CRDT][{}] context={} incoming_update_bytes={}",
             doc_id,
+            context,
             update_bytes.len()
         );
 
@@ -2047,17 +2434,18 @@ impl ChatState {
         };
         log_crdt_event(
             &doc_id,
-            "crdt_group_apply_update",
+            context,
             &new_vector,
             Some(update_bytes.len()),
         );
-        manager.set_last_state_vector(new_vector);
+        manager.set_last_state_vector(new_vector.clone());
+        self.update_local_hub_sync_state(group_id, &new_vector);
 
         group_state.apply_into(self);
-        self.mark_group_bootstrapped(&group_id);
-
-        Ok(CrdtApplyRes { applied: true })
+        self.mark_group_bootstrapped(group_id);
+        Ok(())
     }
+
 
 
     // WEBSOCKET HANDLERS
