@@ -19,6 +19,9 @@ rev = "ac43744"
 [dependencies.hyperware-crdt]
 path = "../../hyperware-crdt"
 
+[dependencies.hyperware-pubsub-core]
+path = "../../hyperware-pubsub"
+
 [dependencies.hyperware_process_lib]
 features = ["hyperapp"]
 git = "https://github.com/hyperware-ai/process_lib"

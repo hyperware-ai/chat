@@ -7,15 +7,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crdt::{
-    compile_membership_rules, AttachmentDescriptor, Group, GroupCounters, GroupCrdtManager,
-    GroupDocState, GroupId, GroupMember, GroupMetadata, GroupPermissions, GroupTier,
-    GroupVisibility, MembershipActionKind, MembershipDecision, MembershipDecisionStatus,
-    MembershipProposal, MembershipRuleBox, MembershipRuleConfig, MembershipRuleError,
-    MembershipStatus, MessageId, MessageMeta, NodeId, Role, SubscriberSyncState, Thread, ThreadId,
-    ThreadParentRef,
+    compile_membership_rules, AttachmentDescriptor, DeliveryCursor, Group, GroupCounters,
+    GroupCrdtManager, GroupDocState, GroupId, GroupMember, GroupMetadata, GroupPermissions,
+    GroupRoutingConfig, GroupTier, GroupVisibility, HubSyncState, MembershipActionKind,
+    MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRuleBox,
+    MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId,
+    Role, SubscriberSyncState, Thread, ThreadId, ThreadParentRef,
 };
-use crate::{log_crdt_event, our};
+use crate::pubsub::PubSubRegistry;
+use crate::log_crdt_event;
+use hyperware_process_lib::{our, Address, ProcessId, Request};
 use hyperware_crdt::CommitteeError;
+use hyperware_pubsub_core::{
+    whitelist::NodeId as BrokerNodeId,
+    TopicId as BrokerTopicId,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PushSubscription {
@@ -615,6 +621,7 @@ pub enum MembershipActionError {
     ProposalExists(String),
     ProposalNotFound(String),
     RuleError(MembershipRuleError),
+    PermissionDenied(String),
 }
 
 impl From<MembershipRuleError> for MembershipActionError {
@@ -640,6 +647,9 @@ impl fmt::Display for MembershipActionError {
                 write!(f, "proposal '{id}' not found")
             }
             MembershipActionError::RuleError(err) => write!(f, "rule error: {}", err),
+            MembershipActionError::PermissionDenied(msg) => {
+                write!(f, "permission denied: {}", msg)
+            }
         }
     }
 }
@@ -676,6 +686,8 @@ pub struct ChatState {
     pub group_doc_managers: HashMap<GroupId, GroupCrdtManager>,
     #[serde(skip)]
     pub groups_pending_bootstrap: HashSet<GroupId>,
+    #[serde(skip)]
+    pub pubsub: PubSubRegistry,
 }
 
 impl Default for ChatState {
@@ -702,6 +714,7 @@ impl Default for ChatState {
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
+            pubsub: PubSubRegistry::new(),
         }
     }
 }
@@ -800,6 +813,7 @@ impl<'de> Deserialize<'de> for ChatState {
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
+            pubsub: PubSubRegistry::new(),
         };
 
         if let Err(err) = state.rebuild_group_doc_managers() {
@@ -815,6 +829,7 @@ impl<'de> Deserialize<'de> for ChatState {
 
 impl ChatState {
     pub fn rebuild_group_doc_managers(&mut self) -> Result<(), CommitteeError> {
+        self.ensure_routing_defaults_for_all();
         self.group_doc_managers.clear();
         self.groups_pending_bootstrap.clear();
         for (group_id, group) in &self.groups {
@@ -825,7 +840,192 @@ impl ChatState {
                 self.groups_pending_bootstrap.insert(group_id.clone());
             }
         }
+        self.pubsub.rebuild_all(&self.groups);
         Ok(())
+    }
+
+    pub fn rebuild_pubsub_for_group(&mut self, group_id: &GroupId) {
+        if let Some(group) = self.groups.get(group_id) {
+            self.pubsub.rebuild_group(group_id, group);
+        } else {
+            self.pubsub.remove_group(group_id);
+        }
+    }
+
+    fn ensure_routing_defaults_for_all(&mut self) {
+        for (group_id, group) in self.groups.iter_mut() {
+            if group.routing.hub_topic.is_empty() || group.routing.subscriber_topic.is_empty() {
+                group.routing = GroupRoutingConfig::for_group(group_id);
+            }
+        }
+    }
+
+    pub(crate) fn require_hub_access(
+        &self,
+        group_id: &GroupId,
+        node_id: &NodeId,
+    ) -> Result<(), String> {
+        let group = self
+            .groups
+            .get(group_id)
+            .ok_or_else(|| "group not found".to_string())?;
+        let Some(whitelist) = self.pubsub.whitelist(group_id) else {
+            return Err("whitelist missing".into());
+        };
+        if group.routing.hub_topic.is_empty() {
+            return Err("hub topic unavailable".into());
+        }
+        let topic = BrokerTopicId::new(group.routing.hub_topic.clone());
+        let node = BrokerNodeId::new(node_id.clone());
+        if whitelist
+            .publish_scope(&node, &topic, SystemTime::now())
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "node {} lacks publish access for group {}",
+                node_id, group_id
+            ))
+        }
+    }
+
+    pub(crate) fn require_hub_subscription(
+        &self,
+        group_id: &GroupId,
+        node_id: &NodeId,
+    ) -> Result<(), String> {
+        let group = self
+            .groups
+            .get(group_id)
+            .ok_or_else(|| "group not found".to_string())?;
+        let Some(whitelist) = self.pubsub.whitelist(group_id) else {
+            return Err("whitelist missing".into());
+        };
+        if group.routing.hub_topic.is_empty() {
+            return Err("hub topic unavailable".into());
+        }
+        let topic = BrokerTopicId::new(group.routing.hub_topic.clone());
+        let node = BrokerNodeId::new(node_id.clone());
+        if whitelist
+            .subscribe_scope(&node, &topic, SystemTime::now())
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "node {} lacks hub subscription for group {}",
+                node_id, group_id
+            ))
+        }
+    }
+
+    pub(crate) fn require_subscriber_access(
+        &self,
+        group_id: &GroupId,
+        node_id: &NodeId,
+    ) -> Result<(), String> {
+        let group = self
+            .groups
+            .get(group_id)
+            .ok_or_else(|| "group not found".to_string())?;
+        let Some(whitelist) = self.pubsub.whitelist(group_id) else {
+            return Err("whitelist missing".into());
+        };
+        if group.routing.subscriber_topic.is_empty() {
+            return Err("subscriber topic unavailable".into());
+        }
+        let topic = BrokerTopicId::new(group.routing.subscriber_topic.clone());
+        let node = BrokerNodeId::new(node_id.clone());
+        if whitelist
+            .subscribe_scope(&node, &topic, SystemTime::now())
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "node {} lacks subscribe access for group {}",
+                node_id, group_id
+            ))
+        }
+    }
+
+    fn require_group_permission(
+        &self,
+        group_id: &GroupId,
+        node_id: &NodeId,
+        permission: u64,
+    ) -> Result<(), String> {
+        let group = self
+            .groups
+            .get(group_id)
+            .ok_or_else(|| "group not found".to_string())?;
+        let member = group
+            .members
+            .get(node_id)
+            .ok_or_else(|| format!("{} is not a member of {}", node_id, group_id))?;
+        if member.status != MembershipStatus::Active {
+            return Err(format!(
+                "member {} is not active in group {}",
+                node_id, group_id
+            ));
+        }
+        let role = group.roles.get(&member.role_id).ok_or_else(|| {
+            format!(
+                "role {} for {} missing in group {}",
+                member.role_id, node_id, group_id
+            )
+        })?;
+        if role.permissions.contains(permission) {
+            Ok(())
+        } else {
+            Err(format!(
+                "node {} lacks required permission in group {}",
+                node_id, group_id
+            ))
+        }
+    }
+
+    pub fn publish_group_delta(&self, group_id: &GroupId, update_payload: &str) {
+        let local_node = our().node.clone();
+        if let Err(err) = self.require_hub_access(group_id, &local_node) {
+            println!(
+                "[CRDT][{}] skip publish: node {} lacks hub access ({})",
+                group_id, local_node, err
+            );
+            return;
+        }
+        self.propagate_group_update(group_id, update_payload);
+    }
+
+    fn propagate_group_update(&self, group_id: &GroupId, update_payload: &str) {
+        let Some(group) = self.groups.get(group_id) else {
+            return;
+        };
+        for hub in &group.hubs.active {
+            if hub == &our().node {
+                continue;
+            }
+            let body = json!({
+                "CrdtGroupApplyUpdate": {
+                    "group_id": group_id,
+                    "update_payload": update_payload,
+                }
+            });
+            if let Ok(bytes) = serde_json::to_vec(&body) {
+                let _ = Request::new()
+                    .target(Address {
+                        node: hub.clone(),
+                        process: ProcessId::new(
+                            Some(crate::OUR_PROCESS_ID.0),
+                            crate::OUR_PROCESS_ID.1,
+                            crate::OUR_PROCESS_ID.2,
+                        ),
+                    })
+                    .body(bytes)
+                    .send();
+            }
+        }
     }
 
     fn should_seed_group_doc(&self, group: &Group) -> bool {
@@ -853,8 +1053,7 @@ impl ChatState {
                 CommitteeError::Observer(format!("missing group {} for CRDT", group_id))
             })?;
             let manager = GroupCrdtManager::from_group(group_id, group)?;
-            self.group_doc_managers
-                .insert(group_id.clone(), manager);
+            self.group_doc_managers.insert(group_id.clone(), manager);
         }
 
         Ok(self
@@ -874,13 +1073,19 @@ impl ChatState {
         let group = self.groups.get(group_id).ok_or_else(|| {
             CommitteeError::Observer(format!("missing group {} for CRDT commit", group_id))
         })?;
+        self.pubsub.rebuild_group(group_id, group);
         let snapshot: GroupDocState = (group_id, group).into();
         let manager = self.ensure_group_doc_manager(group_id)?;
         manager.refresh_with_snapshot(snapshot)?;
-        let doc = manager.doc();
-        let state_vector = doc.state_vector();
-        log_crdt_event(doc.id(), "commit_group_crdt", &state_vector, None);
+        let (state_vector, update_payload) = {
+            let doc = manager.doc();
+            let state_vector = doc.state_vector();
+            log_crdt_event(doc.id(), "commit_group_crdt", &state_vector, None);
+            let update_payload = crate::base64_encode(&doc.encode_update_since(None));
+            (state_vector, update_payload)
+        };
         manager.set_last_state_vector(state_vector);
+        self.publish_group_delta(group_id, &update_payload);
         Ok(())
     }
 
@@ -918,6 +1123,7 @@ impl ChatState {
         self.group_doc_managers.remove(group_id);
         self.groups_pending_bootstrap.remove(group_id);
         self.membership_rule_cache.remove(group_id);
+        self.pubsub.remove_group(group_id);
         removed
     }
 
@@ -1016,6 +1222,7 @@ impl ChatState {
         );
 
         let mut group = Group::new(metadata);
+        group.routing = GroupRoutingConfig::for_group(&group_id);
         group.counters = counters;
 
         let owner_role = Role::new(
@@ -1048,12 +1255,35 @@ impl ChatState {
             ),
         );
         group.hubs.active.insert(creator.clone());
+        group.hubs.upsert_sync(
+            creator.clone(),
+            HubSyncState {
+                last_seen_ts: now,
+                ..HubSyncState::default()
+            },
+        );
         group.subscribers.entries.insert(
             creator.clone(),
             SubscriberSyncState {
                 last_state_vector: None,
                 last_snapshot_digest: None,
                 last_seen_ts: now,
+            },
+        );
+        group.delivery.hub_cursors.insert(
+            creator.clone(),
+            DeliveryCursor {
+                queue_id: group.routing.hub_topic.clone(),
+                last_offset: 0,
+                updated_at: now,
+            },
+        );
+        group.delivery.subscriber_cursors.insert(
+            creator.clone(),
+            DeliveryCursor {
+                queue_id: group.routing.subscriber_topic.clone(),
+                last_offset: 0,
+                updated_at: now,
             },
         );
 
@@ -1103,59 +1333,68 @@ impl ChatState {
         &mut self,
         mut req: CreateGroupThreadReq,
     ) -> Result<CreateGroupThreadRes, String> {
+        self.require_group_permission(
+            &req.group_id,
+            &our().node,
+            GroupPermissions::CREATE_THREADS,
+        )
+        .map_err(|err| format!("cannot create thread: {}", err))?;
+        self.require_subscriber_access(&req.group_id, &our().node)
+            .map_err(|err| format!("cannot create thread: {}", err))?;
+
         let thread_id = self.next_group_thread_id(&req.group_id)?;
         let now = current_timestamp();
         let creator = our().node.clone();
 
-        let group = self
-            .groups
-            .get_mut(&req.group_id)
-            .ok_or_else(|| "Group not found".to_string())?;
-
-        let root_thread_id =
-            group_root_thread_id(group).ok_or_else(|| "Group missing root thread".to_string())?;
-
-        let (parent_ref, depth, parent_child) = if let Some(parent_id) = req.parent_thread_id.take()
         {
-            let parent = group
-                .threads
-                .get(&parent_id)
-                .ok_or_else(|| "Parent thread not found".to_string())?;
-            (
-                ThreadParentRef::Thread(parent_id.clone()),
-                parent.depth + 1,
-                Some(parent_id.clone()),
-            )
-        } else {
-            (
-                ThreadParentRef::Root(req.group_id.clone()),
-                0,
-                Some(root_thread_id.clone()),
-            )
-        };
+            let group = self
+                .groups
+                .get_mut(&req.group_id)
+                .ok_or_else(|| "Group not found".to_string())?;
 
-        let mut thread = Thread::new(
-            thread_id.clone(),
-            req.group_id.clone(),
-            depth,
-            parent_ref,
-            now,
-            creator,
-        );
-        thread.title = req.title.take();
-        thread.summary.last_activity = now;
+            let root_thread_id = group_root_thread_id(group)
+                .ok_or_else(|| "Group missing root thread".to_string())?;
 
-        group.threads.insert(thread_id.clone(), thread);
-        if let Some(parent_id) = parent_child {
-            if let Some(parent) = group.threads.get_mut(&parent_id) {
-                parent.child_threads.push(thread_id.clone());
+            let (parent_ref, depth, parent_child) =
+                if let Some(parent_id) = req.parent_thread_id.take() {
+                    let parent = group
+                        .threads
+                        .get(&parent_id)
+                        .ok_or_else(|| "Parent thread not found".to_string())?;
+                    (
+                        ThreadParentRef::Thread(parent_id.clone()),
+                        parent.depth + 1,
+                        Some(parent_id.clone()),
+                    )
+                } else {
+                    (
+                        ThreadParentRef::Root(req.group_id.clone()),
+                        0,
+                        Some(root_thread_id.clone()),
+                    )
+                };
+
+            let mut thread = Thread::new(
+                thread_id.clone(),
+                req.group_id.clone(),
+                depth,
+                parent_ref,
+                now,
+                creator,
+            );
+            thread.title = req.title.take();
+            thread.summary.last_activity = now;
+
+            group.threads.insert(thread_id.clone(), thread);
+            if let Some(parent_id) = parent_child {
+                if let Some(parent) = group.threads.get_mut(&parent_id) {
+                    parent.child_threads.push(thread_id.clone());
+                }
+            }
+            if let Some(meta) = group.metadata.as_mut() {
+                meta.updated_at = now;
             }
         }
-        if let Some(meta) = group.metadata.as_mut() {
-            meta.updated_at = now;
-        }
-
-        drop(group);
         self.commit_group_crdt_or_log(&req.group_id, "create_group_thread");
         Ok(CreateGroupThreadRes { thread_id })
     }
@@ -1164,58 +1403,69 @@ impl ChatState {
         &mut self,
         mut req: SendGroupMessageReq,
     ) -> Result<SendGroupMessageRes, String> {
+        self.require_group_permission(
+            &req.group_id,
+            &our().node,
+            GroupPermissions::SEND_MESSAGES,
+        )
+        .map_err(|err| format!("cannot send group message: {}", err))?;
+        self.require_subscriber_access(&req.group_id, &our().node)
+            .map_err(|err| format!("cannot send group message: {}", err))?;
+
         let message_id = self.next_group_message_id(&req.group_id)?;
         let now = current_timestamp();
         let sender = our().node.clone();
 
-        let group = self
-            .groups
-            .get_mut(&req.group_id)
-            .ok_or_else(|| "Group not found".to_string())?;
+        let message = {
+            let group = self
+                .groups
+                .get_mut(&req.group_id)
+                .ok_or_else(|| "Group not found".to_string())?;
 
-        let thread_id = req
-            .thread_id
-            .take()
-            .or_else(|| group_root_thread_id(group))
-            .ok_or_else(|| "Group missing root thread".to_string())?;
+            let thread_id = req
+                .thread_id
+                .take()
+                .or_else(|| group_root_thread_id(group))
+                .ok_or_else(|| "Group missing root thread".to_string())?;
 
-        let thread = group
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| "Thread not found".to_string())?;
+            let thread = group
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| "Thread not found".to_string())?;
 
-        let mut message = MessageMeta::new(
-            message_id.clone(),
-            thread_id.clone(),
-            req.group_id.clone(),
-            sender.clone(),
-            now,
-            req.message_type,
-        );
-        message.reply_to = req.reply_to.take();
-        message.attachments = req.attachments.clone();
+            let mut message = MessageMeta::new(
+                message_id.clone(),
+                thread_id.clone(),
+                req.group_id.clone(),
+                sender.clone(),
+                now,
+                req.message_type,
+            );
+            message.reply_to = req.reply_to.take();
+            message.attachments = req.attachments.clone();
 
-        if thread.root_message_id.is_none() {
-            thread.root_message_id = Some(message_id.clone());
-        }
-        thread.summary.message_count += 1;
-        thread.summary.last_message_id = Some(message_id.clone());
-        thread.summary.last_activity = now;
-        thread.summary.last_sender = Some(sender.clone());
+            if thread.root_message_id.is_none() {
+                thread.root_message_id = Some(message_id.clone());
+            }
+            thread.summary.message_count += 1;
+            thread.summary.last_message_id = Some(message_id.clone());
+            thread.summary.last_activity = now;
+            thread.summary.last_sender = Some(sender.clone());
 
-        group.messages.insert(message_id.clone(), message.clone());
-        if let Some(meta) = group.metadata.as_mut() {
-            meta.updated_at = now;
-        }
+            group.messages.insert(message_id.clone(), message.clone());
+            if let Some(meta) = group.metadata.as_mut() {
+                meta.updated_at = now;
+            }
 
-        let subscriber = group
-            .subscribers
-            .entries
-            .entry(sender.clone())
-            .or_insert_with(SubscriberSyncState::default);
-        subscriber.last_seen_ts = now;
+            let subscriber = group
+                .subscribers
+                .entries
+                .entry(sender.clone())
+                .or_insert_with(SubscriberSyncState::default);
+            subscriber.last_seen_ts = now;
 
-        drop(group);
+            message
+        };
         self.commit_group_crdt_or_log(&req.group_id, "send_group_message");
         Ok(SendGroupMessageRes { message })
     }
@@ -1227,6 +1477,13 @@ impl ChatState {
         candidate: NodeId,
         role_id: String,
     ) -> Result<MembershipDecision, MembershipActionError> {
+        self.require_group_permission(
+            group_id,
+            &proposer,
+            GroupPermissions::INVITE_MEMBERS,
+        )
+        .map_err(MembershipActionError::PermissionDenied)?;
+
         let proposal_id =
             membership_proposal_key(group_id, &candidate, MembershipActionKind::Invite);
         let eligible_voters = {
@@ -1267,6 +1524,13 @@ impl ChatState {
         proposal_id: &str,
         approver: NodeId,
     ) -> Result<MembershipDecision, MembershipActionError> {
+        self.require_group_permission(
+            group_id,
+            &approver,
+            GroupPermissions::INVITE_MEMBERS,
+        )
+        .map_err(MembershipActionError::PermissionDenied)?;
+
         let proposal = {
             let group = self
                 .groups
@@ -1288,6 +1552,13 @@ impl ChatState {
         proposer: NodeId,
         target: NodeId,
     ) -> Result<MembershipDecision, MembershipActionError> {
+        self.require_group_permission(
+            group_id,
+            &proposer,
+            GroupPermissions::MANAGE_ROLES,
+        )
+        .map_err(MembershipActionError::PermissionDenied)?;
+
         let proposal_id = membership_proposal_key(group_id, &target, MembershipActionKind::Remove);
         let (eligible_voters, role_id) = {
             let group = self

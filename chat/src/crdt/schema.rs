@@ -204,12 +204,36 @@ pub struct GroupHubSet {
     pub active: HashSet<NodeId>,
     #[serde(default)]
     pub pending: HashSet<NodeId>,
+    #[serde(default)]
+    pub sync: HashMap<NodeId, HubSyncState>,
 }
 
 impl GroupHubSet {
     pub fn new(active: HashSet<NodeId>, pending: HashSet<NodeId>) -> Self {
-        Self { active, pending }
+        Self {
+            active,
+            pending,
+            sync: HashMap::new(),
+        }
     }
+
+    pub fn upsert_sync(&mut self, node_id: NodeId, state: HubSyncState) {
+        self.sync.insert(node_id, state);
+    }
+}
+
+/// Tracks hub replication progress, ensuring CRDT updates and snapshots propagate reliably.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubSyncState {
+    #[serde(default)]
+    pub last_state_vector: Option<Vec<u8>>,
+    #[serde(default)]
+    pub last_snapshot_digest: Option<String>,
+    #[serde(default)]
+    pub pending_snapshot_id: Option<String>,
+    pub last_seen_ts: u64,
+    #[serde(default)]
+    pub last_ack_seq: u64,
 }
 
 /// Captures subscriber sync info so routing policies can avoid scanning full members list.
@@ -222,6 +246,62 @@ pub struct GroupSubscriberSet {
 impl GroupSubscriberSet {
     pub fn upsert(&mut self, node_id: NodeId, state: SubscriberSyncState) {
         self.entries.insert(node_id, state);
+    }
+}
+
+/// Delivery cursor describing progress in a queue/attempt lane.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeliveryCursor {
+    pub queue_id: String,
+    #[serde(default)]
+    pub last_offset: u64,
+    pub updated_at: u64,
+}
+
+/// Captures delivery cursor state for hubs and subscribers so queues resume cleanly.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupDeliveryState {
+    #[serde(default)]
+    pub hub_cursors: HashMap<NodeId, DeliveryCursor>,
+    #[serde(default)]
+    pub subscriber_cursors: HashMap<NodeId, DeliveryCursor>,
+    #[serde(default)]
+    pub attempt_seeds: HashMap<String, u64>,
+}
+
+/// Topic routing configuration for a group.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupRoutingConfig {
+    pub hub_topic: String,
+    pub subscriber_topic: String,
+    pub snapshot_interval_secs: u64,
+}
+
+impl GroupRoutingConfig {
+    pub fn new(
+        hub_topic: impl Into<String>,
+        subscriber_topic: impl Into<String>,
+        snapshot_interval_secs: u64,
+    ) -> Self {
+        Self {
+            hub_topic: hub_topic.into(),
+            subscriber_topic: subscriber_topic.into(),
+            snapshot_interval_secs,
+        }
+    }
+
+    pub fn for_group(group_id: &GroupId) -> Self {
+        Self::new(
+            format!("chat.{group_id}.hubs"),
+            format!("chat.{group_id}.subs"),
+            30,
+        )
+    }
+}
+
+impl Default for GroupRoutingConfig {
+    fn default() -> Self {
+        Self::new(String::new(), String::new(), 30)
     }
 }
 
@@ -796,6 +876,10 @@ pub struct Group {
     #[serde(default)]
     pub subscribers: GroupSubscriberSet,
     #[serde(default)]
+    pub routing: GroupRoutingConfig,
+    #[serde(default)]
+    pub delivery: GroupDeliveryState,
+    #[serde(default)]
     pub membership_rules: Vec<MembershipRuleConfig>,
     #[serde(default)]
     pub membership_proposals: HashMap<String, MembershipProposal>,
@@ -811,6 +895,7 @@ impl Group {
     pub fn new(metadata: GroupMetadata) -> Self {
         Self {
             metadata: Some(metadata),
+            routing: GroupRoutingConfig::default(),
             ..Self::default()
         }
     }

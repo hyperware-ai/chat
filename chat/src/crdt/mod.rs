@@ -1,19 +1,20 @@
+use crate::ChatState;
 use hyperware_crdt::yrs::StateVector;
 use hyperware_crdt::{CommitteeDoc, CommitteeError};
 use serde::{Deserialize, Serialize};
-use crate::ChatState;
 
 pub mod schema;
 pub use schema::compile_membership_rules;
 #[allow(unused_imports)]
 pub use schema::{
-    AttachmentDescriptor, DictatorRule, Group, GroupCounters, GroupHubSet, GroupId, GroupMember,
-    GroupMetadata, GroupPermissions, GroupSubscriberSet, GroupTier, GroupVisibility,
-    MembershipActionKind, MembershipDecision, MembershipDecisionStatus, MembershipProposal,
-    MembershipRule, MembershipRuleBox, MembershipRuleConfig, MembershipRuleError,
-    MembershipRuleId, MembershipStatus, MessageId, MessageMeta, MessageReactionMeta,
-    MultiDictatorRule, NodeId, Role, SubscriberSyncState, TallyVoteRule, Thread, ThreadId,
-    ThreadParentRef, ThreadSummary, TokenThresholdRule,
+    AttachmentDescriptor, DeliveryCursor, DictatorRule, Group, GroupCounters, GroupDeliveryState,
+    GroupHubSet, GroupId, GroupMember, GroupMetadata, GroupPermissions, GroupRoutingConfig,
+    GroupSubscriberSet, GroupTier, GroupVisibility, HubSyncState, MembershipActionKind,
+    MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRule,
+    MembershipRuleBox, MembershipRuleConfig, MembershipRuleError, MembershipRuleId,
+    MembershipStatus, MessageId, MessageMeta, MessageReactionMeta, MultiDictatorRule, NodeId, Role,
+    SubscriberSyncState, TallyVoteRule, Thread, ThreadId, ThreadParentRef, ThreadSummary,
+    TokenThresholdRule,
 };
 
 /// Per-group CRDT manager responsible for syncing a single [`GroupId`] document.
@@ -96,8 +97,11 @@ impl GroupDocState {
     }
 
     pub fn apply_into(&self, runtime: &mut ChatState) {
-        runtime.groups.insert(self.group_id.clone(), self.group.clone());
+        runtime
+            .groups
+            .insert(self.group_id.clone(), self.group.clone());
         runtime.invalidate_group_rules(&self.group_id);
+        runtime.rebuild_pubsub_for_group(&self.group_id);
     }
 }
 
@@ -110,8 +114,13 @@ impl From<(&GroupId, &Group)> for GroupDocState {
 #[cfg(test)]
 mod tests {
     use super::{GroupCrdtManager, GroupDocState};
-    use crate::crdt::{Group, GroupCounters};
+    use crate::crdt::{
+        Group, GroupCounters, GroupMember, GroupPermissions, GroupRoutingConfig, GroupTier, Role,
+        SubscriberSyncState, MembershipStatus,
+    };
     use crate::ChatState;
+    use hyperware_pubsub_core::{TopicId as BrokerTopicId, whitelist::NodeId as BrokerNodeId};
+    use std::time::SystemTime;
 
     #[test]
     fn group_manager_round_trip_writes_state() {
@@ -121,8 +130,8 @@ mod tests {
             next_thread: 3,
             next_message: 2,
         };
-        let manager = GroupCrdtManager::from_group(&group_id, &group)
-            .expect("failed to build group manager");
+        let manager =
+            GroupCrdtManager::from_group(&group_id, &group).expect("failed to build group manager");
 
         let doc_state = manager
             .doc()
@@ -161,5 +170,64 @@ mod tests {
             .expect("group should be present");
         assert_eq!(stored.counters.next_thread, 4);
         assert_eq!(stored.counters.next_message, 9);
+    }
+
+    #[test]
+    fn apply_into_rebuilds_pubsub_acl() {
+        let mut runtime = ChatState::default();
+        let group_id = "group:acl".to_string();
+        let mut group = Group::default();
+        group.routing = GroupRoutingConfig::for_group(&group_id);
+
+        let mut perms = GroupPermissions::empty();
+        perms.insert(GroupPermissions::SEND_MESSAGES);
+        perms.insert(GroupPermissions::CREATE_THREADS);
+        let role_id = "role:member".to_string();
+
+        group.roles.insert(
+            role_id.clone(),
+            Role::new(role_id.clone(), "Member", perms, GroupTier::Subscriber),
+        );
+        group.members.insert(
+            "member.node".into(),
+            GroupMember::new(
+                "member.node",
+                role_id.clone(),
+                MembershipStatus::Active,
+                0,
+            ),
+        );
+        group
+            .subscribers
+            .entries
+            .insert("member.node".into(), SubscriberSyncState::default());
+        group.hubs.active.insert("member.node".into());
+
+        let snapshot = GroupDocState::new(group_id.clone(), group);
+        snapshot.apply_into(&mut runtime);
+
+        let whitelist = runtime
+            .pubsub
+            .whitelist(&group_id)
+            .expect("whitelist projected");
+        let subscriber_topic = BrokerTopicId::new(
+            runtime
+                .groups
+                .get(&group_id)
+                .unwrap()
+                .routing
+                .subscriber_topic
+                .clone(),
+        );
+
+        assert!(
+            whitelist
+                .subscribe_scope(
+                    &BrokerNodeId::new("member.node"),
+                    &subscriber_topic,
+                    SystemTime::now()
+                )
+                .is_some()
+        );
     }
 }

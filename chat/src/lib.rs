@@ -11,7 +11,7 @@ use hyperware_crdt::yrs::{Decode, Encode, StateVector};
 use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
-    hyperapp::{send, sleep, spawn, SaveOptions},
+    hyperapp::{send, sleep, spawn, source, SaveOptions},
     our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use std::cmp::Ordering;
@@ -30,6 +30,7 @@ use chat_caller_utils::ChatMessage as CUChatMessage;
 use chat_caller_utils::UserProfile as CUUserProfile;
 
 mod crdt;
+mod pubsub;
 mod types;
 
 pub use crdt::GroupDocState;
@@ -1429,8 +1430,7 @@ impl ChatState {
             println!("receive_chat_creation: Chat {} already exists", chat_id);
         }
 
-        if created_chat {
-        }
+        if created_chat {}
 
         // Signal the delivery worker (step 3) to flush anything pending to this node
         self.enqueue_delivery_flush(&counterparty);
@@ -1648,8 +1648,7 @@ impl ChatState {
             }
         }
 
-        if state_changed {
-        }
+        if state_changed {}
 
         // Send acknowledgment back to sender using generated RPC
         let sender = message.sender.clone();
@@ -1916,6 +1915,9 @@ impl ChatState {
             ));
         }
 
+        self.require_hub_access(&req.group_id, &our().node)
+            .map_err(|err| format!("hub access denied: {}", err))?;
+
         let manager = self
             .ensure_group_doc_manager(&req.group_id)
             .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
@@ -1947,6 +1949,9 @@ impl ChatState {
                 req.group_id
             ));
         }
+
+        self.require_hub_access(&req.group_id, &our().node)
+            .map_err(|err| format!("hub access denied: {}", err))?;
 
         let manager = self
             .ensure_group_doc_manager(&req.group_id)
@@ -1980,9 +1985,12 @@ impl ChatState {
             Some(update_bytes.len()),
         );
 
+        let update_payload = base64_encode(&update_bytes);
+        self.publish_group_delta(&req.group_id, &update_payload);
+
         Ok(CrdtUpdateRes {
             doc_id,
-            update_payload: base64_encode(&update_bytes),
+            update_payload,
         })
     }
 
@@ -2002,6 +2010,12 @@ impl ChatState {
             .or_insert_with(Group::default);
         if was_missing {
             self.groups_pending_bootstrap.insert(group_id.clone());
+        }
+
+        let enforce_acl = !was_missing && !self.group_needs_bootstrap(&group_id);
+        if enforce_acl {
+            self.require_hub_subscription(&group_id, &our().node)
+                .map_err(|err| format!("hub subscription denied: {}", err))?;
         }
 
         let manager = self
@@ -2044,6 +2058,7 @@ impl ChatState {
 
         Ok(CrdtApplyRes { applied: true })
     }
+
 
     // WEBSOCKET HANDLERS
 

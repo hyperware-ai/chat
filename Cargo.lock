@@ -1026,6 +1026,7 @@ dependencies = [
  "futures",
  "hyperprocess_macro",
  "hyperware-crdt",
+ "hyperware-pubsub-core",
  "hyperware_process_lib",
  "process_macros",
  "rand 0.8.5",
@@ -1850,6 +1851,19 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "yrs",
+]
+
+[[package]]
+name = "hyperware-pubsub-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3720,6 +3734,7 @@ checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
 dependencies = [
  "getrandom 0.3.4",
  "js-sys",
+ "serde",
  "wasm-bindgen",
 ]
 
