@@ -16,7 +16,7 @@ use crate::crdt::{
 };
 use crate::pubsub::PubSubRegistry;
 use crate::log_crdt_event;
-use hyperware_process_lib::{our, Address, ProcessId, Request};
+use hyperware_process_lib::our;
 use hyperware_crdt::{CommitteeError, yrs::{StateVector, Encode, Decode}};
 use hyperware_pubsub_core::{
     whitelist::NodeId as BrokerNodeId,
@@ -682,6 +682,12 @@ pub struct ChatState {
     #[serde(skip)]
     pub replication_queue: VecDeque<ReplicationTask>,
     #[serde(skip)]
+    pub broker_queues: HashMap<String, VecDeque<BrokerEnvelope>>,
+    #[serde(skip)]
+    pub broker_offsets: HashMap<String, u64>,
+    #[serde(skip)]
+    pub broker_cursors: HashMap<String, u64>,
+    #[serde(skip)]
     pub pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     pub online_nodes: HashSet<String>,
     pub ws_connections: HashMap<u32, String>,
@@ -720,6 +726,9 @@ impl Default for ChatState {
             replication_tx,
             replication_rx: Some(replication_rx),
             replication_queue: VecDeque::new(),
+            broker_queues: HashMap::new(),
+            broker_offsets: HashMap::new(),
+            broker_cursors: HashMap::new(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
             online_nodes: HashSet::new(),
             ws_connections: HashMap::new(),
@@ -764,12 +773,18 @@ impl QueuedDelivery {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReplicationKind {
     PushDelta,
     PushSnapshot,
     PullSnapshot,
     PullDelta,
+}
+
+impl Default for ReplicationKind {
+    fn default() -> Self {
+        ReplicationKind::PushDelta
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -780,6 +795,16 @@ pub struct ReplicationTask {
     pub since: Option<Vec<u8>>,
     pub attempt: u32,
     pub not_before: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BrokerEnvelope {
+    pub offset: u64,
+    pub payload: String,
+    #[serde(default)]
+    pub acl_version: Option<u64>,
+    #[serde(default)]
+    pub kind: ReplicationKind,
 }
 
 #[derive(Clone)]
@@ -860,6 +885,9 @@ impl<'de> Deserialize<'de> for ChatState {
             replication_tx,
             replication_rx: Some(replication_rx),
             replication_queue: VecDeque::new(),
+            broker_queues: HashMap::new(),
+            broker_offsets: HashMap::new(),
+            broker_cursors: HashMap::new(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
             online_nodes: data.online_nodes,
             ws_connections: data.ws_connections,
@@ -1005,6 +1033,7 @@ impl ChatState {
         peer: &str,
         is_hub: bool,
         queue_id: String,
+        offset: Option<u64>,
     ) {
         if let Some(group) = self.groups.get_mut(group_id) {
             let now = Self::now_secs();
@@ -1019,7 +1048,8 @@ impl ChatState {
                 updated_at: now,
             });
             entry.queue_id = queue_id;
-            entry.last_offset = entry.last_offset.saturating_add(1);
+            let next = offset.unwrap_or_else(|| entry.last_offset.saturating_add(1));
+            entry.last_offset = next;
             entry.updated_at = now;
         }
     }
@@ -1079,6 +1109,138 @@ impl ChatState {
         if let Ok(sv) = StateVector::decode_v1(&state_vector_bytes) {
             self.update_local_hub_sync_state(group_id, &sv);
         }
+    }
+
+    pub(crate) fn publish_broker_message(
+        &mut self,
+        topic: &str,
+        payload: &str,
+        acl_version: Option<u64>,
+        kind: ReplicationKind,
+    ) {
+        let next = *self.broker_offsets.get(topic).unwrap_or(&0);
+        let env = BrokerEnvelope {
+            offset: next,
+            payload: payload.to_string(),
+            acl_version,
+            kind,
+        };
+        let entry = self
+            .broker_queues
+            .entry(topic.to_string())
+            .or_insert_with(VecDeque::new);
+        entry.push_back(env);
+        self.broker_offsets
+            .insert(topic.to_string(), next.saturating_add(1));
+        println!(
+            "[BROKER] topic={} enqueued offset={} len={}",
+            topic,
+            next,
+            entry.len()
+        );
+    }
+
+    pub(crate) fn consume_broker_topics(&mut self, max_per_topic: usize) -> usize {
+        let mut applied = 0usize;
+        let now = Self::now_secs();
+        let topics: Vec<String> = self
+            .groups
+            .values()
+            .flat_map(|g| {
+                let mut t = Vec::new();
+                if g.hubs.active.contains(&our().node) && !g.routing.hub_topic.is_empty() {
+                    t.push(g.routing.hub_topic.clone());
+                }
+                // subscriber lane consumption if we are in subscribers
+                if g.subscribers.entries.contains_key(&our().node) && !g.routing.subscriber_topic.is_empty() {
+                    t.push(g.routing.subscriber_topic.clone());
+                }
+                t
+            })
+            .collect();
+
+        for topic in topics {
+            let from = *self.broker_cursors.get(&topic).unwrap_or(&0);
+            let envelopes: Vec<BrokerEnvelope> = self
+                .broker_queues
+                .get(&topic)
+                .map(|q| {
+                    q.iter()
+                        .filter(|e| e.offset >= from)
+                        .take(max_per_topic)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            for env in envelopes {
+                if let Err(err) = self.apply_broker_envelope(&topic, &env, now) {
+                    println!(
+                        "[BROKER] topic={} offset={} apply error: {}",
+                        topic, env.offset, err
+                    );
+                    continue;
+                }
+                applied += 1;
+                self.broker_cursors.insert(topic.clone(), env.offset + 1);
+            }
+        }
+        applied
+    }
+
+    fn apply_broker_envelope(
+        &mut self,
+        topic: &str,
+        env: &BrokerEnvelope,
+        now: u64,
+    ) -> Result<(), String> {
+        // find group by topic
+        let group_id = self
+            .groups
+            .iter()
+            .find(|(_, g)| g.routing.hub_topic == topic || g.routing.subscriber_topic == topic)
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| "no group for topic".to_string())?;
+
+        // ACL drift log
+        if let Some(in_acl) = env.acl_version {
+            if let Some(wl) = self.pubsub.whitelist(&group_id) {
+                let local = wl.version();
+                if local != in_acl {
+                    println!(
+                        "[BROKER][{}] ACL drift topic {} incoming={} local={}",
+                        group_id, topic, in_acl, local
+                    );
+                }
+            }
+        }
+
+        self.apply_group_update_payload(
+            &group_id,
+            &env.payload,
+            "broker_delivery",
+            env.acl_version,
+        )?;
+        // update cursors/delivery trackers
+        let is_hub = self
+            .groups
+            .get(&group_id)
+            .map(|g| g.routing.hub_topic == topic)
+            .unwrap_or(false);
+        self.update_delivery_cursor(
+            &group_id,
+            &our().node,
+            is_hub,
+            topic.to_string(),
+            Some(env.offset),
+        );
+        // bump heartbeat
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            group
+                .hubs
+                .upsert_sync(our().node.clone(), HubSyncState { last_seen_ts: now, ..HubSyncState::default() });
+        }
+        Ok(())
     }
 
     pub(crate) fn require_hub_access(
@@ -1207,7 +1369,7 @@ impl ChatState {
         }
     }
 
-    pub fn publish_group_delta(&self, group_id: &GroupId, update_payload: &str) {
+    pub fn publish_group_delta(&mut self, group_id: &GroupId, update_payload: &str) {
         let local_node = our().node.clone();
         if let Err(err) = self.require_hub_access(group_id, &local_node) {
             println!(
@@ -1216,36 +1378,27 @@ impl ChatState {
             );
             return;
         }
-        self.propagate_group_update(group_id, update_payload);
-    }
-
-    fn propagate_group_update(&self, group_id: &GroupId, update_payload: &str) {
-        let Some(group) = self.groups.get(group_id) else {
-            return;
-        };
-        for hub in &group.hubs.active {
-            if hub == &our().node {
-                continue;
-            }
-            let body = json!({
-                "CrdtGroupApplyUpdate": {
-                    "group_id": group_id,
-                    "update_payload": update_payload,
-                }
-            });
-            if let Ok(bytes) = serde_json::to_vec(&body) {
-                let _ = Request::new()
-                    .target(Address {
-                        node: hub.clone(),
-                        process: ProcessId::new(
-                            Some(crate::OUR_PROCESS_ID.0),
-                            crate::OUR_PROCESS_ID.1,
-                            crate::OUR_PROCESS_ID.2,
-                        ),
-                    })
-                    .body(bytes)
-                    .send();
-            }
+        let (hub_topic, sub_topic) = self
+            .groups
+            .get(group_id)
+            .map(|g| (g.routing.hub_topic.clone(), g.routing.subscriber_topic.clone()))
+            .unwrap_or_default();
+        let acl_version = self.pubsub.whitelist(group_id).map(|w| w.version());
+        if !hub_topic.is_empty() {
+            self.publish_broker_message(
+                &hub_topic,
+                update_payload,
+                acl_version,
+                ReplicationKind::PushDelta,
+            );
+        }
+        if !sub_topic.is_empty() {
+            self.publish_broker_message(
+                &sub_topic,
+                update_payload,
+                acl_version,
+                ReplicationKind::PushDelta,
+            );
         }
     }
 

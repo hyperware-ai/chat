@@ -2070,6 +2070,10 @@ impl ChatState {
     #[http]
     async fn replication_work(&mut self) -> Result<String, String> {
         let now = ChatState::now_secs();
+        let applied = self.consume_broker_topics(32);
+        if applied > 0 {
+            println!("[REPL] applied {} broker messages", applied);
+        }
         self.enqueue_bootstrap_pulls(now);
 
         let mut processed = 0usize;
@@ -2157,6 +2161,7 @@ impl ChatState {
                                 .map(|g| g.routing.subscriber_topic.clone())
                                 .unwrap_or_default()
                         },
+                        None,
                     );
                     return;
                 }
@@ -2197,6 +2202,7 @@ impl ChatState {
                                 &task.peer,
                                 is_hub,
                                 queue_id,
+                                None,
                             );
                         } else {
                             self.schedule_backoff(task, now);
