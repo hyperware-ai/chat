@@ -115,11 +115,11 @@ impl From<(&GroupId, &Group)> for GroupDocState {
 mod tests {
     use super::{GroupCrdtManager, GroupDocState};
     use crate::crdt::{
-        Group, GroupCounters, GroupMember, GroupPermissions, GroupRoutingConfig, GroupTier, Role,
-        SubscriberSyncState, MembershipStatus,
+        Group, GroupCounters, GroupMember, GroupPermissions, GroupRoutingConfig, GroupTier,
+        MembershipStatus, Role, SubscriberSyncState,
     };
     use crate::ChatState;
-    use hyperware_pubsub_core::{TopicId as BrokerTopicId, whitelist::NodeId as BrokerNodeId};
+    use hyperware_pubsub_core::{whitelist::NodeId as BrokerNodeId, TopicId as BrokerTopicId};
     use std::time::SystemTime;
 
     #[test]
@@ -190,12 +190,7 @@ mod tests {
         );
         group.members.insert(
             "member.node".into(),
-            GroupMember::new(
-                "member.node",
-                role_id.clone(),
-                MembershipStatus::Active,
-                0,
-            ),
+            GroupMember::new("member.node", role_id.clone(), MembershipStatus::Active, 0),
         );
         group
             .subscribers
@@ -220,14 +215,12 @@ mod tests {
                 .clone(),
         );
 
-        assert!(
-            whitelist
-                .subscribe_scope(
-                    &BrokerNodeId::new("member.node"),
-                    &subscriber_topic,
-                    SystemTime::now()
-                )
-                .is_some()
-        );
+        assert!(whitelist
+            .subscribe_scope(
+                &BrokerNodeId::new("member.node"),
+                &subscriber_topic,
+                SystemTime::now()
+            )
+            .is_some());
     }
 }

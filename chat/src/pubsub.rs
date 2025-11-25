@@ -136,12 +136,8 @@ fn build_access_for_role(role: &Role, routing: &GroupRoutingConfig) -> Option<No
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crdt::{
-        GroupMember, GroupPermissions, SubscriberSyncState,
-    };
-    use hyperware_pubsub_core::{
-        whitelist::NodeId as BrokerNodeId, TopicId as BrokerTopicId,
-    };
+    use crate::crdt::{GroupMember, GroupPermissions, SubscriberSyncState};
+    use hyperware_pubsub_core::{whitelist::NodeId as BrokerNodeId, TopicId as BrokerTopicId};
     use std::time::SystemTime;
 
     fn sample_group(group_id: &str) -> Group {
@@ -167,7 +163,12 @@ mod tests {
         );
         group.roles.insert(
             member_role_id.clone(),
-            Role::new(member_role_id.clone(), "Member", member_permissions, GroupTier::Subscriber),
+            Role::new(
+                member_role_id.clone(),
+                "Member",
+                member_permissions,
+                GroupTier::Subscriber,
+            ),
         );
 
         group.members.insert(
@@ -176,9 +177,15 @@ mod tests {
         );
         group.members.insert(
             "member.node".into(),
-            GroupMember::new("member.node", member_role_id.clone(), MembershipStatus::Active, 0),
+            GroupMember::new(
+                "member.node",
+                member_role_id.clone(),
+                MembershipStatus::Active,
+                0,
+            ),
         );
-        group.subscribers
+        group
+            .subscribers
             .entries
             .insert("member.node".into(), SubscriberSyncState::default());
         group.hubs.active.insert("hub.node".into());

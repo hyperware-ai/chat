@@ -1,8 +1,9 @@
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,14 +15,20 @@ use crate::crdt::{
     MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId,
     Role, SubscriberSyncState, Thread, ThreadId, ThreadParentRef,
 };
-use crate::pubsub::PubSubRegistry;
 use crate::log_crdt_event;
-use hyperware_process_lib::our;
-use hyperware_crdt::{CommitteeError, yrs::{StateVector, Encode, Decode}};
-use hyperware_pubsub_core::{
-    whitelist::NodeId as BrokerNodeId,
-    TopicId as BrokerTopicId,
+use crate::pubsub::PubSubRegistry;
+use hyperware_crdt::{
+    yrs::{Decode, Encode, StateVector},
+    CommitteeError,
 };
+use hyperware_process_lib::our;
+use hyperware_pubsub_core::{whitelist::NodeId as BrokerNodeId, TopicId as BrokerTopicId};
+
+const SUBSCRIBER_LANE_TTL_SECS: u64 = 300;
+const SUBSCRIBER_ACK_DEADLINE_SECS: u64 = 45;
+const DELIVERY_DEDUPE_WINDOW_SECS: u64 = 120;
+const DELIVERY_DEDUPE_LIMIT: usize = 2048;
+const SUBSCRIBER_EVENT_BUFFER: usize = 256;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PushSubscription {
@@ -347,6 +354,34 @@ pub enum WsServerMessage {
     },
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReplicationMetrics {
+    #[serde(default)]
+    pub acl_skips: u64,
+    #[serde(default)]
+    pub retries: u64,
+    #[serde(default)]
+    pub drops: u64,
+    #[serde(default)]
+    pub stale_replays: u64,
+    #[serde(default)]
+    pub last_lag_secs: u64,
+    #[serde(default)]
+    pub last_subscriber_lag_secs: u64,
+    #[serde(default)]
+    pub acl_drifts: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubscriberDeliveryEvent {
+    pub group_id: GroupId,
+    pub topic: String,
+    pub offset: u64,
+    pub kind: ReplicationKind,
+    pub age_secs: u64,
+    pub recorded_at: u64,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateChatReq {
     pub counterparty: String,
@@ -610,6 +645,71 @@ pub struct CrdtApplyRes {
     pub applied: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AdminReplicationStateReq {
+    #[serde(default)]
+    pub group_id: Option<GroupId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GroupReplicationState {
+    pub group_id: GroupId,
+    pub pending_bootstrap: bool,
+    pub routing: GroupRoutingConfig,
+    pub hubs: Vec<NodeId>,
+    pub subscribers: Vec<NodeId>,
+    pub hub_cursors: HashMap<NodeId, DeliveryCursor>,
+    pub subscriber_cursors: HashMap<NodeId, DeliveryCursor>,
+    #[serde(default)]
+    pub whitelist_version: Option<u64>,
+    #[serde(default)]
+    pub subscriber_lag_secs: Option<u64>,
+    #[serde(default)]
+    pub hub_lag_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AdminReplicationStateRes {
+    pub metrics: ReplicationMetrics,
+    pub groups: Vec<GroupReplicationState>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AdminWhitelistReq {
+    pub group_id: GroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct WhitelistEntryDebug {
+    pub node: String,
+    pub publish: Vec<String>,
+    pub subscribe: Vec<String>,
+    pub audiences: Vec<String>,
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AdminWhitelistRes {
+    pub group_id: GroupId,
+    pub version: u64,
+    pub entries: Vec<WhitelistEntryDebug>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SubscriberEventsReq {
+    #[serde(default)]
+    pub take: Option<usize>,
+    #[serde(default)]
+    pub clear: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SubscriberEventsRes {
+    pub events: Vec<SubscriberDeliveryEvent>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, process_macros::SerdeJsonInto)]
 pub enum HomepageRequest {
     GetPushSubscription,
@@ -688,6 +788,12 @@ pub struct ChatState {
     #[serde(skip)]
     pub broker_cursors: HashMap<String, u64>,
     #[serde(skip)]
+    pub delivery_dedupe: HashMap<u64, u64>,
+    #[serde(skip)]
+    pub subscriber_events: VecDeque<SubscriberDeliveryEvent>,
+    #[serde(skip)]
+    pub replication_metrics: ReplicationMetrics,
+    #[serde(skip)]
     pub pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     pub online_nodes: HashSet<String>,
     pub ws_connections: HashMap<u32, String>,
@@ -729,6 +835,9 @@ impl Default for ChatState {
             broker_queues: HashMap::new(),
             broker_offsets: HashMap::new(),
             broker_cursors: HashMap::new(),
+            delivery_dedupe: HashMap::new(),
+            subscriber_events: VecDeque::new(),
+            replication_metrics: ReplicationMetrics::default(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
             online_nodes: HashSet::new(),
             ws_connections: HashMap::new(),
@@ -805,6 +914,8 @@ pub struct BrokerEnvelope {
     pub acl_version: Option<u64>,
     #[serde(default)]
     pub kind: ReplicationKind,
+    #[serde(default)]
+    pub ts: u64,
 }
 
 #[derive(Clone)]
@@ -888,6 +999,9 @@ impl<'de> Deserialize<'de> for ChatState {
             broker_queues: HashMap::new(),
             broker_offsets: HashMap::new(),
             broker_cursors: HashMap::new(),
+            delivery_dedupe: HashMap::new(),
+            subscriber_events: VecDeque::new(),
+            replication_metrics: ReplicationMetrics::default(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
             online_nodes: data.online_nodes,
             ws_connections: data.ws_connections,
@@ -919,6 +1033,58 @@ impl ChatState {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
+    }
+
+    fn dedupe_key(topic: &str, payload: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        topic.hash(&mut hasher);
+        payload.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn register_delivery_fingerprint(&mut self, topic: &str, payload: &str, now: u64) -> bool {
+        let key = Self::dedupe_key(topic, payload);
+        if let Some(ts) = self.delivery_dedupe.get(&key) {
+            if now.saturating_sub(*ts) < DELIVERY_DEDUPE_WINDOW_SECS {
+                return true;
+            }
+        }
+        self.delivery_dedupe.insert(key, now);
+        self.prune_dedupe_cache(now);
+        false
+    }
+
+    fn prune_dedupe_cache(&mut self, now: u64) {
+        let cutoff = now.saturating_sub(DELIVERY_DEDUPE_WINDOW_SECS);
+        self.delivery_dedupe.retain(|_, ts| *ts >= cutoff);
+        if self.delivery_dedupe.len() > DELIVERY_DEDUPE_LIMIT {
+            let overflow = self
+                .delivery_dedupe
+                .len()
+                .saturating_sub(DELIVERY_DEDUPE_LIMIT);
+            if overflow == 0 {
+                return;
+            }
+            let mut oldest: Vec<(u64, u64)> = self
+                .delivery_dedupe
+                .iter()
+                .map(|(k, ts)| (*k, *ts))
+                .collect();
+            oldest.sort_by_key(|(_, ts)| *ts);
+            for (key, _) in oldest.into_iter().take(overflow) {
+                self.delivery_dedupe.remove(&key);
+            }
+        }
+    }
+
+    fn record_subscriber_event(&mut self, event: SubscriberDeliveryEvent) {
+        self.subscriber_events.push_back(event);
+        if self.subscriber_events.len() > SUBSCRIBER_EVENT_BUFFER {
+            let overflow = self.subscriber_events.len() - SUBSCRIBER_EVENT_BUFFER;
+            for _ in 0..overflow {
+                self.subscriber_events.pop_front();
+            }
+        }
     }
 
     pub fn rebuild_group_doc_managers(&mut self) -> Result<(), CommitteeError> {
@@ -963,7 +1129,9 @@ impl ChatState {
         kind: ReplicationKind,
     ) -> bool {
         self.replication_queue.iter().any(|t| {
-            &t.group_id == group_id && t.peer == peer && std::mem::discriminant(&t.kind) == std::mem::discriminant(&kind)
+            &t.group_id == group_id
+                && t.peer == peer
+                && std::mem::discriminant(&t.kind) == std::mem::discriminant(&kind)
         })
     }
 
@@ -983,11 +1151,7 @@ impl ChatState {
         }
     }
 
-    pub(crate) fn peer_state_vector(
-        &self,
-        group_id: &GroupId,
-        peer: &str,
-    ) -> Option<StateVector> {
+    pub(crate) fn peer_state_vector(&self, group_id: &GroupId, peer: &str) -> Option<StateVector> {
         let group = self.groups.get(group_id)?;
         let sync = group.hubs.sync.get(peer)?;
         let bytes = sync.last_state_vector.as_ref()?;
@@ -1042,11 +1206,13 @@ impl ChatState {
             } else {
                 &mut group.delivery.subscriber_cursors
             };
-            let entry = cursors.entry(peer.to_string()).or_insert_with(|| DeliveryCursor {
-                queue_id: queue_id.clone(),
-                last_offset: 0,
-                updated_at: now,
-            });
+            let entry = cursors
+                .entry(peer.to_string())
+                .or_insert_with(|| DeliveryCursor {
+                    queue_id: queue_id.clone(),
+                    last_offset: 0,
+                    updated_at: now,
+                });
             entry.queue_id = queue_id;
             let next = offset.unwrap_or_else(|| entry.last_offset.saturating_add(1));
             entry.last_offset = next;
@@ -1071,10 +1237,21 @@ impl ChatState {
             let since = self
                 .peer_state_vector(group_id, hub)
                 .map(|sv| sv.encode_v1());
+            let hub_age = group
+                .delivery
+                .hub_cursors
+                .get(hub)
+                .map(|c| now.saturating_sub(c.updated_at))
+                .unwrap_or(u64::MAX);
+            let kind = if since.is_none() || hub_age > SUBSCRIBER_LANE_TTL_SECS {
+                ReplicationKind::PushSnapshot
+            } else {
+                ReplicationKind::PushDelta
+            };
             let task = ReplicationTask {
                 group_id: group_id.clone(),
                 peer: hub.clone(),
-                kind: ReplicationKind::PushDelta,
+                kind,
                 since,
                 attempt: 0,
                 not_before: now,
@@ -1095,10 +1272,21 @@ impl ChatState {
             let since = self
                 .peer_state_vector(group_id, node_id)
                 .map(|sv| sv.encode_v1());
+            let cursor_age = group
+                .delivery
+                .subscriber_cursors
+                .get(node_id)
+                .map(|c| now.saturating_sub(c.updated_at))
+                .unwrap_or(u64::MAX);
+            let kind = if since.is_none() || cursor_age > SUBSCRIBER_LANE_TTL_SECS {
+                ReplicationKind::PushSnapshot
+            } else {
+                ReplicationKind::PushDelta
+            };
             self.replication_queue.push_back(ReplicationTask {
                 group_id: group_id.clone(),
                 peer: node_id.clone(),
-                kind: ReplicationKind::PushDelta,
+                kind,
                 since,
                 attempt: 0,
                 not_before: now,
@@ -1124,6 +1312,7 @@ impl ChatState {
             payload: payload.to_string(),
             acl_version,
             kind,
+            ts: Self::now_secs(),
         };
         let entry = self
             .broker_queues
@@ -1152,7 +1341,9 @@ impl ChatState {
                     t.push(g.routing.hub_topic.clone());
                 }
                 // subscriber lane consumption if we are in subscribers
-                if g.subscribers.entries.contains_key(&our().node) && !g.routing.subscriber_topic.is_empty() {
+                if g.subscribers.entries.contains_key(&our().node)
+                    && !g.routing.subscriber_topic.is_empty()
+                {
                     t.push(g.routing.subscriber_topic.clone());
                 }
                 t
@@ -1188,6 +1379,65 @@ impl ChatState {
         applied
     }
 
+    pub(crate) fn enqueue_stale_subscriber_replays(&mut self, now: u64) {
+        for (group_id, group) in self.groups.iter() {
+            if group.routing.subscriber_topic.is_empty() {
+                continue;
+            }
+            for (node_id, _) in group.subscribers.entries.iter() {
+                if node_id == &our().node {
+                    continue;
+                }
+                if self.has_replication_task(group_id, node_id, ReplicationKind::PushSnapshot)
+                    || self.has_replication_task(group_id, node_id, ReplicationKind::PushDelta)
+                {
+                    continue;
+                }
+                let cursor_age = group
+                    .delivery
+                    .subscriber_cursors
+                    .get(node_id)
+                    .map(|cursor| now.saturating_sub(cursor.updated_at));
+                let stale = cursor_age
+                    .map(|age| age > SUBSCRIBER_ACK_DEADLINE_SECS)
+                    .unwrap_or(true);
+                if !stale {
+                    continue;
+                }
+                let since = self
+                    .peer_state_vector(group_id, node_id)
+                    .map(|sv| sv.encode_v1());
+                let age = cursor_age.unwrap_or(0);
+                let kind = if since.is_none() || age > SUBSCRIBER_LANE_TTL_SECS {
+                    ReplicationKind::PushSnapshot
+                } else {
+                    ReplicationKind::PushDelta
+                };
+                let kind_for_log = kind.clone();
+                self.replication_queue.push_back(ReplicationTask {
+                    group_id: group_id.clone(),
+                    peer: node_id.clone(),
+                    kind,
+                    since,
+                    attempt: 0,
+                    not_before: now,
+                });
+                self.replication_metrics.stale_replays =
+                    self.replication_metrics.stale_replays.saturating_add(1);
+                println!(
+                    "[REPL][{}] queued {} replay to subscriber {} (age={}s)",
+                    group_id,
+                    match kind_for_log {
+                        ReplicationKind::PushSnapshot => "snapshot",
+                        _ => "delta",
+                    },
+                    node_id,
+                    age
+                );
+            }
+        }
+    }
+
     fn apply_broker_envelope(
         &mut self,
         topic: &str,
@@ -1201,6 +1451,40 @@ impl ChatState {
             .find(|(_, g)| g.routing.hub_topic == topic || g.routing.subscriber_topic == topic)
             .map(|(id, _)| id.clone())
             .ok_or_else(|| "no group for topic".to_string())?;
+        let is_subscriber_topic = self
+            .groups
+            .get(&group_id)
+            .map(|g| g.routing.subscriber_topic == topic)
+            .unwrap_or(false);
+        let created_at = if env.ts == 0 { now } else { env.ts };
+        let age = now.saturating_sub(created_at);
+        if age > SUBSCRIBER_ACK_DEADLINE_SECS {
+            println!(
+                "[BROKER][{}] delivery lag {}s topic={} offset={}",
+                group_id, age, topic, env.offset
+            );
+        }
+        if is_subscriber_topic {
+            self.replication_metrics.last_subscriber_lag_secs = age;
+            if age > SUBSCRIBER_LANE_TTL_SECS {
+                self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
+                println!(
+                    "[BROKER][{}] drop stale subscriber envelope topic={} offset={} age={}s",
+                    group_id, topic, env.offset, age
+                );
+                return Ok(());
+            }
+            if self.register_delivery_fingerprint(topic, &env.payload, now) {
+                self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
+                println!(
+                    "[BROKER][{}] drop duplicate subscriber envelope topic={} offset={}",
+                    group_id, topic, env.offset
+                );
+                return Ok(());
+            }
+        } else {
+            self.replication_metrics.last_lag_secs = age;
+        }
 
         // ACL drift log
         if let Some(in_acl) = env.acl_version {
@@ -1211,6 +1495,8 @@ impl ChatState {
                         "[BROKER][{}] ACL drift topic {} incoming={} local={}",
                         group_id, topic, in_acl, local
                     );
+                    self.replication_metrics.acl_drifts =
+                        self.replication_metrics.acl_drifts.saturating_add(1);
                 }
             }
         }
@@ -1220,7 +1506,11 @@ impl ChatState {
             &env.payload,
             "broker_delivery",
             env.acl_version,
-        )?;
+        )
+        .map_err(|err| {
+            self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
+            err
+        })?;
         // update cursors/delivery trackers
         let is_hub = self
             .groups
@@ -1236,9 +1526,39 @@ impl ChatState {
         );
         // bump heartbeat
         if let Some(group) = self.groups.get_mut(&group_id) {
-            group
-                .hubs
-                .upsert_sync(our().node.clone(), HubSyncState { last_seen_ts: now, ..HubSyncState::default() });
+            group.hubs.upsert_sync(
+                our().node.clone(),
+                HubSyncState {
+                    last_seen_ts: now,
+                    ..HubSyncState::default()
+                },
+            );
+            if is_subscriber_topic {
+                let subscriber = group
+                    .subscribers
+                    .entries
+                    .entry(our().node.clone())
+                    .or_insert_with(SubscriberSyncState::default);
+                subscriber.last_seen_ts = now;
+                subscriber.last_state_vector = self
+                    .group_doc_managers
+                    .get(&group_id)
+                    .and_then(|mgr| mgr.last_state_vector().map(|sv| sv.encode_v1()));
+                if let ReplicationKind::PushSnapshot = env.kind {
+                    let digest = format!("{:x}", Self::dedupe_key(topic, &env.payload));
+                    subscriber.last_snapshot_digest = Some(digest);
+                }
+            }
+        }
+        if is_subscriber_topic {
+            self.record_subscriber_event(SubscriberDeliveryEvent {
+                group_id,
+                topic: topic.to_string(),
+                offset: env.offset,
+                kind: env.kind.clone(),
+                age_secs: age,
+                recorded_at: now,
+            });
         }
         Ok(())
     }
@@ -1376,12 +1696,19 @@ impl ChatState {
                 "[CRDT][{}] skip publish: node {} lacks hub access ({})",
                 group_id, local_node, err
             );
+            self.replication_metrics.acl_skips =
+                self.replication_metrics.acl_skips.saturating_add(1);
             return;
         }
         let (hub_topic, sub_topic) = self
             .groups
             .get(group_id)
-            .map(|g| (g.routing.hub_topic.clone(), g.routing.subscriber_topic.clone()))
+            .map(|g| {
+                (
+                    g.routing.hub_topic.clone(),
+                    g.routing.subscriber_topic.clone(),
+                )
+            })
             .unwrap_or_default();
         let acl_version = self.pubsub.whitelist(group_id).map(|w| w.version());
         if !hub_topic.is_empty() {
@@ -1708,12 +2035,8 @@ impl ChatState {
         &mut self,
         mut req: CreateGroupThreadReq,
     ) -> Result<CreateGroupThreadRes, String> {
-        self.require_group_permission(
-            &req.group_id,
-            &our().node,
-            GroupPermissions::CREATE_THREADS,
-        )
-        .map_err(|err| format!("cannot create thread: {}", err))?;
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::CREATE_THREADS)
+            .map_err(|err| format!("cannot create thread: {}", err))?;
         self.require_subscriber_access(&req.group_id, &our().node)
             .map_err(|err| format!("cannot create thread: {}", err))?;
 
@@ -1778,12 +2101,8 @@ impl ChatState {
         &mut self,
         mut req: SendGroupMessageReq,
     ) -> Result<SendGroupMessageRes, String> {
-        self.require_group_permission(
-            &req.group_id,
-            &our().node,
-            GroupPermissions::SEND_MESSAGES,
-        )
-        .map_err(|err| format!("cannot send group message: {}", err))?;
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
+            .map_err(|err| format!("cannot send group message: {}", err))?;
         self.require_subscriber_access(&req.group_id, &our().node)
             .map_err(|err| format!("cannot send group message: {}", err))?;
 
@@ -1852,12 +2171,8 @@ impl ChatState {
         candidate: NodeId,
         role_id: String,
     ) -> Result<MembershipDecision, MembershipActionError> {
-        self.require_group_permission(
-            group_id,
-            &proposer,
-            GroupPermissions::INVITE_MEMBERS,
-        )
-        .map_err(MembershipActionError::PermissionDenied)?;
+        self.require_group_permission(group_id, &proposer, GroupPermissions::INVITE_MEMBERS)
+            .map_err(MembershipActionError::PermissionDenied)?;
 
         let proposal_id =
             membership_proposal_key(group_id, &candidate, MembershipActionKind::Invite);
@@ -1899,12 +2214,8 @@ impl ChatState {
         proposal_id: &str,
         approver: NodeId,
     ) -> Result<MembershipDecision, MembershipActionError> {
-        self.require_group_permission(
-            group_id,
-            &approver,
-            GroupPermissions::INVITE_MEMBERS,
-        )
-        .map_err(MembershipActionError::PermissionDenied)?;
+        self.require_group_permission(group_id, &approver, GroupPermissions::INVITE_MEMBERS)
+            .map_err(MembershipActionError::PermissionDenied)?;
 
         let proposal = {
             let group = self
@@ -1927,12 +2238,8 @@ impl ChatState {
         proposer: NodeId,
         target: NodeId,
     ) -> Result<MembershipDecision, MembershipActionError> {
-        self.require_group_permission(
-            group_id,
-            &proposer,
-            GroupPermissions::MANAGE_ROLES,
-        )
-        .map_err(MembershipActionError::PermissionDenied)?;
+        self.require_group_permission(group_id, &proposer, GroupPermissions::MANAGE_ROLES)
+            .map_err(MembershipActionError::PermissionDenied)?;
 
         let proposal_id = membership_proposal_key(group_id, &target, MembershipActionKind::Remove);
         let (eligible_voters, role_id) = {

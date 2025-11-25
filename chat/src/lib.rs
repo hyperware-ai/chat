@@ -2075,6 +2075,7 @@ impl ChatState {
             println!("[REPL] applied {} broker messages", applied);
         }
         self.enqueue_bootstrap_pulls(now);
+        self.enqueue_stale_subscriber_replays(now);
 
         let mut processed = 0usize;
         while processed < 16 {
@@ -2086,6 +2087,119 @@ impl ChatState {
         }
 
         Ok(format!("replication processed {}", processed))
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn admin_replication_state(
+        &self,
+        req: AdminReplicationStateReq,
+    ) -> Result<AdminReplicationStateRes, String> {
+        let filter = req.group_id;
+        let now = ChatState::now_secs();
+        let groups: Vec<GroupReplicationState> = self
+            .groups
+            .iter()
+            .filter(|(id, _)| filter.as_ref().map_or(true, |gid| gid == *id))
+            .map(|(group_id, group)| {
+                let sub_lag = group
+                    .delivery
+                    .subscriber_cursors
+                    .get(&our().node)
+                    .map(|c| now.saturating_sub(c.updated_at));
+                let hub_lag = group
+                    .delivery
+                    .hub_cursors
+                    .get(&our().node)
+                    .map(|c| now.saturating_sub(c.updated_at));
+                GroupReplicationState {
+                    group_id: group_id.clone(),
+                    pending_bootstrap: self.group_needs_bootstrap(group_id),
+                    routing: group.routing.clone(),
+                    hubs: group.hubs.active.iter().cloned().collect(),
+                    subscribers: group.subscribers.entries.keys().cloned().collect(),
+                    hub_cursors: group.delivery.hub_cursors.clone(),
+                    subscriber_cursors: group.delivery.subscriber_cursors.clone(),
+                    whitelist_version: self.pubsub.whitelist(group_id).map(|w| w.version()),
+                    subscriber_lag_secs: sub_lag,
+                    hub_lag_secs: hub_lag,
+                }
+            })
+            .collect();
+
+        Ok(AdminReplicationStateRes {
+            metrics: self.replication_metrics.clone(),
+            groups,
+        })
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn admin_whitelist(&self, req: AdminWhitelistReq) -> Result<AdminWhitelistRes, String> {
+        let whitelist = self
+            .pubsub
+            .whitelist(&req.group_id)
+            .ok_or_else(|| "whitelist missing".to_string())?;
+
+        let fmt_pattern = |pattern: &hyperware_pubsub_core::whitelist::TopicPattern| match pattern {
+            hyperware_pubsub_core::whitelist::TopicPattern::Exact(p) => {
+                format!("exact:{p}")
+            }
+            hyperware_pubsub_core::whitelist::TopicPattern::Prefix(p) => {
+                format!("prefix:{p}")
+            }
+        };
+
+        let entries = whitelist
+            .entries()
+            .iter()
+            .map(|(node, access)| {
+                let expires_at = access
+                    .expires_at
+                    .and_then(|ts| ts.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                WhitelistEntryDebug {
+                    node: node.0.clone(),
+                    publish: access.publish.iter().map(fmt_pattern).collect(),
+                    subscribe: access.subscribe.iter().map(fmt_pattern).collect(),
+                    audiences: access.audiences.iter().cloned().collect(),
+                    features: access.features.iter().cloned().collect(),
+                    expires_at,
+                }
+            })
+            .collect();
+
+        Ok(AdminWhitelistRes {
+            group_id: req.group_id,
+            version: whitelist.version(),
+            entries,
+        })
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn admin_subscriber_events(
+        &mut self,
+        req: SubscriberEventsReq,
+    ) -> Result<SubscriberEventsRes, String> {
+        let take = req.take.unwrap_or(50);
+        let events = if req.clear {
+            let mut drained: Vec<SubscriberDeliveryEvent> =
+                self.subscriber_events.drain(..).collect();
+            if drained.len() > take {
+                let start = drained.len() - take;
+                drained.drain(0..start);
+            }
+            drained
+        } else {
+            let len = self.subscriber_events.len();
+            let start = len.saturating_sub(take);
+            self.subscriber_events.iter().skip(start).cloned().collect()
+        };
+        Ok(SubscriberEventsRes { events })
     }
 
     async fn process_replication_task(&mut self, task: ReplicationTask) {
@@ -2104,15 +2218,18 @@ impl ChatState {
                             "[REPL][{}] skip push to {} (local hub publish denied): {}",
                             task.group_id, task.peer, err
                         );
+                        self.replication_metrics.acl_skips =
+                            self.replication_metrics.acl_skips.saturating_add(1);
                         return;
                     }
-                } else if let Err(err) =
-                    self.require_subscriber_access(&task.group_id, &our().node)
+                } else if let Err(err) = self.require_subscriber_access(&task.group_id, &our().node)
                 {
                     println!(
                         "[REPL][{}] skip push to subscriber {} (local publish denied): {}",
                         task.group_id, task.peer, err
                     );
+                    self.replication_metrics.acl_skips =
+                        self.replication_metrics.acl_skips.saturating_add(1);
                     return;
                 }
 
@@ -2121,10 +2238,7 @@ impl ChatState {
                     .as_ref()
                     .and_then(|b| StateVector::decode_v1(b).ok())
                     .or_else(|| self.peer_state_vector(&task.group_id, &task.peer));
-                let acl_version = self
-                    .pubsub
-                    .whitelist(&task.group_id)
-                    .map(|w| w.version());
+                let acl_version = self.pubsub.whitelist(&task.group_id).map(|w| w.version());
 
                 let manager = match self.ensure_group_doc_manager(&task.group_id) {
                     Ok(m) => m,
@@ -2275,6 +2389,11 @@ impl ChatState {
         let delay = (1u64 << (task.attempt.min(6))) * 2;
         task.attempt = task.attempt.saturating_add(1);
         task.not_before = now + delay;
+        self.replication_metrics.retries = self.replication_metrics.retries.saturating_add(1);
+        println!(
+            "[REPL][{}] backoff {:?} to {} (attempt {} delay={}s)",
+            task.group_id, task.kind, task.peer, task.attempt, delay
+        );
         self.replication_queue.push_back(task);
     }
 
@@ -2331,10 +2450,7 @@ impl ChatState {
             }
         }))
         .ok()?;
-        let request = Request::new()
-            .target(target)
-            .body(body)
-            .expects_response(5);
+        let request = Request::new().target(target).body(body).expects_response(5);
 
         match send::<CrdtUpdateRes>(request).await {
             Ok(res) => Some(res),
@@ -2438,12 +2554,7 @@ impl ChatState {
             let doc = manager.doc();
             doc.state_vector()
         };
-        log_crdt_event(
-            &doc_id,
-            context,
-            &new_vector,
-            Some(update_bytes.len()),
-        );
+        log_crdt_event(&doc_id, context, &new_vector, Some(update_bytes.len()));
         manager.set_last_state_vector(new_vector.clone());
         self.update_local_hub_sync_state(group_id, &new_vector);
 
@@ -2451,8 +2562,6 @@ impl ChatState {
         self.mark_group_bootstrapped(group_id);
         Ok(())
     }
-
-
 
     // WEBSOCKET HANDLERS
 
