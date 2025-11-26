@@ -2075,7 +2075,7 @@ impl ChatState {
 
     #[local]
     #[http]
-    async fn replication_work(&mut self) -> Result<String, String> {
+    async fn replication_work(&mut self) -> Result<(), String> {
         let now = ChatState::now_secs();
         let applied = self.consume_broker_topics(32);
         if applied > 0 {
@@ -2093,7 +2093,8 @@ impl ChatState {
             processed += 1;
         }
 
-        Ok(format!("replication processed {}", processed))
+        println!("[REPL] replication processed {}", processed);
+        Ok(())
     }
 
     #[remote]

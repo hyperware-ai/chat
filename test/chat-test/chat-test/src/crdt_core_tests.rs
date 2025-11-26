@@ -11,6 +11,21 @@ pub fn run_group_crdt_flow_tests(local_node: &str, remote_node: &str) {
     let create_group_res = create_group(&local, "Split CRDT Group");
     let group_id = create_group_res.group_id.clone();
 
+    // Make the remote node a hub before bootstrapping so it can fetch state vectors.
+    let hub_role = format!("{group_id}:owner");
+    let invite = invite_group_member(&local, &group_id, remote_node, &hub_role);
+    match invite.decision.status.as_str() {
+        "Approved" => {}
+        "Pending" => {
+            let proposal_id = membership_proposal_id(&group_id, remote_node, "invite");
+            let approval = approve_group_membership(&local, &group_id, &proposal_id);
+            if approval.decision.status != "Approved" {
+                fail_with("expected membership approval to succeed");
+            }
+        }
+        other => fail_with(format!("unexpected membership decision status: {other}")),
+    }
+
     let child = create_group_thread(&local, &group_id, None);
     assert_thread_suffix(&child.thread_id, 1);
 
@@ -129,6 +144,20 @@ struct SendGroupMessageRes {
 struct MessageMetaLite {
     message_id: String,
 }
+
+#[derive(Deserialize)]
+struct MembershipDecisionRes {
+    decision: MembershipDecisionLite,
+}
+
+#[derive(Deserialize)]
+struct MembershipDecisionLite {
+    status: String,
+    #[serde(default)]
+    missing_signatures: Vec<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
 fn crdt_group_state_vector(
     address: &Address,
     group_id: &str,
@@ -223,6 +252,38 @@ fn send_group_message(
     unwrap_chat_result(result)
 }
 
+fn invite_group_member(
+    address: &Address,
+    group_id: &str,
+    candidate: &str,
+    role_id: &str,
+) -> MembershipDecisionRes {
+    let payload = json!({
+        "InviteGroupMember": {
+            "group_id": group_id,
+            "candidate": candidate,
+            "role_id": role_id
+        }
+    });
+    let result: Result<MembershipDecisionRes, String> = send_chat_rpc(address, payload);
+    unwrap_chat_result(result)
+}
+
+fn approve_group_membership(
+    address: &Address,
+    group_id: &str,
+    proposal_id: &str,
+) -> MembershipDecisionRes {
+    let payload = json!({
+        "ApproveGroupMembership": {
+            "group_id": group_id,
+            "proposal_id": proposal_id
+        }
+    });
+    let result: Result<MembershipDecisionRes, String> = send_chat_rpc(address, payload);
+    unwrap_chat_result(result)
+}
+
 fn assert_thread_suffix(thread_id: &str, expected: u64) {
     match thread_id.rsplit(':').next().and_then(|s| s.parse::<u64>().ok()) {
         Some(n) if n == expected => {}
@@ -288,4 +349,8 @@ fn fail_with(message: impl Into<String>) -> ! {
     let log = format!("crdt_core: error: {message}");
     print_to_terminal(0, log.as_str());
     crate::fail!(message);
+}
+
+fn membership_proposal_id(group_id: &str, candidate: &str, action: &str) -> String {
+    format!("{group_id}:{action}:{candidate}")
 }
