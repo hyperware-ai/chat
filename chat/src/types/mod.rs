@@ -1028,7 +1028,17 @@ impl<'de> Deserialize<'de> for ChatState {
 }
 
 impl ChatState {
+    #[cfg(feature = "test-helpers")]
+    pub fn now_secs() -> u64 {
+        Self::now_secs_inner()
+    }
+
+    #[cfg(not(feature = "test-helpers"))]
     pub(crate) fn now_secs() -> u64 {
+        Self::now_secs_inner()
+    }
+
+    fn now_secs_inner() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1379,7 +1389,17 @@ impl ChatState {
         applied
     }
 
+    #[cfg(feature = "test-helpers")]
+    pub fn enqueue_stale_subscriber_replays(&mut self, now: u64) {
+        self.enqueue_stale_subscriber_replays_inner(now);
+    }
+
+    #[cfg(not(feature = "test-helpers"))]
     pub(crate) fn enqueue_stale_subscriber_replays(&mut self, now: u64) {
+        self.enqueue_stale_subscriber_replays_inner(now);
+    }
+
+    fn enqueue_stale_subscriber_replays_inner(&mut self, now: u64) {
         for (group_id, group) in self.groups.iter() {
             if group.routing.subscriber_topic.is_empty() {
                 continue;
@@ -1438,7 +1458,27 @@ impl ChatState {
         }
     }
 
+    #[cfg(feature = "test-helpers")]
+    pub fn apply_broker_envelope(
+        &mut self,
+        topic: &str,
+        env: &BrokerEnvelope,
+        now: u64,
+    ) -> Result<(), String> {
+        self.apply_broker_envelope_inner(topic, env, now)
+    }
+
+    #[cfg(not(feature = "test-helpers"))]
     fn apply_broker_envelope(
+        &mut self,
+        topic: &str,
+        env: &BrokerEnvelope,
+        now: u64,
+    ) -> Result<(), String> {
+        self.apply_broker_envelope_inner(topic, env, now)
+    }
+
+    fn apply_broker_envelope_inner(
         &mut self,
         topic: &str,
         env: &BrokerEnvelope,

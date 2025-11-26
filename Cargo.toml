@@ -8,6 +8,7 @@ members = [
     "chat",
     "send-bulk",
     "debug-chats",
+    "target/chat-caller-utils",
     "target/chat-caller-util?",
 ]
 resolver = "2"

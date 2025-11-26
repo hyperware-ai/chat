@@ -36,6 +36,12 @@ mod types;
 pub use crdt::GroupDocState;
 pub use types::*;
 
+#[cfg(feature = "test-helpers")]
+pub mod test_exports {
+    pub use crate::crdt::{DeliveryCursor, Group, GroupRoutingConfig, SubscriberSyncState};
+    pub use crate::types::{BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask};
+}
+
 use crate::crdt::{Group, GroupId};
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
@@ -323,7 +329,8 @@ impl ChatState {
         let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
         spawn(async move {
             loop {
-                let body = serde_json::to_vec(&serde_json::json!({"ReplicationWork": {}}))
+                // WIT defines ReplicationWork as a unit variant; use null payload.
+                let body = serde_json::to_vec(&serde_json::json!({"ReplicationWork": null}))
                     .unwrap_or_default();
                 let _ = Request::new().target(self_addr.clone()).body(body).send();
                 let _ = sleep(5000).await;
@@ -2202,6 +2209,108 @@ impl ChatState {
         Ok(SubscriberEventsRes { events })
     }
 
+    // WEBSOCKET HANDLERS
+
+    #[ws]
+    fn websocket(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
+        // We'll differentiate between public and private connections via authentication
+        match message_type {
+            WsMessageType::Close => {
+                println!("WebSocket connection closed: {}", channel_id);
+                // Clean up connection
+                if let Some(node) = self.ws_connections.remove(&channel_id) {
+                    self.online_nodes.remove(&node);
+                    // Broadcast status update
+                    let status_msg = WsServerMessage::StatusUpdate {
+                        node: node.clone(),
+                        status: "offline".to_string(),
+                    };
+                    self.broadcast_ws_message(&status_msg);
+                }
+
+                // Clean up browser connections
+                self.browser_connections.retain(|_, &mut v| v != channel_id);
+                self.active_connections.remove(&channel_id);
+            }
+            WsMessageType::Text => {
+                // Parse and handle client message
+                if let Ok(payload) = String::from_utf8(blob.bytes.clone()) {
+                    match serde_json::from_str::<WsClientMessage>(&payload) {
+                        Ok(msg) => {
+                            println!(
+                                "WebSocket: Received message from channel {}: {:?}",
+                                channel_id, msg
+                            );
+                            // Initialize connection if not already present
+                            if !self.ws_connections.contains_key(&channel_id)
+                                && !self
+                                    .browser_connections
+                                    .values()
+                                    .any(|&ch| ch == channel_id)
+                            {
+                                println!(
+                                    "WebSocket: New connection from channel {}, initializing...",
+                                    channel_id
+                                );
+                                self.ws_connections.insert(channel_id, our().node.clone());
+
+                                // Send all existing chats to the new connection
+                                println!(
+                                    "WebSocket: Sending {} chats to new connection",
+                                    self.chats.len()
+                                );
+                                for chat in self.chats.values() {
+                                    println!(
+                                        "WebSocket: Sending chat {} with {} messages",
+                                        chat.id,
+                                        chat.messages.len()
+                                    );
+                                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+                                    self.push_ws_message(channel_id, &chat_update);
+                                }
+                                println!(
+                                    "WebSocket: Initial chat sync complete for channel {}",
+                                    channel_id
+                                );
+                            }
+
+                            // Check if this is a browser chat authentication
+                            if let WsClientMessage::AuthWithKey { .. } = &msg {
+                                self.handle_browser_message(channel_id, msg);
+                            } else if self
+                                .browser_connections
+                                .values()
+                                .any(|&ch| ch == channel_id)
+                            {
+                                // If already authenticated as browser
+                                self.handle_browser_message(channel_id, msg);
+                            } else {
+                                // Node-to-node message
+                                self.handle_client_message(channel_id, msg);
+                            }
+                        }
+                        Err(e) => {
+                            let error = WsServerMessage::Error {
+                                message: format!("Invalid message format: {}", e),
+                            };
+                            self.push_ws_message(channel_id, &error);
+                        }
+                    }
+                }
+            }
+            WsMessageType::Binary => {
+                // Handle binary messages if needed (e.g., for voice calls later)
+                println!("Binary message received on channel {}", channel_id);
+            }
+            WsMessageType::Ping | WsMessageType::Pong => {
+                // Ignore ping/pong messages
+            }
+        }
+    }
+}
+
+// Replication helpers (outside hyperprocess impl)
+impl ChatState {
     async fn process_replication_task(&mut self, task: ReplicationTask) {
         let now = ChatState::now_secs();
         match task.kind {
@@ -2561,105 +2670,6 @@ impl ChatState {
         group_state.apply_into(self);
         self.mark_group_bootstrapped(group_id);
         Ok(())
-    }
-
-    // WEBSOCKET HANDLERS
-
-    #[ws]
-    fn websocket(&mut self, channel_id: u32, message_type: WsMessageType, blob: LazyLoadBlob) {
-        // We'll differentiate between public and private connections via authentication
-        match message_type {
-            WsMessageType::Close => {
-                println!("WebSocket connection closed: {}", channel_id);
-                // Clean up connection
-                if let Some(node) = self.ws_connections.remove(&channel_id) {
-                    self.online_nodes.remove(&node);
-                    // Broadcast status update
-                    let status_msg = WsServerMessage::StatusUpdate {
-                        node: node.clone(),
-                        status: "offline".to_string(),
-                    };
-                    self.broadcast_ws_message(&status_msg);
-                }
-
-                // Clean up browser connections
-                self.browser_connections.retain(|_, &mut v| v != channel_id);
-                self.active_connections.remove(&channel_id);
-            }
-            WsMessageType::Text => {
-                // Parse and handle client message
-                if let Ok(payload) = String::from_utf8(blob.bytes.clone()) {
-                    match serde_json::from_str::<WsClientMessage>(&payload) {
-                        Ok(msg) => {
-                            println!(
-                                "WebSocket: Received message from channel {}: {:?}",
-                                channel_id, msg
-                            );
-                            // Initialize connection if not already present
-                            if !self.ws_connections.contains_key(&channel_id)
-                                && !self
-                                    .browser_connections
-                                    .values()
-                                    .any(|&ch| ch == channel_id)
-                            {
-                                println!(
-                                    "WebSocket: New connection from channel {}, initializing...",
-                                    channel_id
-                                );
-                                self.ws_connections.insert(channel_id, our().node.clone());
-
-                                // Send all existing chats to the new connection
-                                println!(
-                                    "WebSocket: Sending {} chats to new connection",
-                                    self.chats.len()
-                                );
-                                for chat in self.chats.values() {
-                                    println!(
-                                        "WebSocket: Sending chat {} with {} messages",
-                                        chat.id,
-                                        chat.messages.len()
-                                    );
-                                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                                    self.push_ws_message(channel_id, &chat_update);
-                                }
-                                println!(
-                                    "WebSocket: Initial chat sync complete for channel {}",
-                                    channel_id
-                                );
-                            }
-
-                            // Check if this is a browser chat authentication
-                            if let WsClientMessage::AuthWithKey { .. } = &msg {
-                                self.handle_browser_message(channel_id, msg);
-                            } else if self
-                                .browser_connections
-                                .values()
-                                .any(|&ch| ch == channel_id)
-                            {
-                                // If already authenticated as browser
-                                self.handle_browser_message(channel_id, msg);
-                            } else {
-                                // Node-to-node message
-                                self.handle_client_message(channel_id, msg);
-                            }
-                        }
-                        Err(e) => {
-                            let error = WsServerMessage::Error {
-                                message: format!("Invalid message format: {}", e),
-                            };
-                            self.push_ws_message(channel_id, &error);
-                        }
-                    }
-                }
-            }
-            WsMessageType::Binary => {
-                // Handle binary messages if needed (e.g., for voice calls later)
-                println!("Binary message received on channel {}", channel_id);
-            }
-            WsMessageType::Ping | WsMessageType::Pong => {
-                // Ignore ping/pong messages
-            }
-        }
     }
 }
 
