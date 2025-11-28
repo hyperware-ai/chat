@@ -1,0 +1,26 @@
+{
+  "send-bulk.wasm": {
+    "root": false,
+    "public": false,
+    "request_networking": false,
+    "request_capabilities": [
+      "chat:chat:ware.hypr"
+    ],
+    "grant_capabilities": [
+      "chat:chat:ware.hypr"
+    ],
+    "wit_version": 1
+  },
+  "debug-chats.wasm": {
+    "root": false,
+    "public": false,
+    "request_networking": false,
+    "request_capabilities": [
+      "chat:chat:ware.hypr"
+    ],
+    "grant_capabilities": [
+      "chat:chat:ware.hypr"
+    ],
+    "wit_version": 1
+  }
+}

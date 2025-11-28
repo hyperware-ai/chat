@@ -1028,6 +1028,31 @@ impl<'de> Deserialize<'de> for ChatState {
 }
 
 impl ChatState {
+    pub(crate) fn local_group_acl_ready(&self, group_id: &GroupId) -> bool {
+        let Some(whitelist) = self.pubsub.whitelist(group_id) else {
+            return false;
+        };
+        let Some(routing) = self.pubsub.routing(group_id) else {
+            return false;
+        };
+        let node = BrokerNodeId::new(our().node.clone());
+        let now = SystemTime::now();
+        let hub_ok = if routing.hub_topic.is_empty() {
+            false
+        } else {
+            let topic = BrokerTopicId::new(routing.hub_topic.clone());
+            whitelist.subscribe_scope(&node, &topic, now).is_some()
+                || whitelist.publish_scope(&node, &topic, now).is_some()
+        };
+        let sub_ok = if routing.subscriber_topic.is_empty() {
+            false
+        } else {
+            let topic = BrokerTopicId::new(routing.subscriber_topic.clone());
+            whitelist.subscribe_scope(&node, &topic, now).is_some()
+        };
+        hub_ok || sub_ok
+    }
+
     #[cfg(feature = "test-helpers")]
     pub fn now_secs() -> u64 {
         Self::now_secs_inner()
@@ -1546,6 +1571,7 @@ impl ChatState {
             &env.payload,
             "broker_delivery",
             env.acl_version,
+            is_subscriber_topic,
         )
         .map_err(|err| {
             self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
@@ -1778,10 +1804,56 @@ impl ChatState {
     }
 
     pub fn group_needs_bootstrap(&self, group_id: &GroupId) -> bool {
-        self.groups_pending_bootstrap.contains(group_id) || !self.groups.contains_key(group_id)
+        let needs =
+            self.groups_pending_bootstrap.contains(group_id) || !self.groups.contains_key(group_id);
+        if needs {
+            println!(
+                "[BOOT] group_needs_bootstrap group_id={} pending_set_contains={} has_group={}",
+                group_id,
+                self.groups_pending_bootstrap.contains(group_id),
+                self.groups.contains_key(group_id)
+            );
+        }
+        needs
+    }
+
+    pub(crate) fn refresh_bootstrap_flags(&mut self) {
+        let ready: Vec<GroupId> = self
+            .groups_pending_bootstrap
+            .iter()
+            .filter(|gid| {
+                let has_local_membership = self
+                    .groups
+                    .get(*gid)
+                    .and_then(|g| g.members.get(&our().node))
+                    .map(|m| m.status == MembershipStatus::Active)
+                    .unwrap_or(false);
+                let acl_ready = self.local_group_acl_ready(gid);
+                has_local_membership || acl_ready
+            })
+            .cloned()
+            .collect();
+        for gid in ready {
+            println!(
+                "[BOOT] clearing pending_bootstrap for {} (acl_ready={} local_member_active={})",
+                gid,
+                self.local_group_acl_ready(&gid),
+                self.groups
+                    .get(&gid)
+                    .and_then(|g| g.members.get(&our().node))
+                    .map(|m| m.status == MembershipStatus::Active)
+                    .unwrap_or(false)
+            );
+            self.groups_pending_bootstrap.remove(&gid);
+        }
     }
 
     pub fn mark_group_bootstrapped(&mut self, group_id: &GroupId) {
+        println!(
+            "[BOOT] mark_group_bootstrapped group_id={} pending_before={}",
+            group_id,
+            self.groups_pending_bootstrap.contains(group_id)
+        );
         self.groups_pending_bootstrap.remove(group_id);
     }
 
@@ -1790,10 +1862,14 @@ impl ChatState {
         group_id: &GroupId,
     ) -> Result<&mut GroupCrdtManager, CommitteeError> {
         if !self.group_doc_managers.contains_key(group_id) {
-            let group = self.groups.get(group_id).ok_or_else(|| {
-                CommitteeError::Observer(format!("missing group {} for CRDT", group_id))
-            })?;
-            let manager = GroupCrdtManager::from_group(group_id, group)?;
+            // If we don't have the group yet, create an empty doc so the first
+            // incoming snapshot can populate it without being merged with a
+            // default-initialised state.
+            let manager = if let Some(group) = self.groups.get(group_id) {
+                GroupCrdtManager::from_group(group_id, group)?
+            } else {
+                GroupCrdtManager::from_empty(group_id)?
+            };
             self.group_doc_managers.insert(group_id.clone(), manager);
         }
 
@@ -2106,7 +2182,7 @@ impl ChatState {
                     )
                 } else {
                     (
-                        ThreadParentRef::Root(req.group_id.clone()),
+                        ThreadParentRef::Root(root_thread_id.clone()),
                         0,
                         Some(root_thread_id.clone()),
                     )
@@ -2130,7 +2206,12 @@ impl ChatState {
                 }
             }
             if let Some(meta) = group.metadata.as_mut() {
-                meta.updated_at = now;
+                // Ensure updated_at advances even if called within the same second.
+                let mut ts = now;
+                if meta.updated_at >= ts {
+                    ts = meta.updated_at.saturating_add(1);
+                }
+                meta.updated_at = ts;
             }
         }
         self.commit_group_crdt_or_log(&req.group_id, "create_group_thread");

@@ -11,7 +11,7 @@ use hyperware_crdt::yrs::{Decode, Encode, StateVector};
 use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::{send_ws_push, WsMessageType},
-    hyperapp::{send, sleep, spawn, SaveOptions},
+    hyperapp::{send, sleep, spawn, AppSendError, SaveOptions},
     our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use std::cmp::Ordering;
@@ -19,12 +19,14 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // Import generated RPC functions from caller-utils
 use chat_caller_utils::chat::{
     receive_chat_creation_remote_rpc, receive_message_ack_remote_rpc,
     receive_message_deletion_remote_rpc, receive_message_edit_remote_rpc,
     receive_message_remote_rpc, receive_profile_update_remote_rpc, receive_reaction_remote_rpc,
+    receive_reaction_remove_remote_rpc,
 };
 use chat_caller_utils::ChatMessage as CUChatMessage;
 use chat_caller_utils::UserProfile as CUUserProfile;
@@ -42,9 +44,11 @@ pub mod test_exports {
     pub use crate::types::{BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask};
 }
 
-use crate::crdt::{Group, GroupId};
+use crate::crdt::{Group, GroupId, MembershipStatus};
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
+// Replication RPC timeout to keep admin/test calls responsive.
+const REPL_RPC_TIMEOUT_SECS: u64 = 2;
 const ICON: &str = include_str!("./icon");
 
 // Helper function to enforce one-way status transitions
@@ -136,8 +140,31 @@ pub(crate) fn log_crdt_event(
     }
 }
 
+fn log_group_state_summary(doc_id: &str, context: &str, state: &GroupDocState) {
+    let member_count = state.group.members.len();
+    let hubs_count = state.group.hubs.active.len();
+    let subs_count = state.group.subscribers.entries.len();
+    let roles_count = state.group.roles.len();
+    let sample_members: Vec<String> = state
+        .group
+        .members
+        .keys()
+        .take(3)
+        .cloned()
+        .collect();
+    println!(
+        "[CRDT][{}] context={} state_summary members={} hubs={} subs={} roles={} sample_members={:?}",
+        doc_id, context, member_count, hubs_count, subs_count, roles_count, sample_members
+    );
+}
+
 // Helper function to send push notification for a message
 async fn send_push_notification_for_message(sender: &str, content: &str, chat_id: &str) {
+    if cfg!(feature = "disable-notifications") {
+        println!("[NOTIFY] skipping push notification (disable-notifications feature enabled)");
+        return;
+    }
+    let notify_started = Instant::now();
     // Send notification to notifications server (it will send to all registered devices)
     let notifications_address = Address::new(
         &our().node,
@@ -169,6 +196,14 @@ async fn send_push_notification_for_message(sender: &str, content: &str, chat_id
     let request = Request::to(notifications_address.clone())
         .body(serde_json::to_vec(&notification_action).unwrap())
         .expects_response(5);
+    if let Ok(body_str) = serde_json::to_string(&notification_action) {
+        println!(
+            "[NOTIFY] sending to {} body_len={} body={}",
+            notifications_address,
+            body_str.len(),
+            body_str
+        );
+    }
 
     match send::<NotificationsResponse>(request).await {
         Ok(resp) => {
@@ -193,9 +228,13 @@ async fn send_push_notification_for_message(sender: &str, content: &str, chat_id
                                     endpoint: endpoint.to_string(),
                                 };
 
-                                let remove_request = Request::to(notifications_address)
+                                let remove_request = Request::to(notifications_address.clone())
                                     .body(serde_json::to_vec(&remove_action).unwrap())
                                     .expects_response(5);
+                                println!(
+                                    "[NOTIFY] removing invalid endpoint {} via {}",
+                                    endpoint, notifications_address
+                                );
 
                                 // Fire and forget the removal request
                                 spawn(async move {
@@ -222,9 +261,17 @@ async fn send_push_notification_for_message(sender: &str, content: &str, chat_id
                     println!("Unexpected notification response");
                 }
             }
+            println!(
+                "[NOTIFY_DIAG] send_push_notification ok elapsed_ms={}",
+                notify_started.elapsed().as_millis()
+            );
         }
         Err(e) => {
             println!("Error sending notification request: {:?}", e);
+            println!(
+                "[NOTIFY_DIAG] send_push_notification err elapsed_ms={}",
+                notify_started.elapsed().as_millis()
+            );
         }
     }
 }
@@ -999,9 +1046,9 @@ impl ChatState {
     #[http]
     async fn remove_reaction(&mut self, req: RemoveReactionReq) -> Result<String, String> {
         let user = our().node.clone();
-        let mut removal_update: Option<WsServerMessage> = None;
+        let mut removal: Option<(WsServerMessage, String, String, String)> = None;
 
-        // Find and remove reaction from message
+        // Find and remove reaction from message, and determine counterparty to notify
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
                 if let Some(pos) = message
@@ -1010,13 +1057,36 @@ impl ChatState {
                     .position(|r| r.user == user && r.emoji == req.emoji)
                 {
                     message.reactions.remove(pos);
-                    removal_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+
+                    let target_node = if message.sender != our().node {
+                        message.sender.clone()
+                    } else {
+                        chat.counterparty.clone()
+                    };
+
+                    removal = Some((
+                        WsServerMessage::ChatUpdate(chat.clone()),
+                        target_node,
+                        req.message_id.clone(),
+                        req.emoji.clone(),
+                    ));
                 }
             }
         }
 
-        if let Some(chat_update) = removal_update {
+        if let Some((chat_update, target_node, msg_id, emoji)) = removal {
+            // Update local subscribers
             self.broadcast_ws_message(&chat_update);
+
+            // Notify counterparty to remove the reaction on their copy as well
+            spawn(async move {
+                let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
+                match receive_reaction_remove_remote_rpc(&target, msg_id, emoji, user).await {
+                    Ok(_) => println!("Successfully sent reaction removal to counterparty"),
+                    Err(e) => println!("Failed to send reaction removal to counterparty: {:?}", e),
+                }
+            });
+
             return Ok("Reaction removed".to_string());
         }
 
@@ -1728,6 +1798,41 @@ impl ChatState {
         Ok(())
     }
 
+    // Remote handler for removing reactions
+    #[remote]
+    async fn receive_reaction_remove(
+        &mut self,
+        message_id: String,
+        emoji: String,
+        user: String,
+    ) -> Result<(), String> {
+        println!(
+            "Received reaction removal {} from {} for message {}",
+            emoji, user, message_id
+        );
+
+        let mut update: Option<WsServerMessage> = None;
+        for chat in self.chats.values_mut() {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                if let Some(pos) = message
+                    .reactions
+                    .iter()
+                    .position(|r| r.user == user && r.emoji == emoji)
+                {
+                    message.reactions.remove(pos);
+                    update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                }
+                break;
+            }
+        }
+
+        if let Some(chat_update) = update {
+            self.broadcast_ws_message(&chat_update);
+        }
+
+        Ok(())
+    }
+
     #[remote]
     async fn receive_message_edit(
         &mut self,
@@ -1974,6 +2079,31 @@ impl ChatState {
         let manager = self
             .ensure_group_doc_manager(&req.group_id)
             .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+        println!(
+            "[CRDT][{}] crdt_group_update: state_vector={:?} doc_id={} manager_ptr={:p}",
+            req.group_id,
+            req.state_vector,
+            manager.doc().id(),
+            manager.doc()
+        );
+
+        if let Ok(state) = manager.doc().read_state() {
+            log_group_state_summary(
+                manager.doc().id(),
+                "crdt_group_update:sender_state",
+                &state,
+            );
+            println!(
+                "[CRDT][{}] sender_state members={:?}",
+                manager.doc().id(),
+                state
+                    .group
+                    .members
+                    .iter()
+                    .map(|(k, v)| (k, (&v.role_id, v.status)))
+                    .collect::<Vec<_>>()
+            );
+        }
 
         let state_vector =
             if let Some(encoded_sv) = req.state_vector.as_ref().filter(|s| !s.trim().is_empty()) {
@@ -2025,6 +2155,7 @@ impl ChatState {
             &req.update_payload,
             "crdt_group_apply_update",
             req.acl_version,
+            false,
         )?;
         Ok(CrdtApplyRes { applied: true })
     }
@@ -2050,6 +2181,14 @@ impl ChatState {
             .ensure_group_doc_manager(&req.group_id)
             .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
 
+        if let Ok(state) = manager.doc().read_state() {
+            log_group_state_summary(
+                manager.doc().id(),
+                "crdt_group_snapshot:sender_state",
+                &state,
+            );
+        }
+
         let (doc_id, state_vector, update_bytes) = {
             let doc = manager.doc();
             (
@@ -2073,9 +2212,20 @@ impl ChatState {
         })
     }
 
+    // uncomment #[remote] for tests
+    #[remote]
     #[local]
     #[http]
     async fn replication_work(&mut self) -> Result<(), String> {
+        self.refresh_bootstrap_flags();
+        let started = Instant::now();
+        let time_budget = Duration::from_secs(12);
+        println!(
+            "[REPL] replication_work invoked pending_bootstrap={:?} queue_len={} now={}",
+            self.groups_pending_bootstrap,
+            self.replication_queue.len(),
+            ChatState::now_secs()
+        );
         let now = ChatState::now_secs();
         let applied = self.consume_broker_topics(32);
         if applied > 0 {
@@ -2085,7 +2235,15 @@ impl ChatState {
         self.enqueue_stale_subscriber_replays(now);
 
         let mut processed = 0usize;
-        while processed < 16 {
+        while processed < 6 {
+            if started.elapsed() >= time_budget {
+                println!(
+                    "[REPL] replication_work time budget exhausted after {} tasks (elapsed {}ms)",
+                    processed,
+                    started.elapsed().as_millis()
+                );
+                break;
+            }
             let Some(task) = self.next_ready_replication_task(now) else {
                 break;
             };
@@ -2093,7 +2251,27 @@ impl ChatState {
             processed += 1;
         }
 
-        println!("[REPL] replication processed {}", processed);
+        println!(
+            "[REPL] replication processed {} (elapsed {}ms) pending_bootstrap={:?}",
+            processed,
+            started.elapsed().as_millis(),
+            self.groups_pending_bootstrap
+        );
+        if started.elapsed() > Duration::from_secs(5) {
+            println!(
+                "[REPL_DIAG] replication_work slow_call elapsed_ms={} queue_len_end={} pending_bootstrap_end={:?}",
+                started.elapsed().as_millis(),
+                self.replication_queue.len(),
+                self.groups_pending_bootstrap
+            );
+        } else {
+            println!(
+                "[REPL_DIAG] replication_work done elapsed_ms={} queue_len_end={} pending_bootstrap_end={:?}",
+                started.elapsed().as_millis(),
+                self.replication_queue.len(),
+                self.groups_pending_bootstrap
+            );
+        }
         Ok(())
     }
 
@@ -2101,9 +2279,15 @@ impl ChatState {
     #[local]
     #[http]
     async fn admin_replication_state(
-        &self,
+        &mut self,
         req: AdminReplicationStateReq,
     ) -> Result<AdminReplicationStateRes, String> {
+        self.refresh_bootstrap_flags();
+        println!(
+            "[ADMIN] admin_replication_state invoked filter={:?} group_count={}",
+            req.group_id,
+            self.groups.len()
+        );
         let filter = req.group_id;
         let now = ChatState::now_secs();
         let groups: Vec<GroupReplicationState> = self
@@ -2111,6 +2295,16 @@ impl ChatState {
             .iter()
             .filter(|(id, _)| filter.as_ref().map_or(true, |gid| gid == *id))
             .map(|(group_id, group)| {
+                let local_member_status = group.members.get(&our().node).map(|m| m.status);
+                println!(
+                    "[ADMIN][{}] pending_bootstrap={} local_member_status={:?} whitelist_version={:?} hub_topic={} sub_topic={}",
+                    group_id,
+                    self.group_needs_bootstrap(group_id),
+                    local_member_status,
+                    self.pubsub.whitelist(group_id).map(|w| w.version()),
+                    group.routing.hub_topic,
+                    group.routing.subscriber_topic,
+                );
                 let sub_lag = group
                     .delivery
                     .subscriber_cursors
@@ -2146,6 +2340,11 @@ impl ChatState {
     #[local]
     #[http]
     async fn admin_whitelist(&self, req: AdminWhitelistReq) -> Result<AdminWhitelistRes, String> {
+        println!(
+            "[ADMIN] admin_whitelist invoked group_id={} has_whitelist={}",
+            req.group_id,
+            self.pubsub.whitelist(&req.group_id).is_some()
+        );
         let whitelist = self
             .pubsub
             .whitelist(&req.group_id)
@@ -2193,15 +2392,17 @@ impl ChatState {
         &mut self,
         req: SubscriberEventsReq,
     ) -> Result<SubscriberEventsRes, String> {
+        println!(
+            "[ADMIN] admin_subscriber_events invoked clear={} take={:?} buffered={}",
+            req.clear,
+            req.take,
+            self.subscriber_events.len()
+        );
         let take = req.take.unwrap_or(50);
         let events = if req.clear {
-            let mut drained: Vec<SubscriberDeliveryEvent> =
-                self.subscriber_events.drain(..).collect();
-            if drained.len() > take {
-                let start = drained.len() - take;
-                drained.drain(0..start);
-            }
-            drained
+            // Clearing should drop pending events and return an empty list to signal nothing remains.
+            self.subscriber_events.clear();
+            Vec::new()
         } else {
             let len = self.subscriber_events.len();
             let start = len.saturating_sub(take);
@@ -2401,41 +2602,90 @@ impl ChatState {
                 .unwrap_or_default();
 
                 let target = Address::from((task.peer.as_str(), OUR_PROCESS_ID));
-                let req = Request::new().target(target).body(body).expects_response(5);
-                match send::<CrdtApplyRes>(req).await {
-                    Ok(res) => {
-                        if res.applied {
-                            self.update_peer_state_vector(
-                                &task.group_id,
-                                &task.peer,
-                                &state_vector,
-                            );
-                            let queue_id = if is_hub {
-                                self.groups
-                                    .get(&task.group_id)
-                                    .map(|g| g.routing.hub_topic.clone())
-                                    .unwrap_or_default()
+                let req = Request::new()
+                    .target(target.clone())
+                    .body(body)
+                    .expects_response(REPL_RPC_TIMEOUT_SECS);
+                println!(
+                    "[REPL][{}] push kind={:?} peer={} target={:?}",
+                    task.group_id, task.kind, task.peer, target
+                );
+                let rpc_started = Instant::now();
+                match send::<serde_json::Value>(req).await {
+                    Ok(val) => {
+                        println!(
+                            "[REPL_DIAG][{}] push roundtrip_ms={} kind={:?} peer={}",
+                            task.group_id,
+                            rpc_started.elapsed().as_millis(),
+                            task.kind,
+                            task.peer
+                        );
+                        let apply_res = val
+                            .get("Ok")
+                            .cloned()
+                            .or_else(|| Some(val.clone()))
+                            .and_then(|v| serde_json::from_value::<CrdtApplyRes>(v).ok());
+                        if let Some(res) = apply_res {
+                            if res.applied {
+                                self.update_peer_state_vector(
+                                    &task.group_id,
+                                    &task.peer,
+                                    &state_vector,
+                                );
+                                let queue_id = if is_hub {
+                                    self.groups
+                                        .get(&task.group_id)
+                                        .map(|g| g.routing.hub_topic.clone())
+                                        .unwrap_or_default()
+                                } else {
+                                    self.groups
+                                        .get(&task.group_id)
+                                        .map(|g| g.routing.subscriber_topic.clone())
+                                        .unwrap_or_default()
+                                };
+                                self.update_delivery_cursor(
+                                    &task.group_id,
+                                    &task.peer,
+                                    is_hub,
+                                    queue_id,
+                                    None,
+                                );
                             } else {
-                                self.groups
-                                    .get(&task.group_id)
-                                    .map(|g| g.routing.subscriber_topic.clone())
-                                    .unwrap_or_default()
-                            };
-                            self.update_delivery_cursor(
-                                &task.group_id,
-                                &task.peer,
-                                is_hub,
-                                queue_id,
-                                None,
-                            );
+                                self.schedule_backoff(task, now);
+                            }
                         } else {
+                            println!(
+                                "[REPL][{}] failed to decode apply response from {}: {:?}",
+                                task.group_id, task.peer, val
+                            );
                             self.schedule_backoff(task, now);
                         }
                     }
-                    Err(err) => {
+                    Err(AppSendError::SendError(send_err)) => {
                         println!(
-                            "[REPL][{}] push to {} failed: {:?}",
-                            task.group_id, task.peer, err
+                            "[REPL][{}] push to {} send error: {:?} (kind={:?} target={:?})",
+                            task.group_id, task.peer, send_err, task.kind, target
+                        );
+                        println!(
+                            "[REPL_DIAG][{}] push send_err after_ms={} kind={:?} peer={}",
+                            task.group_id,
+                            rpc_started.elapsed().as_millis(),
+                            task.kind,
+                            task.peer
+                        );
+                        self.schedule_backoff(task, now);
+                    }
+                    Err(AppSendError::BuildError(build_err)) => {
+                        println!(
+                            "[REPL][{}] push to {} build error: {:?} (kind={:?} target={:?})",
+                            task.group_id, task.peer, build_err, task.kind, target
+                        );
+                        println!(
+                            "[REPL_DIAG][{}] push build_err after_ms={} kind={:?} peer={}",
+                            task.group_id,
+                            rpc_started.elapsed().as_millis(),
+                            task.kind,
+                            task.peer
                         );
                         self.schedule_backoff(task, now);
                     }
@@ -2446,24 +2696,25 @@ impl ChatState {
                     .fetch_snapshot_from_peer(&task.group_id, &task.peer)
                     .await
                 {
-                    if let Err(err) = self.apply_group_update_payload(
-                        &task.group_id,
-                        &res.update_payload,
-                        "replication_pull_snapshot",
-                        None,
-                    ) {
-                        println!(
-                            "[REPL][{}] failed to apply snapshot from {}: {}",
-                            task.group_id, task.peer, err
-                        );
-                        self.schedule_backoff(task, now);
-                    } else {
-                        self.groups_pending_bootstrap.remove(&task.group_id);
-                    }
-                } else {
-                    self.schedule_backoff(task, now);
-                }
+            if let Err(err) = self.apply_group_update_payload(
+                &task.group_id,
+                &res.update_payload,
+                "replication_pull_snapshot",
+                None,
+                false,
+            ) {
+                println!(
+                    "[REPL][{}] failed to apply snapshot from {}: {}",
+                    task.group_id, task.peer, err
+                );
+                self.schedule_backoff(task, now);
+            } else if self.local_group_acl_ready(&task.group_id) {
+                self.groups_pending_bootstrap.remove(&task.group_id);
             }
+        } else {
+            self.schedule_backoff(task, now);
+        }
+    }
             ReplicationKind::PullDelta => {
                 let sv = self
                     .group_doc_managers
@@ -2481,6 +2732,7 @@ impl ChatState {
                         &res.update_payload,
                         "replication_pull_delta",
                         None,
+                        false,
                     ) {
                         println!(
                             "[REPL][{}] failed to apply delta from {}: {}",
@@ -2514,6 +2766,12 @@ impl ChatState {
             .cloned()
             .filter(|g| self.group_needs_bootstrap(g))
             .collect();
+        if !pending.is_empty() {
+            println!(
+                "[BOOT] enqueue_bootstrap_pulls pending_groups={:?}",
+                pending
+            );
+        }
         for group_id in pending {
             let peers: Vec<String> = self
                 .groups
@@ -2560,14 +2818,56 @@ impl ChatState {
             }
         }))
         .ok()?;
-        let request = Request::new().target(target).body(body).expects_response(5);
+        let request = Request::new()
+            .target(target.clone())
+            .body(body)
+            .expects_response(REPL_RPC_TIMEOUT_SECS);
+        println!(
+            "[REPL][{}] fetch_update_from_peer peer={} target={}",
+            group_id, peer, target
+        );
 
-        match send::<CrdtUpdateRes>(request).await {
-            Ok(res) => Some(res),
-            Err(err) => {
+        let req_started = Instant::now();
+        match send::<serde_json::Value>(request).await {
+            Ok(val) => {
+                let res = val
+                    .get("Ok")
+                    .cloned()
+                    .or_else(|| Some(val.clone()))
+                    .and_then(|v| serde_json::from_value::<CrdtUpdateRes>(v).ok());
+                if let Some(res) = res {
+                    println!(
+                        "[REPL_DIAG][{}] fetch_update_from_peer ok peer={} elapsed_ms={}",
+                        group_id,
+                        peer,
+                        req_started.elapsed().as_millis(),
+                    );
+                    Some(res)
+                } else {
+                    println!(
+                        "[REPL][{}] failed to decode delta from {} body={:?}",
+                        group_id, peer, val
+                    );
+                    None
+                }
+            }
+            Err(AppSendError::SendError(err)) => {
                 println!(
-                    "[REPL][{}] failed to fetch delta from {}: {:?}",
+                    "[REPL][{}] failed to fetch delta from {} send_err={:?}",
                     group_id, peer, err
+                );
+                println!(
+                    "[REPL_DIAG][{}] fetch_update_from_peer err peer={} elapsed_ms={}",
+                    group_id,
+                    peer,
+                    req_started.elapsed().as_millis()
+                );
+                None
+            }
+            Err(AppSendError::BuildError(build_err)) => {
+                println!(
+                    "[REPL][{}] failed to build delta request to {}: {:?}",
+                    group_id, peer, build_err
                 );
                 None
             }
@@ -2585,16 +2885,56 @@ impl ChatState {
         }))
         .ok()?;
         let request = Request::new()
-            .target(target)
+            .target(target.clone())
             .body(body)
-            .expects_response(10);
+            // Keep snapshot pulls within the replication_work RPC budget.
+            .expects_response(REPL_RPC_TIMEOUT_SECS);
+        println!(
+            "[REPL][{}] fetch_snapshot_from_peer peer={} target={}",
+            group_id, peer, target
+        );
 
-        match send::<CrdtUpdateRes>(request).await {
-            Ok(res) => Some(res),
-            Err(err) => {
+        let req_started = Instant::now();
+        match send::<serde_json::Value>(request).await {
+            Ok(val) => {
+                let res = val
+                    .get("Ok")
+                    .cloned()
+                    .or_else(|| Some(val.clone()))
+                    .and_then(|v| serde_json::from_value::<CrdtUpdateRes>(v).ok());
+                if let Some(res) = res {
+                    println!(
+                        "[REPL_DIAG][{}] fetch_snapshot_from_peer ok peer={} elapsed_ms={}",
+                        group_id,
+                        peer,
+                        req_started.elapsed().as_millis(),
+                    );
+                    Some(res)
+                } else {
+                    println!(
+                        "[REPL][{}] failed to decode snapshot from {} body={:?}",
+                        group_id, peer, val
+                    );
+                    None
+                }
+            }
+            Err(AppSendError::SendError(err)) => {
                 println!(
-                    "[REPL][{}] failed to fetch snapshot from {}: {:?}",
+                    "[REPL][{}] failed to fetch snapshot from {} send_err={:?}",
                     group_id, peer, err
+                );
+                println!(
+                    "[REPL_DIAG][{}] fetch_snapshot_from_peer err peer={} elapsed_ms={}",
+                    group_id,
+                    peer,
+                    req_started.elapsed().as_millis()
+                );
+                None
+            }
+            Err(AppSendError::BuildError(build_err)) => {
+                println!(
+                    "[REPL][{}] failed to build snapshot request to {}: {:?}",
+                    group_id, peer, build_err
                 );
                 None
             }
@@ -2607,7 +2947,24 @@ impl ChatState {
         update_payload: &str,
         context: &str,
         incoming_acl_version: Option<u64>,
+        is_subscriber_lane: bool,
     ) -> Result<(), String> {
+        let local_has_access = self.local_group_acl_ready(group_id);
+        let local_member_status = self
+            .groups
+            .get(group_id)
+            .and_then(|g| g.members.get(&our().node).map(|m| m.status));
+        println!(
+            "[CRDT][{}] apply_group_update_payload: context={} len={} local_acl_ready={} pending_bootstrap={} is_sub_lane={} incoming_acl={:?} local_member_status={:?}",
+            group_id,
+            context,
+            update_payload.len(),
+            local_has_access,
+            self.group_needs_bootstrap(group_id),
+            is_subscriber_lane,
+            incoming_acl_version,
+            local_member_status
+        );
         if let Some(in_acl) = incoming_acl_version {
             if let Some(local_wl) = self.pubsub.whitelist(group_id) {
                 let local_version = local_wl.version();
@@ -2622,18 +2979,84 @@ impl ChatState {
 
         let update_bytes = base64_decode(update_payload.trim())
             .map_err(|e| format!("Invalid update payload: {e}"))?;
+        if update_bytes.is_empty() {
+            println!(
+                "[CRDT][{}] context={} received EMPTY update payload",
+                group_id, context
+            );
+        }
         let was_missing = !self.groups.contains_key(group_id);
-        self.groups
-            .entry(group_id.clone())
-            .or_insert_with(Group::default);
         if was_missing {
             self.groups_pending_bootstrap.insert(group_id.clone());
+            println!(
+                "[BOOT] new group seen via {} -> added to pending_bootstrap set",
+                context
+            );
         }
 
-        let enforce_acl = !was_missing && !self.group_needs_bootstrap(group_id);
+        if update_bytes.is_empty() && (was_missing || self.group_needs_bootstrap(group_id)) {
+            println!(
+                "[CRDT][{}] context={} skipping empty update during bootstrap",
+                group_id, context
+            );
+            return Ok(());
+        }
+
+        let mut enforce_acl = local_has_access && !self.group_needs_bootstrap(group_id);
         if enforce_acl {
-            self.require_hub_subscription(group_id, &our().node)
-                .map_err(|err| format!("hub subscription denied: {}", err))?;
+            let local_status = self
+                .groups
+                .get(group_id)
+                .and_then(|g| g.members.get(&our().node).map(|m| m.status));
+            if !matches!(local_status, Some(MembershipStatus::Active)) {
+                // Allow membership bootstrap/update to proceed even if we're not yet whitelisted.
+                println!(
+                    "[CRDT][{}] bypassing ACL for local_status={:?} context={}",
+                    group_id, local_status, context
+                );
+                enforce_acl = false;
+            }
+        }
+        if enforce_acl {
+            let routing = self
+                .groups
+                .get(group_id)
+                .map(|g| g.routing.clone())
+                .unwrap_or_default();
+            let routing_unavailable =
+                routing.hub_topic.is_empty() && routing.subscriber_topic.is_empty();
+            if !routing_unavailable {
+                // Accept either hub subscription or subscriber subscription depending on lane + role.
+                let hub_ok = self.require_hub_subscription(group_id, &our().node);
+                if let Err(hub_err) = hub_ok {
+                    let sub_ok = self.require_subscriber_access(group_id, &our().node);
+                    if let Err(sub_err) = sub_ok {
+                        // Only allow bypass when this update arrived via subscriber lane and we're not yet active.
+                        let member_status = self
+                            .groups
+                            .get(group_id)
+                            .and_then(|g| g.members.get(&our().node).map(|m| m.status));
+                        let is_new_or_pending = member_status.is_none()
+                            || matches!(member_status, Some(MembershipStatus::Pending));
+                        if !(is_subscriber_lane && is_new_or_pending) {
+                            println!(
+                                "[CRDT][{}] ACL reject context={} hub_err={} sub_err={} member_status={:?} is_sub_lane={}",
+                                group_id,
+                                context,
+                                hub_err,
+                                sub_err,
+                                member_status,
+                                is_subscriber_lane
+                            );
+                            return Err(format!(
+                                "hub subscription denied: {}; subscriber access denied: {}",
+                                hub_err,
+                                sub_err
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         let manager = self
@@ -2659,6 +3082,26 @@ impl ChatState {
             doc.read_state()
                 .map_err(|e| format!("Failed to read CRDT state: {:?}", e))?
         };
+        log_group_state_summary(&doc_id, context, &group_state);
+        println!(
+            "[CRDT][{}] context={} members_detail={:?}",
+            doc_id,
+            context,
+            group_state
+                .group
+                .members
+                .iter()
+                .map(|(k, v)| (k, (&v.role_id, v.status)))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "[CRDT][{}] context={} applied_ok members={} hubs={} subs={}",
+            doc_id,
+            context,
+            group_state.group.members.len(),
+            group_state.group.hubs.active.len(),
+            group_state.group.subscribers.entries.len()
+        );
 
         let new_vector = {
             let doc = manager.doc();
@@ -2669,7 +3112,27 @@ impl ChatState {
         self.update_local_hub_sync_state(group_id, &new_vector);
 
         group_state.apply_into(self);
-        self.mark_group_bootstrapped(group_id);
+
+        // Consider bootstrap complete once the local node is an active member (or otherwise ACL-ready).
+        let has_local_membership = self
+            .groups
+            .get(group_id)
+            .and_then(|g| g.members.get(&our().node))
+            .map(|m| m.status == MembershipStatus::Active)
+            .unwrap_or(false);
+
+        let acl_ready = self.local_group_acl_ready(group_id);
+        println!(
+            "[CRDT][{}] context={} post-apply has_local_membership={} acl_ready={} pending_bootstrap={}",
+            group_id,
+            context,
+            has_local_membership,
+            acl_ready,
+            self.group_needs_bootstrap(group_id)
+        );
+        if acl_ready || has_local_membership {
+            self.mark_group_bootstrapped(group_id);
+        }
         Ok(())
     }
 }

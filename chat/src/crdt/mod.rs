@@ -34,6 +34,17 @@ impl GroupCrdtManager {
         Self::from_snapshot(snapshot)
     }
 
+    /// Construct a manager with an empty document. Useful for bootstrap when we
+    /// expect to hydrate entirely from a remote snapshot.
+    pub fn from_empty(group_id: &GroupId) -> Result<Self, CommitteeError> {
+        let doc = CommitteeDoc::empty(Self::doc_id(group_id))?;
+        Ok(Self {
+            group_id: group_id.clone(),
+            last_state_vector: None,
+            doc,
+        })
+    }
+
     pub fn from_snapshot(snapshot: GroupDocState) -> Result<Self, CommitteeError> {
         let group_id = snapshot.group_id.clone();
         let doc = CommitteeDoc::new(Self::doc_id(&group_id), snapshot)?;

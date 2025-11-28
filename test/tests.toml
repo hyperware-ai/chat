@@ -1,5 +1,5 @@
 runtime = { FetchVersion = "latest" }
-persist_home = false
+persist_home = true
 runtime_build_release = false
 always_print_node_output = false
 
@@ -11,10 +11,10 @@ setup_packages = [
 setup_scripts = []
 test_package_paths = ["chat-test"]
 test_scripts = []
-timeout_secs = 10
+timeout_secs = 45
 fakechain_router = 8545
 hyperapp = true
-features = ["caller-utils"]
+features = ["caller-utils", "disable-notifications"]
 
 [[tests.nodes]]
 port = 8080

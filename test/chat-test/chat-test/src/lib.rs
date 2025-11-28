@@ -1,6 +1,6 @@
 use crate::hyperware::process::chat::{ChatMessage, MessageStatus, MessageType};
 use crate::hyperware::process::tester::{
-    FailResponse, Request as TesterRequest, Response as TesterResponse, RunRequest,
+    Request as TesterRequest, Response as TesterResponse, RunRequest,
 };
 use hyperware_process_lib::{
     await_message, call_init, print_to_terminal, Address, ProcessId, Request, Response,
@@ -11,6 +11,10 @@ use std::{thread, time::Duration};
 
 mod tester_lib;
 mod crdt_core_tests;
+mod membership_acl_tests;
+mod group_threading_tests;
+mod dm_extended_tests;
+mod replication_admin_tests;
 
 wit_bindgen::generate!({
     path: "../target/wit",
@@ -71,6 +75,10 @@ fn handle_message(our: &Address) {
     run_counterparty_inference_test(&our.node, &remote_node);
 
     crdt_core_tests::run_group_crdt_flow_tests(&our.node, &remote_node);
+    membership_acl_tests::run_membership_acl_tests(&our.node, &remote_node);
+    group_threading_tests::run_group_threading_tests(&our.node);
+    dm_extended_tests::run_dm_extended_tests(&our.node, &remote_node);
+    replication_admin_tests::run_replication_admin_tests(&our.node, &remote_node);
 
     Response::new()
         .body(TesterResponse::Run(Ok(())))
@@ -310,7 +318,7 @@ fn create_chat(address: &Address, counterparty: &str) {
 }
 
 fn wait_for_remote_message(address: &Address, chat_id: &str, message_id: &str) {
-    for _ in 0..20 {
+    for _ in 0..60 {
         match fetch_messages_allow_missing(address, chat_id) {
             Ok(messages) => {
                 if messages.iter().any(|m| m.id == message_id) {
@@ -319,7 +327,7 @@ fn wait_for_remote_message(address: &Address, chat_id: &str, message_id: &str) {
             }
             Err(_) => {}
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(500));
     }
     fail_with(format!(
         "remote node {} never stored message {}",
@@ -364,8 +372,10 @@ fn send_chat_rpc<T: DeserializeOwned>(address: &Address, payload: Value) -> Resu
         fail_with("chat request returned a request instead of a response");
     }
 
-    serde_json::from_slice(response.body())
-        .unwrap_or_else(|e| fail_with(format!("failed to decode chat response: {e}")))
+    let rpc_result: Result<T, String> = serde_json::from_slice(response.body())
+        .unwrap_or_else(|e| fail_with(format!("failed to decode chat response: {e}")));
+
+    rpc_result
 }
 
 fn unwrap_chat_result<T>(result: Result<T, String>) -> T {

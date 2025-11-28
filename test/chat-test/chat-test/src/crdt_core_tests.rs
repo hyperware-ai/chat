@@ -104,6 +104,17 @@ pub fn run_group_crdt_flow_tests(local_node: &str, remote_node: &str) {
     let new_msg = send_group_message(&remote, &group_id, None, "from remote");
     assert_message_suffix(&new_msg.message.message_id, 1);
 
+    // When up to date, requesting an update with the current state vector should be empty.
+    let local_sv =
+        crdt_group_state_vector(&local, &group_id).unwrap_or_else(|e| fail_with(format!(
+            "state vector fetch on local failed: {e}"
+        )));
+    let empty_delta = crdt_group_update(&local, &group_id, Some(local_sv.state_vector))
+        .unwrap_or_else(|e| fail_with(format!("empty delta fetch failed: {e}")));
+    if !empty_delta.update_payload.is_empty() {
+        fail_with("expected empty update payload when already in sync");
+    }
+
     print_to_terminal(0, "crdt_core: group crdt flow test done");
 }
 
@@ -333,8 +344,10 @@ fn send_chat_rpc<T: DeserializeOwned>(address: &Address, payload: Value) -> Resu
         fail_with("chat request returned a request instead of a response");
     }
 
-    serde_json::from_slice(response.body())
-        .unwrap_or_else(|e| fail_with(format!("failed to decode chat response: {e}")))
+    let rpc_result: Result<T, String> = serde_json::from_slice(response.body())
+        .unwrap_or_else(|e| fail_with(format!("failed to decode chat response: {e}")));
+
+    rpc_result
 }
 
 fn unwrap_chat_result<T>(result: Result<T, String>) -> T {

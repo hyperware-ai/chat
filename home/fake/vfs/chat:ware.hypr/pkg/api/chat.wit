@@ -1,0 +1,1335 @@
+interface chat {
+use standard.{address};
+
+    // Arbitrary JSON value; encoded as string for WIT 1.0 (TS: unknown, Rust: serde_json::Value)
+    type value = string;
+
+    record get-group-req {
+        group-id: group-id
+    }
+
+    record approve-group-membership-req {
+        group-id: group-id,
+        proposal-id: string
+    }
+
+    record sync-hash-info {
+        chat-id: string,
+        message-count: u32,
+        last-message-id: option<string>,
+        last-message-timestamp: option<u64>,
+        hash: string
+    }
+
+    record settings {
+        show-images: bool,
+        show-profile-pics: bool,
+        combine-chats-groups: bool,
+        notify-chats: bool,
+        notify-groups: bool,
+        notify-calls: bool,
+        allow-browser-chats: bool,
+        stt-enabled: bool,
+        stt-api-key: option<string>,
+        max-file-size-mb: u64
+    }
+
+    record send-voice-note-req {
+        chat-id: string,
+        audio-data: string,
+        duration: u32,
+        reply-to: option<string>
+    }
+
+    record remove-reaction-req {
+        chat-id: string,
+        message-id: string,
+        emoji: string
+    }
+
+    record crdt-state-vector-res {
+        state-vector: string
+    }
+
+    record list-groups-res {
+        groups: list<group-summary>
+    }
+
+    record group-summary {
+        group-id: group-id,
+        metadata: option<group-metadata>,
+        member-count: u64,
+        thread-count: u64
+    }
+
+    record get-messages-req {
+        chat-id: string,
+        before-timestamp: option<u64>,
+        limit: option<u64>
+    }
+
+    record delete-chat-req {
+        chat-id: string
+    }
+
+    record create-group-res {
+        group-id: group-id
+    }
+
+    record crdt-group-snapshot-req {
+        group-id: group-id
+    }
+
+    record admin-whitelist-req {
+        group-id: group-id
+    }
+
+    record remove-group-member-req {
+        group-id: group-id,
+        member: node-id
+    }
+
+    record crdt-apply-res {
+        applied: bool
+    }
+
+    record send-message-req {
+        chat-id: string,
+        content: string,
+        reply-to: option<string>,
+        file-info: option<file-info>
+    }
+
+    record admin-replication-state-res {
+        metrics: replication-metrics,
+        groups: list<group-replication-state>
+    }
+
+    record group-replication-state {
+        group-id: group-id,
+        pending-bootstrap: bool,
+        routing: group-routing-config,
+        hubs: list<node-id>,
+        subscribers: list<node-id>,
+        hub-cursors: list<tuple<node-id, delivery-cursor>>,
+        subscriber-cursors: list<tuple<node-id, delivery-cursor>>,
+        whitelist-version: option<u64>,
+        subscriber-lag-secs: option<u64>,
+        hub-lag-secs: option<u64>
+    }
+
+    record replication-metrics {
+        acl-skips: u64,
+        retries: u64,
+        drops: u64,
+        stale-replays: u64,
+        last-lag-secs: u64,
+        last-subscriber-lag-secs: u64,
+        acl-drifts: u64
+    }
+
+    record create-chat-link-req {
+        chat-id: string,
+        single-use: bool
+    }
+
+    record send-group-message-req {
+        group-id: group-id,
+        thread-id: option<thread-id>,
+        content: string,
+        message-type: message-type,
+        reply-to: option<message-id>,
+        attachments: list<attachment-descriptor>
+    }
+
+    record subscriber-events-req {
+        take: option<u64>,
+        clear: bool
+    }
+
+    record delete-message-req {
+        chat-id: string,
+        message-id: string,
+        delete-for-both: option<bool>
+    }
+
+    record revoke-chat-key-req {
+        key: string
+    }
+
+    record chat-key {
+        key: string,
+        user-name: string,
+        created-at: u64,
+        is-revoked: bool,
+        chat-id: string
+    }
+
+    record invite-group-member-req {
+        group-id: group-id,
+        candidate: node-id,
+        role-id: string
+    }
+
+    record crdt-update-res {
+        doc-id: string,
+        update-payload: string
+    }
+
+    record get-group-res {
+        group: option<group>
+    }
+
+    record create-group-req {
+        group-id: option<group-id>,
+        name: string,
+        description: option<string>,
+        avatar: option<string>,
+        visibility: option<group-visibility>,
+        default-role-label: option<string>,
+        membership-rules: list<membership-rule-config>,
+        root-thread-title: option<string>
+    }
+
+    record membership-decision-res {
+        decision: membership-decision
+    }
+
+    record search-chats-req {
+        query: string
+    }
+
+    record forward-message-req {
+        from-chat-id: string,
+        message-id: string,
+        to-chat-id: string
+    }
+
+    record admin-replication-state-req {
+        group-id: option<group-id>
+    }
+
+    record create-chat-req {
+        counterparty: string
+    }
+
+    record send-group-message-res {
+        message: message-meta
+    }
+
+    record upload-file-req {
+        chat-id: string,
+        filename: string,
+        mime-type: string,
+        data: string,
+        reply-to: option<string>
+    }
+
+    record admin-whitelist-res {
+        group-id: group-id,
+        version: u64,
+        entries: list<whitelist-entry-debug>
+    }
+
+    record whitelist-entry-debug {
+        node: string,
+        publish: list<string>,
+        subscribe: list<string>,
+        audiences: list<string>,
+        features: list<string>,
+        expires-at: option<u64>
+    }
+
+    record crdt-group-state-vector-req {
+        group-id: group-id
+    }
+
+    record edit-message-req {
+        chat-id: string,
+        message-id: string,
+        new-content: string
+    }
+
+    record subscriber-events-res {
+        events: list<subscriber-delivery-event>
+    }
+
+    record subscriber-delivery-event {
+        group-id: group-id,
+        topic: string,
+        offset: u64,
+        kind: replication-kind,
+        age-secs: u64,
+        recorded-at: u64
+    }
+
+    enum replication-kind {
+        push-delta,
+        push-snapshot,
+        pull-snapshot,
+        pull-delta
+    }
+
+    record get-sync-hash-req {
+        chat-id: string
+    }
+
+    record crdt-group-update-req {
+        group-id: group-id,
+        state-vector: option<string>
+    }
+
+    record create-group-thread-req {
+        group-id: group-id,
+        parent-thread-id: option<thread-id>,
+        title: option<string>
+    }
+
+    record crdt-group-apply-req {
+        group-id: group-id,
+        update-payload: string,
+        acl-version: option<u64>
+    }
+
+    record upload-profile-picture-req {
+        mime-type: string,
+        data: string
+    }
+
+    record add-reaction-req {
+        chat-id: string,
+        message-id: string,
+        emoji: string
+    }
+
+    record create-group-thread-res {
+        thread-id: thread-id
+    }
+
+    record get-chat-req {
+        chat-id: string
+    }
+
+    record message-meta {
+        message-id: message-id,
+        thread-id: thread-id,
+        group-id: group-id,
+        sender: node-id,
+        timestamp: u64,
+        message-type: message-type,
+        reply-to: option<message-id>,
+        reply-in-thread: option<message-id>,
+        reactions: list<message-reaction-meta>,
+        attachments: list<attachment-descriptor>
+    }
+
+    type group-id = string;
+
+    record group-metadata {
+        name: string,
+        description: option<string>,
+        avatar: option<string>,
+        creator-id: string,
+        created-at: u64,
+        updated-at: u64,
+        visibility: group-visibility,
+        default-role-id: string,
+        root-thread-id: thread-id
+    }
+
+    record hub-sync-state {
+        last-state-vector: option<list<u8>>,
+        last-snapshot-digest: option<string>,
+        pending-snapshot-id: option<string>,
+        last-seen-ts: u64,
+        last-ack-seq: u64
+    }
+
+    enum message-type {
+        text,
+        image,
+        file,
+        voice-note
+    }
+
+    record message-reaction-meta {
+        node-id: node-id,
+        emoji: string,
+        timestamp: u64
+    }
+
+    type group-permissions = u64;
+
+    record group-counters {
+        next-thread: u64,
+        next-message: u64
+    }
+
+    record membership-decision {
+        status: membership-decision-status,
+        missing-signatures: list<node-id>,
+        reason: option<string>
+    }
+
+    record user-profile {
+        name: string,
+        profile-pic: option<string>
+    }
+
+    record membership-rule-config {
+        rule-id: membership-rule-id,
+        params: value
+    }
+
+    enum membership-action-kind {
+        invite,
+        remove
+    }
+
+    record chat {
+        id: string,
+        counterparty: string,
+        messages: list<chat-message>,
+        last-activity: u64,
+        unread-count: u32,
+        is-blocked: bool,
+        notify: bool,
+        counterparty-profile: option<user-profile>
+    }
+
+    record subscriber-sync-state {
+        last-state-vector: option<list<u8>>,
+        last-snapshot-digest: option<string>,
+        last-seen-ts: u64
+    }
+
+    record group-hub-set {
+        active: list<node-id>,
+        pending: list<node-id>,
+        sync: list<tuple<node-id, hub-sync-state>>
+    }
+
+    record group-delivery-state {
+        hub-cursors: list<tuple<node-id, delivery-cursor>>,
+        subscriber-cursors: list<tuple<node-id, delivery-cursor>>,
+        attempt-seeds: list<tuple<string, u64>>
+    }
+
+    record delivery-cursor {
+        queue-id: string,
+        last-offset: u64,
+        updated-at: u64
+    }
+
+    enum group-visibility {
+        private,
+        invite-only,
+        public
+    }
+
+    record attachment-descriptor {
+        attachment-id: string,
+        filename: string,
+        mime-type: string,
+        size-bytes: u64,
+        checksum: option<string>,
+        uri: option<string>
+    }
+
+    record group-member {
+        node-id: node-id,
+        role-id: string,
+        status: membership-status,
+        last-activity: u64
+    }
+
+    record message-reaction {
+        emoji: string,
+        user: string,
+        timestamp: u64
+    }
+
+    type thread-id = string;
+
+    type node-id = string;
+
+    variant thread-parent-ref {
+        root(group-id),
+        thread(thread-id)
+    }
+
+    record group-subscriber-set {
+        entries: list<tuple<node-id, subscriber-sync-state>>
+    }
+
+    enum membership-status {
+        pending,
+        active,
+        removed
+    }
+
+    enum group-tier {
+        hub,
+        subscriber
+    }
+
+    record role {
+        id: string,
+        label: string,
+        permissions: group-permissions,
+        tier: group-tier
+    }
+
+    record group-routing-config {
+        hub-topic: string,
+        subscriber-topic: string,
+        snapshot-interval-secs: u64
+    }
+
+    type message-id = string;
+
+    type membership-rule-id = string;
+
+    record chat-message {
+        id: string,
+        sender: string,
+        content: string,
+        timestamp: u64,
+        sequence: option<u64>,
+        status: message-status,
+        reply-to: option<string>,
+        reactions: list<message-reaction>,
+        message-type: message-type,
+        file-info: option<file-info>
+    }
+
+    record membership-proposal {
+        proposal-id: string,
+        candidate: node-id,
+        requested-role: string,
+        proposer: node-id,
+        action: membership-action-kind,
+        approvals: list<node-id>,
+        rejections: list<node-id>,
+        eligible-voters: u32,
+        token-support: string,
+        token-opposition: string
+    }
+
+    record file-info {
+        filename: string,
+        mime-type: string,
+        size: u64,
+        url: string
+    }
+
+    record thread {
+        id: thread-id,
+        group-id: group-id,
+        depth: u32,
+        parent: thread-parent-ref,
+        child-threads: list<thread-id>,
+        created-at: u64,
+        created-by: node-id,
+        root-message-id: option<message-id>,
+        summary: thread-summary,
+        title: option<string>,
+        archived: bool
+    }
+
+    enum message-status {
+        sending,
+        sent,
+        delivered,
+        failed
+    }
+
+    enum membership-decision-status {
+        pending,
+        approved,
+        rejected
+    }
+
+    record thread-summary {
+        message-count: u64,
+        last-message-id: option<message-id>,
+        last-activity: u64,
+        last-sender: option<node-id>
+    }
+
+    record group {
+        metadata: option<group-metadata>,
+        roles: list<tuple<string, role>>,
+        members: list<tuple<node-id, group-member>>,
+        hubs: group-hub-set,
+        subscribers: group-subscriber-set,
+        routing: group-routing-config,
+        delivery: group-delivery-state,
+        membership-rules: list<membership-rule-config>,
+        membership-proposals: list<tuple<string, membership-proposal>>,
+        threads: list<tuple<thread-id, thread>>,
+        messages: list<tuple<message-id, message-meta>>,
+        counters: group-counters
+    }
+
+    // Function signature for: add-reaction (http)
+    // HTTP: POST /api/add-reaction
+    record add-reaction-signature-http {
+        target: string,
+        req: add-reaction-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: add-reaction (remote)
+    record add-reaction-signature-remote {
+        target: address,
+        req: add-reaction-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: admin-replication-state (http)
+    // HTTP: POST /api/admin-replication-state
+    record admin-replication-state-signature-http {
+        target: string,
+        req: admin-replication-state-req,
+        returning: result<admin-replication-state-res, string>
+    }
+
+    // Function signature for: admin-replication-state (local)
+    record admin-replication-state-signature-local {
+        target: address,
+        req: admin-replication-state-req,
+        returning: result<admin-replication-state-res, string>
+    }
+
+    // Function signature for: admin-replication-state (remote)
+    record admin-replication-state-signature-remote {
+        target: address,
+        req: admin-replication-state-req,
+        returning: result<admin-replication-state-res, string>
+    }
+
+    // Function signature for: admin-subscriber-events (http)
+    // HTTP: POST /api/admin-subscriber-events
+    record admin-subscriber-events-signature-http {
+        target: string,
+        req: subscriber-events-req,
+        returning: result<subscriber-events-res, string>
+    }
+
+    // Function signature for: admin-subscriber-events (local)
+    record admin-subscriber-events-signature-local {
+        target: address,
+        req: subscriber-events-req,
+        returning: result<subscriber-events-res, string>
+    }
+
+    // Function signature for: admin-subscriber-events (remote)
+    record admin-subscriber-events-signature-remote {
+        target: address,
+        req: subscriber-events-req,
+        returning: result<subscriber-events-res, string>
+    }
+
+    // Function signature for: admin-whitelist (http)
+    // HTTP: POST /api/admin-whitelist
+    record admin-whitelist-signature-http {
+        target: string,
+        req: admin-whitelist-req,
+        returning: result<admin-whitelist-res, string>
+    }
+
+    // Function signature for: admin-whitelist (local)
+    record admin-whitelist-signature-local {
+        target: address,
+        req: admin-whitelist-req,
+        returning: result<admin-whitelist-res, string>
+    }
+
+    // Function signature for: admin-whitelist (remote)
+    record admin-whitelist-signature-remote {
+        target: address,
+        req: admin-whitelist-req,
+        returning: result<admin-whitelist-res, string>
+    }
+
+    // Function signature for: approve-group-membership (http)
+    // HTTP: POST /api/approve-group-membership
+    record approve-group-membership-signature-http {
+        target: string,
+        req: approve-group-membership-req,
+        returning: result<membership-decision-res, string>
+    }
+
+    // Function signature for: approve-group-membership (remote)
+    record approve-group-membership-signature-remote {
+        target: address,
+        req: approve-group-membership-req,
+        returning: result<membership-decision-res, string>
+    }
+
+    // Function signature for: crdt-group-apply-update (http)
+    // HTTP: POST /api/crdt-group-apply-update
+    record crdt-group-apply-update-signature-http {
+        target: string,
+        req: crdt-group-apply-req,
+        returning: result<crdt-apply-res, string>
+    }
+
+    // Function signature for: crdt-group-apply-update (local)
+    record crdt-group-apply-update-signature-local {
+        target: address,
+        req: crdt-group-apply-req,
+        returning: result<crdt-apply-res, string>
+    }
+
+    // Function signature for: crdt-group-apply-update (remote)
+    record crdt-group-apply-update-signature-remote {
+        target: address,
+        req: crdt-group-apply-req,
+        returning: result<crdt-apply-res, string>
+    }
+
+    // Function signature for: crdt-group-snapshot (http)
+    // HTTP: POST /api/crdt-group-snapshot
+    record crdt-group-snapshot-signature-http {
+        target: string,
+        req: crdt-group-snapshot-req,
+        returning: result<crdt-update-res, string>
+    }
+
+    // Function signature for: crdt-group-snapshot (local)
+    record crdt-group-snapshot-signature-local {
+        target: address,
+        req: crdt-group-snapshot-req,
+        returning: result<crdt-update-res, string>
+    }
+
+    // Function signature for: crdt-group-snapshot (remote)
+    record crdt-group-snapshot-signature-remote {
+        target: address,
+        req: crdt-group-snapshot-req,
+        returning: result<crdt-update-res, string>
+    }
+
+    // Function signature for: crdt-group-state-vector (http)
+    // HTTP: POST /api/crdt-group-state-vector
+    record crdt-group-state-vector-signature-http {
+        target: string,
+        req: crdt-group-state-vector-req,
+        returning: result<crdt-state-vector-res, string>
+    }
+
+    // Function signature for: crdt-group-state-vector (local)
+    record crdt-group-state-vector-signature-local {
+        target: address,
+        req: crdt-group-state-vector-req,
+        returning: result<crdt-state-vector-res, string>
+    }
+
+    // Function signature for: crdt-group-state-vector (remote)
+    record crdt-group-state-vector-signature-remote {
+        target: address,
+        req: crdt-group-state-vector-req,
+        returning: result<crdt-state-vector-res, string>
+    }
+
+    // Function signature for: crdt-group-update (http)
+    // HTTP: POST /api/crdt-group-update
+    record crdt-group-update-signature-http {
+        target: string,
+        req: crdt-group-update-req,
+        returning: result<crdt-update-res, string>
+    }
+
+    // Function signature for: crdt-group-update (local)
+    record crdt-group-update-signature-local {
+        target: address,
+        req: crdt-group-update-req,
+        returning: result<crdt-update-res, string>
+    }
+
+    // Function signature for: crdt-group-update (remote)
+    record crdt-group-update-signature-remote {
+        target: address,
+        req: crdt-group-update-req,
+        returning: result<crdt-update-res, string>
+    }
+
+    // Function signature for: create-chat (http)
+    // HTTP: POST /api/create-chat
+    record create-chat-signature-http {
+        target: string,
+        req: create-chat-req,
+        returning: result<chat, string>
+    }
+
+    // Function signature for: create-chat (local)
+    record create-chat-signature-local {
+        target: address,
+        req: create-chat-req,
+        returning: result<chat, string>
+    }
+
+    // Function signature for: create-chat (remote)
+    record create-chat-signature-remote {
+        target: address,
+        req: create-chat-req,
+        returning: result<chat, string>
+    }
+
+    // Function signature for: create-chat-link (http)
+    // HTTP: POST /api/create-chat-link
+    record create-chat-link-signature-http {
+        target: string,
+        req: create-chat-link-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: create-chat-link (remote)
+    record create-chat-link-signature-remote {
+        target: address,
+        req: create-chat-link-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: create-group (http)
+    // HTTP: POST /api/create-group
+    record create-group-signature-http {
+        target: string,
+        req: create-group-req,
+        returning: result<create-group-res, string>
+    }
+
+    // Function signature for: create-group (remote)
+    record create-group-signature-remote {
+        target: address,
+        req: create-group-req,
+        returning: result<create-group-res, string>
+    }
+
+    // Function signature for: create-group-thread (http)
+    // HTTP: POST /api/create-group-thread
+    record create-group-thread-signature-http {
+        target: string,
+        req: create-group-thread-req,
+        returning: result<create-group-thread-res, string>
+    }
+
+    // Function signature for: create-group-thread (remote)
+    record create-group-thread-signature-remote {
+        target: address,
+        req: create-group-thread-req,
+        returning: result<create-group-thread-res, string>
+    }
+
+    // Function signature for: delete-chat (http)
+    // HTTP: POST /api/delete-chat
+    record delete-chat-signature-http {
+        target: string,
+        req: delete-chat-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: delete-chat (remote)
+    record delete-chat-signature-remote {
+        target: address,
+        req: delete-chat-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: delete-message (http)
+    // HTTP: POST /api/delete-message
+    record delete-message-signature-http {
+        target: string,
+        req: delete-message-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: delete-message (remote)
+    record delete-message-signature-remote {
+        target: address,
+        req: delete-message-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: edit-message (http)
+    // HTTP: POST /api/edit-message
+    record edit-message-signature-http {
+        target: string,
+        req: edit-message-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: edit-message (remote)
+    record edit-message-signature-remote {
+        target: address,
+        req: edit-message-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: forward-message (http)
+    // HTTP: POST /api/forward-message
+    record forward-message-signature-http {
+        target: string,
+        req: forward-message-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: forward-message (remote)
+    record forward-message-signature-remote {
+        target: address,
+        req: forward-message-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: get-all-sync-hashes (http)
+    // HTTP: POST /api/get-all-sync-hashes
+    record get-all-sync-hashes-signature-http {
+        target: string,
+        returning: result<list<sync-hash-info>, string>
+    }
+
+    // Function signature for: get-all-sync-hashes (remote)
+    record get-all-sync-hashes-signature-remote {
+        target: address,
+        returning: result<list<sync-hash-info>, string>
+    }
+
+    // Function signature for: get-chat (http)
+    // HTTP: POST /api/get-chat
+    record get-chat-signature-http {
+        target: string,
+        req: get-chat-req,
+        returning: result<chat, string>
+    }
+
+    // Function signature for: get-chat (local)
+    record get-chat-signature-local {
+        target: address,
+        req: get-chat-req,
+        returning: result<chat, string>
+    }
+
+    // Function signature for: get-chat (remote)
+    record get-chat-signature-remote {
+        target: address,
+        req: get-chat-req,
+        returning: result<chat, string>
+    }
+
+    // Function signature for: get-chat-keys (http)
+    // HTTP: POST /api/get-chat-keys
+    record get-chat-keys-signature-http {
+        target: string,
+        returning: result<list<chat-key>, string>
+    }
+
+    // Function signature for: get-chat-keys (remote)
+    record get-chat-keys-signature-remote {
+        target: address,
+        returning: result<list<chat-key>, string>
+    }
+
+    // Function signature for: get-chats (http)
+    // HTTP: POST /api/get-chats
+    record get-chats-signature-http {
+        target: string,
+        returning: result<list<chat>, string>
+    }
+
+    // Function signature for: get-chats (local)
+    record get-chats-signature-local {
+        target: address,
+        returning: result<list<chat>, string>
+    }
+
+    // Function signature for: get-chats (remote)
+    record get-chats-signature-remote {
+        target: address,
+        returning: result<list<chat>, string>
+    }
+
+    // Function signature for: get-group (http)
+    // HTTP: POST /api/get-group
+    record get-group-signature-http {
+        target: string,
+        req: get-group-req,
+        returning: result<get-group-res, string>
+    }
+
+    // Function signature for: get-group (remote)
+    record get-group-signature-remote {
+        target: address,
+        req: get-group-req,
+        returning: result<get-group-res, string>
+    }
+
+    // Function signature for: get-messages (http)
+    // HTTP: POST /api/get-messages
+    record get-messages-signature-http {
+        target: string,
+        req: get-messages-req,
+        returning: result<list<chat-message>, string>
+    }
+
+    // Function signature for: get-messages (local)
+    record get-messages-signature-local {
+        target: address,
+        req: get-messages-req,
+        returning: result<list<chat-message>, string>
+    }
+
+    // Function signature for: get-messages (remote)
+    record get-messages-signature-remote {
+        target: address,
+        req: get-messages-req,
+        returning: result<list<chat-message>, string>
+    }
+
+    // Function signature for: get-profile (http)
+    // HTTP: POST /api/get-profile
+    record get-profile-signature-http {
+        target: string,
+        returning: result<user-profile, string>
+    }
+
+    // Function signature for: get-profile (remote)
+    record get-profile-signature-remote {
+        target: address,
+        returning: result<user-profile, string>
+    }
+
+    // Function signature for: get-settings (http)
+    // HTTP: POST /api/get-settings
+    record get-settings-signature-http {
+        target: string,
+        returning: result<settings, string>
+    }
+
+    // Function signature for: get-settings (remote)
+    record get-settings-signature-remote {
+        target: address,
+        returning: result<settings, string>
+    }
+
+    // Function signature for: get-sync-hash (http)
+    // HTTP: POST /api/get-sync-hash
+    record get-sync-hash-signature-http {
+        target: string,
+        req: get-sync-hash-req,
+        returning: result<sync-hash-info, string>
+    }
+
+    // Function signature for: get-sync-hash (remote)
+    record get-sync-hash-signature-remote {
+        target: address,
+        req: get-sync-hash-req,
+        returning: result<sync-hash-info, string>
+    }
+
+    // Function signature for: invite-group-member (http)
+    // HTTP: POST /api/invite-group-member
+    record invite-group-member-signature-http {
+        target: string,
+        req: invite-group-member-req,
+        returning: result<membership-decision-res, string>
+    }
+
+    // Function signature for: invite-group-member (remote)
+    record invite-group-member-signature-remote {
+        target: address,
+        req: invite-group-member-req,
+        returning: result<membership-decision-res, string>
+    }
+
+    // Function signature for: list-groups (http)
+    // HTTP: POST /api/list-groups
+    record list-groups-signature-http {
+        target: string,
+        returning: result<list-groups-res, string>
+    }
+
+    // Function signature for: list-groups (remote)
+    record list-groups-signature-remote {
+        target: address,
+        returning: result<list-groups-res, string>
+    }
+
+    // Function signature for: receive-chat-creation (remote)
+    record receive-chat-creation-signature-remote {
+        target: address,
+        counterparty: string,
+        returning: result<_, string>
+    }
+
+    // Function signature for: receive-message (remote)
+    record receive-message-signature-remote {
+        target: address,
+        message: chat-message,
+        returning: result<_, string>
+    }
+
+    // Function signature for: receive-message-ack (remote)
+    record receive-message-ack-signature-remote {
+        target: address,
+        message-id: string,
+        returning: result<_, string>
+    }
+
+    // Function signature for: receive-message-deletion (remote)
+    record receive-message-deletion-signature-remote {
+        target: address,
+        message-id: string,
+        chat-id: string,
+        returning: result<_, string>
+    }
+
+    // Function signature for: receive-message-edit (remote)
+    record receive-message-edit-signature-remote {
+        target: address,
+        chat-id: string,
+        message-id: string,
+        new-content: string,
+        returning: result<_, string>
+    }
+
+    // Function signature for: receive-profile-update (remote)
+    record receive-profile-update-signature-remote {
+        target: address,
+        node: string,
+        profile: user-profile,
+        returning: result<_, string>
+    }
+
+    // Function signature for: receive-reaction (remote)
+    record receive-reaction-signature-remote {
+        target: address,
+        message-id: string,
+        emoji: string,
+        user: string,
+        returning: result<_, string>
+    }
+
+    // Function signature for: receive-reaction-remove (remote)
+    record receive-reaction-remove-signature-remote {
+        target: address,
+        message-id: string,
+        emoji: string,
+        user: string,
+        returning: result<_, string>
+    }
+
+    // Function signature for: remove-group-member (http)
+    // HTTP: POST /api/remove-group-member
+    record remove-group-member-signature-http {
+        target: string,
+        req: remove-group-member-req,
+        returning: result<membership-decision-res, string>
+    }
+
+    // Function signature for: remove-group-member (remote)
+    record remove-group-member-signature-remote {
+        target: address,
+        req: remove-group-member-req,
+        returning: result<membership-decision-res, string>
+    }
+
+    // Function signature for: remove-reaction (http)
+    // HTTP: POST /api/remove-reaction
+    record remove-reaction-signature-http {
+        target: string,
+        req: remove-reaction-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: remove-reaction (remote)
+    record remove-reaction-signature-remote {
+        target: address,
+        req: remove-reaction-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: replication-work (http)
+    // HTTP: POST /api/replication-work
+    record replication-work-signature-http {
+        target: string,
+        returning: result<_, string>
+    }
+
+    // Function signature for: replication-work (local)
+    record replication-work-signature-local {
+        target: address,
+        returning: result<_, string>
+    }
+
+    // Function signature for: replication-work (remote)
+    record replication-work-signature-remote {
+        target: address,
+        returning: result<_, string>
+    }
+
+    // Function signature for: revoke-chat-key (http)
+    // HTTP: POST /api/revoke-chat-key
+    record revoke-chat-key-signature-http {
+        target: string,
+        req: revoke-chat-key-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: revoke-chat-key (remote)
+    record revoke-chat-key-signature-remote {
+        target: address,
+        req: revoke-chat-key-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: search-chats (http)
+    // HTTP: POST /api/search-chats
+    record search-chats-signature-http {
+        target: string,
+        req: search-chats-req,
+        returning: result<list<chat>, string>
+    }
+
+    // Function signature for: search-chats (remote)
+    record search-chats-signature-remote {
+        target: address,
+        req: search-chats-req,
+        returning: result<list<chat>, string>
+    }
+
+    // Function signature for: send-group-message (http)
+    // HTTP: POST /api/send-group-message
+    record send-group-message-signature-http {
+        target: string,
+        req: send-group-message-req,
+        returning: result<send-group-message-res, string>
+    }
+
+    // Function signature for: send-group-message (remote)
+    record send-group-message-signature-remote {
+        target: address,
+        req: send-group-message-req,
+        returning: result<send-group-message-res, string>
+    }
+
+    // Function signature for: send-message (http)
+    // HTTP: POST /api/send-message
+    record send-message-signature-http {
+        target: string,
+        req: send-message-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: send-message (local)
+    record send-message-signature-local {
+        target: address,
+        req: send-message-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: send-message (remote)
+    record send-message-signature-remote {
+        target: address,
+        req: send-message-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: send-voice-note (http)
+    // HTTP: POST /api/send-voice-note
+    record send-voice-note-signature-http {
+        target: string,
+        req: send-voice-note-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: send-voice-note (remote)
+    record send-voice-note-signature-remote {
+        target: address,
+        req: send-voice-note-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: serve-file (http)
+    // HTTP: POST /files/*
+    record serve-file-signature-http {
+        target: string,
+        path-segments: list<string>,
+        returning: result<tuple<string, list<u8>>, string>
+    }
+
+    // Function signature for: serve-join-link (http)
+    // HTTP: POST /public/join-*
+    record serve-join-link-signature-http {
+        target: string,
+        returning: result<string, string>
+    }
+
+    // Function signature for: serve-public-chat (http)
+    // HTTP: POST /public
+    record serve-public-chat-signature-http {
+        target: string,
+        returning: result<string, string>
+    }
+
+    // Function signature for: update-profile (http)
+    // HTTP: POST /api/update-profile
+    record update-profile-signature-http {
+        target: string,
+        profile: user-profile,
+        returning: result<string, string>
+    }
+
+    // Function signature for: update-profile (remote)
+    record update-profile-signature-remote {
+        target: address,
+        profile: user-profile,
+        returning: result<string, string>
+    }
+
+    // Function signature for: update-settings (http)
+    // HTTP: POST /api/update-settings
+    record update-settings-signature-http {
+        target: string,
+        settings: settings,
+        returning: result<string, string>
+    }
+
+    // Function signature for: update-settings (remote)
+    record update-settings-signature-remote {
+        target: address,
+        settings: settings,
+        returning: result<string, string>
+    }
+
+    // Function signature for: upload-file (http)
+    // HTTP: POST /api/upload-file
+    record upload-file-signature-http {
+        target: string,
+        req: upload-file-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: upload-file (remote)
+    record upload-file-signature-remote {
+        target: address,
+        req: upload-file-req,
+        returning: result<chat-message, string>
+    }
+
+    // Function signature for: upload-profile-picture (http)
+    // HTTP: POST /api/upload-profile-picture
+    record upload-profile-picture-signature-http {
+        target: string,
+        req: upload-profile-picture-req,
+        returning: result<string, string>
+    }
+
+    // Function signature for: upload-profile-picture (remote)
+    record upload-profile-picture-signature-remote {
+        target: address,
+        req: upload-profile-picture-req,
+        returning: result<string, string>
+    }
+}

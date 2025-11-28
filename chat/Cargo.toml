@@ -37,6 +37,7 @@ version = "1.0"
 [features]
 caller-utils = ["chat_caller_utils"]
 default = ["caller-utils"]
+disable-notifications = []
 simulation-mode = []
 test-helpers = []
 
