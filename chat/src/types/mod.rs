@@ -802,7 +802,6 @@ pub struct ChatState {
     pub replication_metrics: ReplicationMetrics,
     #[serde(skip)]
     pub pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
-    pub online_nodes: HashSet<String>,
     pub ws_connections: HashMap<u32, String>,
     pub browser_connections: HashMap<String, u32>,
     pub last_heartbeat: HashMap<u32, u64>,
@@ -850,7 +849,6 @@ impl Default for ChatState {
             subscriber_events: VecDeque::new(),
             replication_metrics: ReplicationMetrics::default(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
-            online_nodes: HashSet::new(),
             ws_connections: HashMap::new(),
             browser_connections: HashMap::new(),
             last_heartbeat: HashMap::new(),
@@ -1006,7 +1004,6 @@ impl<'de> Deserialize<'de> for ChatState {
             settings: Settings,
             #[serde(default)]
             message_sequence_counters: HashMap<String, u64>,
-            online_nodes: HashSet<String>,
             ws_connections: HashMap<u32, String>,
             browser_connections: HashMap<String, u32>,
             last_heartbeat: HashMap<u32, u64>,
@@ -1044,7 +1041,6 @@ impl<'de> Deserialize<'de> for ChatState {
             subscriber_events: VecDeque::new(),
             replication_metrics: ReplicationMetrics::default(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
-            online_nodes: data.online_nodes,
             ws_connections: data.ws_connections,
             browser_connections: data.browser_connections,
             last_heartbeat: data.last_heartbeat,

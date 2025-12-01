@@ -2457,7 +2457,6 @@ impl ChatState {
                 println!("WebSocket connection closed: {}", channel_id);
                 // Clean up connection
                 if let Some(node) = self.ws_connections.remove(&channel_id) {
-                    self.online_nodes.remove(&node);
                     // Broadcast status update
                     let status_msg = WsServerMessage::StatusUpdate {
                         node: node.clone(),
@@ -3525,15 +3524,13 @@ impl ChatState {
 
                         let counterparty = chat.counterparty.clone();
 
-                        if self.online_nodes.contains(&counterparty) {
-                            if let Some((&ch_id, _)) = self
-                                .ws_connections
-                                .iter()
-                                .find(|(_, node)| *node == &counterparty)
-                            {
-                                pending_pushes
-                                    .push((ch_id, WsServerMessage::NewMessage(message.clone())));
-                            }
+                        if let Some((&ch_id, _)) = self
+                            .ws_connections
+                            .iter()
+                            .find(|(_, node)| *node == &counterparty)
+                        {
+                            pending_pushes
+                                .push((ch_id, WsServerMessage::NewMessage(message.clone())));
                         } else {
                             queued_delivery = Some((counterparty.clone(), message.clone()));
                         }
