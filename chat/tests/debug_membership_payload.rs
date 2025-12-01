@@ -1,5 +1,5 @@
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use chat::GroupDocState;
 use hyperware_crdt::CommitteeDoc;
 
@@ -20,5 +20,10 @@ fn decode_membership_acl_snapshot_payload() {
     let member_count = state.group.members.len();
     let role_count = state.group.roles.len();
     let sub_count = state.group.subscribers.entries.len();
-    assert!(member_count > 0, "members empty (roles={}, subs={})", role_count, sub_count);
+    assert!(
+        member_count > 0,
+        "members empty (roles={}, subs={})",
+        role_count,
+        sub_count
+    );
 }

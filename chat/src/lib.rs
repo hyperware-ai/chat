@@ -5,7 +5,7 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use futures::{channel::mpsc::UnboundedReceiver, StreamExt};
+use futures::{channel::mpsc::UnboundedReceiver, pin_mut, select, FutureExt, StreamExt};
 use hyperprocess_macro::*;
 use hyperware_crdt::yrs::{Decode, Encode, StateVector};
 use hyperware_process_lib::{
@@ -18,6 +18,7 @@ use std::cmp::Ordering;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -121,6 +122,13 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
     ::base64::decode(input)
 }
 
+async fn trigger_replication(target: Address) {
+    // WIT defines ReplicationWork as a unit variant; use null payload.
+    let body =
+        serde_json::to_vec(&serde_json::json!({"ReplicationWork": null})).unwrap_or_default();
+    let _ = Request::new().target(target).body(body).send();
+}
+
 pub(crate) fn log_crdt_event(
     doc_id: &str,
     context: &str,
@@ -145,13 +153,7 @@ fn log_group_state_summary(doc_id: &str, context: &str, state: &GroupDocState) {
     let hubs_count = state.group.hubs.active.len();
     let subs_count = state.group.subscribers.entries.len();
     let roles_count = state.group.roles.len();
-    let sample_members: Vec<String> = state
-        .group
-        .members
-        .keys()
-        .take(3)
-        .cloned()
-        .collect();
+    let sample_members: Vec<String> = state.group.members.keys().take(3).cloned().collect();
     println!(
         "[CRDT][{}] context={} state_summary members={} hubs={} subs={} roles={} sample_members={:?}",
         doc_id, context, member_count, hubs_count, subs_count, roles_count, sample_members
@@ -372,17 +374,36 @@ impl ChatState {
 
         self.bootstrap_pending_deliveries();
 
-        // Kick off replication worker loop (drives hub/subscriber fanout + bootstrap pulls)
-        let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
-        spawn(async move {
-            loop {
-                // WIT defines ReplicationWork as a unit variant; use null payload.
-                let body = serde_json::to_vec(&serde_json::json!({"ReplicationWork": null}))
-                    .unwrap_or_default();
-                let _ = Request::new().target(self_addr.clone()).body(body).send();
-                let _ = sleep(5000).await;
-            }
-        });
+        // Kick off replication worker loop (event-driven with periodic safety net)
+        if let Some(wake_rx) = self.replication_wake_rx.take() {
+            let mut wake_rx = wake_rx.into_stream();
+            let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
+            spawn(async move {
+                let debounce = Duration::from_millis(250);
+                let mut last_wake: Option<Instant> = None;
+                loop {
+                    let wake = wake_rx.next().fuse();
+                    let tick = sleep(5000).fuse();
+                    pin_mut!(wake, tick);
+                    select! {
+                        _ = wake => {
+                            let now = Instant::now();
+                            let should_fire = last_wake
+                                .map(|ts| now.duration_since(ts) >= debounce)
+                                .unwrap_or(true);
+                            if should_fire {
+                                last_wake = Some(now);
+                                trigger_replication(self_addr.clone()).await;
+                            }
+                        }
+                        _ = tick => {
+                            last_wake = None;
+                            trigger_replication(self_addr.clone()).await;
+                        }
+                    }
+                }
+            });
+        }
 
         println!(
             "Chat app initialized on node: {} with {} chats",
@@ -2088,11 +2109,7 @@ impl ChatState {
         );
 
         if let Ok(state) = manager.doc().read_state() {
-            log_group_state_summary(
-                manager.doc().id(),
-                "crdt_group_update:sender_state",
-                &state,
-            );
+            log_group_state_summary(manager.doc().id(), "crdt_group_update:sender_state", &state);
             println!(
                 "[CRDT][{}] sender_state members={:?}",
                 manager.doc().id(),
@@ -2217,6 +2234,25 @@ impl ChatState {
     #[local]
     #[http]
     async fn replication_work(&mut self) -> Result<(), String> {
+        self.run_replication_work_guarded().await
+    }
+
+    async fn run_replication_work_guarded(&mut self) -> Result<(), String> {
+        if self
+            .replication_work_inflight
+            .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
+            .is_err()
+        {
+            println!("[REPL] replication_work already running, skipping wake");
+            return Ok(());
+        }
+        let res = self.replication_work_inner().await;
+        self.replication_work_inflight
+            .store(false, AtomicOrdering::SeqCst);
+        res
+    }
+
+    async fn replication_work_inner(&mut self) -> Result<(), String> {
         self.refresh_bootstrap_flags();
         let started = Instant::now();
         let time_budget = Duration::from_secs(12);
@@ -2696,25 +2732,25 @@ impl ChatState {
                     .fetch_snapshot_from_peer(&task.group_id, &task.peer)
                     .await
                 {
-            if let Err(err) = self.apply_group_update_payload(
-                &task.group_id,
-                &res.update_payload,
-                "replication_pull_snapshot",
-                None,
-                false,
-            ) {
-                println!(
-                    "[REPL][{}] failed to apply snapshot from {}: {}",
-                    task.group_id, task.peer, err
-                );
-                self.schedule_backoff(task, now);
-            } else if self.local_group_acl_ready(&task.group_id) {
-                self.groups_pending_bootstrap.remove(&task.group_id);
+                    if let Err(err) = self.apply_group_update_payload(
+                        &task.group_id,
+                        &res.update_payload,
+                        "replication_pull_snapshot",
+                        None,
+                        false,
+                    ) {
+                        println!(
+                            "[REPL][{}] failed to apply snapshot from {}: {}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                    } else if self.local_group_acl_ready(&task.group_id) {
+                        self.groups_pending_bootstrap.remove(&task.group_id);
+                    }
+                } else {
+                    self.schedule_backoff(task, now);
+                }
             }
-        } else {
-            self.schedule_backoff(task, now);
-        }
-    }
             ReplicationKind::PullDelta => {
                 let sv = self
                     .group_doc_managers
@@ -2756,7 +2792,7 @@ impl ChatState {
             "[REPL][{}] backoff {:?} to {} (attempt {} delay={}s)",
             task.group_id, task.kind, task.peer, task.attempt, delay
         );
-        self.replication_queue.push_back(task);
+        self.enqueue_replication_task(task);
     }
 
     fn enqueue_bootstrap_pulls(&mut self, now: u64) {
@@ -2789,7 +2825,7 @@ impl ChatState {
                 if self.has_replication_task(&group_id, &peer, ReplicationKind::PullSnapshot) {
                     continue;
                 }
-                self.replication_queue.push_back(ReplicationTask {
+                self.enqueue_replication_task(ReplicationTask {
                     group_id: group_id.clone(),
                     peer,
                     kind: ReplicationKind::PullSnapshot,
@@ -3050,8 +3086,7 @@ impl ChatState {
                             );
                             return Err(format!(
                                 "hub subscription denied: {}; subscriber access denied: {}",
-                                hub_err,
-                                sub_err
+                                hub_err, sub_err
                             ));
                         }
                     }

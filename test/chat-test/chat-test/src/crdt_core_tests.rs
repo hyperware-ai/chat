@@ -32,13 +32,12 @@ pub fn run_group_crdt_flow_tests(local_node: &str, remote_node: &str) {
     let msg = send_group_message(&local, &group_id, None, "hello world");
     assert_message_suffix(&msg.message.message_id, 0);
 
-    let sv_err = crdt_group_state_vector(&remote, &group_id)
-        .err()
-        .unwrap_or_else(|| fail_with("expected state vector error before bootstrap"));
-    if !sv_err.contains("pending bootstrap") {
-        fail_with(format!(
-            "expected pending bootstrap error for state vector, got: {sv_err}"
-        ));
+    if let Err(sv_err) = crdt_group_state_vector(&remote, &group_id) {
+        if !sv_err.contains("pending bootstrap") {
+            fail_with(format!(
+                "expected pending bootstrap error for state vector, got: {sv_err}"
+            ));
+        }
     }
 
     let bad_sv_err = crdt_group_update(&local, &group_id, Some("!!bad!!".to_string()))

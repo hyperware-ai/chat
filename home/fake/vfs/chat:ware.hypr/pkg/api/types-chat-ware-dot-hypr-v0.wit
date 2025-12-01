@@ -1,4 +1,0 @@
-world types-chat-ware-dot-hypr-v0 {
-    import chat;
-    include lib;
-}

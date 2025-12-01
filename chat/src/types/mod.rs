@@ -4,6 +4,7 @@ use serde_json::json;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -780,6 +781,12 @@ pub struct ChatState {
     #[serde(skip)]
     pub replication_rx: Option<UnboundedReceiver<ReplicationTask>>,
     #[serde(skip)]
+    pub replication_wake_tx: Option<ReplicationWakeTx>,
+    #[serde(skip)]
+    pub replication_wake_rx: Option<ReplicationWakeRx>,
+    #[serde(skip)]
+    pub replication_work_inflight: Arc<AtomicBool>,
+    #[serde(skip)]
     pub replication_queue: VecDeque<ReplicationTask>,
     #[serde(skip)]
     pub broker_queues: HashMap<String, VecDeque<BrokerEnvelope>>,
@@ -819,6 +826,7 @@ impl Default for ChatState {
     fn default() -> Self {
         let (delivery_tx, delivery_rx) = DeliveryTx::new();
         let (replication_tx, replication_rx) = ReplicationTx::new();
+        let (replication_wake_tx, replication_wake_rx) = ReplicationWakeTx::new();
 
         ChatState {
             profile: UserProfile::default(),
@@ -831,6 +839,9 @@ impl Default for ChatState {
             delivery_rx: Some(delivery_rx),
             replication_tx,
             replication_rx: Some(replication_rx),
+            replication_wake_tx: Some(replication_wake_tx),
+            replication_wake_rx: Some(replication_wake_rx),
+            replication_work_inflight: Arc::new(AtomicBool::new(false)),
             replication_queue: VecDeque::new(),
             broker_queues: HashMap::new(),
             broker_offsets: HashMap::new(),
@@ -942,6 +953,15 @@ pub struct DeliveryTx {
     sender: UnboundedSender<QueuedDelivery>,
 }
 
+#[derive(Clone)]
+pub struct ReplicationWakeTx {
+    sender: UnboundedSender<()>,
+}
+
+pub struct ReplicationWakeRx {
+    receiver: UnboundedReceiver<()>,
+}
+
 impl DeliveryTx {
     pub fn new() -> (Self, UnboundedReceiver<QueuedDelivery>) {
         let (sender, receiver) = mpsc::unbounded();
@@ -953,6 +973,23 @@ impl DeliveryTx {
         delivery: QueuedDelivery,
     ) -> Result<(), mpsc::TrySendError<QueuedDelivery>> {
         self.sender.unbounded_send(delivery)
+    }
+}
+
+impl ReplicationWakeTx {
+    pub fn new() -> (Self, ReplicationWakeRx) {
+        let (sender, receiver) = mpsc::unbounded();
+        (ReplicationWakeTx { sender }, ReplicationWakeRx { receiver })
+    }
+
+    pub fn wake(&self) {
+        let _ = self.sender.unbounded_send(());
+    }
+}
+
+impl ReplicationWakeRx {
+    pub fn into_stream(self) -> UnboundedReceiver<()> {
+        self.receiver
     }
 }
 
@@ -984,6 +1021,7 @@ impl<'de> Deserialize<'de> for ChatState {
         let data = ChatStateSerde::deserialize(deserializer)?;
         let (delivery_tx, delivery_rx) = DeliveryTx::new();
         let (replication_tx, replication_rx) = ReplicationTx::new();
+        let (replication_wake_tx, replication_wake_rx) = ReplicationWakeTx::new();
 
         let mut state = ChatState {
             profile: data.profile,
@@ -995,6 +1033,9 @@ impl<'de> Deserialize<'de> for ChatState {
             delivery_rx: Some(delivery_rx),
             replication_tx,
             replication_rx: Some(replication_rx),
+            replication_wake_tx: Some(replication_wake_tx),
+            replication_wake_rx: Some(replication_wake_rx),
+            replication_work_inflight: Arc::new(AtomicBool::new(false)),
             replication_queue: VecDeque::new(),
             broker_queues: HashMap::new(),
             broker_offsets: HashMap::new(),
@@ -1140,6 +1181,7 @@ impl ChatState {
 
     pub(crate) fn enqueue_replication_task(&mut self, task: ReplicationTask) {
         self.replication_queue.push_back(task);
+        self.wake_replication_worker();
     }
 
     pub(crate) fn next_ready_replication_task(&mut self, now: u64) -> Option<ReplicationTask> {
@@ -1168,6 +1210,12 @@ impl ChatState {
                 && t.peer == peer
                 && std::mem::discriminant(&t.kind) == std::mem::discriminant(&kind)
         })
+    }
+
+    pub fn wake_replication_worker(&self) {
+        if let Some(tx) = &self.replication_wake_tx {
+            tx.wake();
+        }
     }
 
     pub fn rebuild_pubsub_for_group(&mut self, group_id: &GroupId) {
@@ -1261,7 +1309,7 @@ impl ChatState {
         state_vector_bytes: Vec<u8>,
     ) {
         let now = Self::now_secs();
-        let Some(group) = self.groups.get(group_id) else {
+        let Some(group) = self.groups.get(group_id).cloned() else {
             return;
         };
         // Hubs
@@ -1291,7 +1339,7 @@ impl ChatState {
                 attempt: 0,
                 not_before: now,
             };
-            self.replication_queue.push_back(task);
+            self.enqueue_replication_task(task);
         }
 
         // Subscribers
@@ -1318,7 +1366,7 @@ impl ChatState {
             } else {
                 ReplicationKind::PushDelta
             };
-            self.replication_queue.push_back(ReplicationTask {
+            self.enqueue_replication_task(ReplicationTask {
                 group_id: group_id.clone(),
                 peer: node_id.clone(),
                 kind,
@@ -1362,6 +1410,7 @@ impl ChatState {
             next,
             entry.len()
         );
+        self.wake_replication_worker();
     }
 
     pub(crate) fn consume_broker_topics(&mut self, max_per_topic: usize) -> usize {
@@ -1425,7 +1474,12 @@ impl ChatState {
     }
 
     fn enqueue_stale_subscriber_replays_inner(&mut self, now: u64) {
-        for (group_id, group) in self.groups.iter() {
+        let groups: Vec<(GroupId, Group)> = self
+            .groups
+            .iter()
+            .map(|(id, group)| (id.clone(), group.clone()))
+            .collect();
+        for (group_id, group) in groups {
             if group.routing.subscriber_topic.is_empty() {
                 continue;
             }
@@ -1433,8 +1487,8 @@ impl ChatState {
                 if node_id == &our().node {
                     continue;
                 }
-                if self.has_replication_task(group_id, node_id, ReplicationKind::PushSnapshot)
-                    || self.has_replication_task(group_id, node_id, ReplicationKind::PushDelta)
+                if self.has_replication_task(&group_id, node_id, ReplicationKind::PushSnapshot)
+                    || self.has_replication_task(&group_id, node_id, ReplicationKind::PushDelta)
                 {
                     continue;
                 }
@@ -1450,7 +1504,7 @@ impl ChatState {
                     continue;
                 }
                 let since = self
-                    .peer_state_vector(group_id, node_id)
+                    .peer_state_vector(&group_id, node_id)
                     .map(|sv| sv.encode_v1());
                 let age = cursor_age.unwrap_or(0);
                 let kind = if since.is_none() || age > SUBSCRIBER_LANE_TTL_SECS {
@@ -1459,7 +1513,7 @@ impl ChatState {
                     ReplicationKind::PushDelta
                 };
                 let kind_for_log = kind.clone();
-                self.replication_queue.push_back(ReplicationTask {
+                self.enqueue_replication_task(ReplicationTask {
                     group_id: group_id.clone(),
                     peer: node_id.clone(),
                     kind,
