@@ -33,3 +33,6 @@
 # Temporary files
 *.tmp
 *~
+
+# Test home folder
+/home

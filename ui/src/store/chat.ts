@@ -61,38 +61,6 @@ function generateMessageHash(content: string, sender: string, timestamp: number)
   return `${sender}-${timeBucket}-${content.substring(0, 100)}`;
 }
 
-// Helper function to calculate a simple hash for sync verification (matches backend)
-function calculateChatHash(chat: api.Chat): string {
-  let hash = 0;
-  
-  // Hash message count
-  const str1 = chat.messages.length.toString();
-  for (let i = 0; i < str1.length; i++) {
-    hash = (hash << 5) - hash + str1.charCodeAt(i);
-    hash = hash & hash; // Convert to 32-bit integer
-  }
-  
-  // Hash each message's key fields
-  for (const msg of chat.messages) {
-    const msgStr = `${msg.id}${msg.sender}${msg.content}${msg.timestamp}`;
-    for (let i = 0; i < msgStr.length; i++) {
-      hash = (hash << 5) - hash + msgStr.charCodeAt(i);
-      hash = hash & hash;
-    }
-    
-    // Hash reactions
-    for (const reaction of msg.reactions || []) {
-      const reactionStr = `${reaction.emoji}${reaction.user}${reaction.timestamp}`;
-      for (let i = 0; i < reactionStr.length; i++) {
-        hash = (hash << 5) - hash + reactionStr.charCodeAt(i);
-        hash = hash & hash;
-      }
-    }
-  }
-  
-  return Math.abs(hash).toString(16);
-}
-
 export const useChatStore = create<ChatStore>((set, get) => ({
   // Initial state
   nodeId: null,
@@ -319,19 +287,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           continue;
         }
         
-        // Calculate local hash
-        const localHash = calculateChatHash(localChat);
-        
-        // Compare hashes
-        if (localHash !== backendHash.hash) {
-          console.log('[SYNC-VERIFY] Hash mismatch for chat:', backendHash.chat_id);
-          console.log('[SYNC-VERIFY]   Local hash:', localHash);
-          console.log('[SYNC-VERIFY]   Backend hash:', backendHash.hash);
-          console.log('[SYNC-VERIFY]   Local messages:', localChat.messages.length);
-          console.log('[SYNC-VERIFY]   Backend messages:', backendHash.message_count);
+        // Lightweight consistency checks without hashing
+        const localCount = localChat.messages.length;
+        const localLast = localChat.messages[localCount - 1];
+        const backendLastId = backendHash.last_message_id || null;
+        const backendLastTs = backendHash.last_message_timestamp || null;
+
+        const countMismatch = localCount !== backendHash.message_count;
+        const idMismatch = (localLast?.id || null) !== backendLastId;
+        const tsMismatch = (localLast?.timestamp || null) !== backendLastTs;
+
+        if (countMismatch || idMismatch || tsMismatch) {
+          console.log('[SYNC-VERIFY] Mismatch for chat:', backendHash.chat_id, {
+            localCount,
+            backendCount: backendHash.message_count,
+            localLastId: localLast?.id,
+            backendLastId,
+            localLastTs: localLast?.timestamp,
+            backendLastTs: backendLastTs,
+          });
           desyncedChats.push(backendHash.chat_id);
         } else {
-          console.log('[SYNC-VERIFY] Chat in sync:', backendHash.chat_id);
+          console.log('[SYNC-VERIFY] Chat appears in sync:', backendHash.chat_id);
         }
       }
       
