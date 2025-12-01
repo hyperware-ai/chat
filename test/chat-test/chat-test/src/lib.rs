@@ -362,11 +362,15 @@ fn send_chat_rpc<T: DeserializeOwned>(address: &Address, payload: Value) -> Resu
     let body = serde_json::to_vec(&payload)
         .unwrap_or_else(|e| fail_with(format!("failed to encode chat payload: {e}")));
 
-    let response = Request::to(address.clone())
-        .body(body)
-        .send_and_await_response(15)
-        .unwrap_or_else(|e| fail_with(format!("failed to send chat request: {e:?}")))
-        .unwrap_or_else(|_| fail_with("chat request returned no response"));
+    let response =
+        match Request::to(address.clone())
+            .body(body)
+            .send_and_await_response(15)
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => return Err(format!("chat request returned no response: {err:?}")),
+            Err(e) => fail_with(format!("failed to send chat request: {e:?}")),
+        };
 
     if response.is_request() {
         fail_with("chat request returned a request instead of a response");

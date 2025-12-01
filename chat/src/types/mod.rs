@@ -1,35 +1,24 @@
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crdt::{
-    compile_membership_rules, AttachmentDescriptor, DeliveryCursor, Group, GroupCounters,
-    GroupCrdtManager, GroupDocState, GroupId, GroupMember, GroupMetadata, GroupPermissions,
-    GroupRoutingConfig, GroupTier, GroupVisibility, HubSyncState, MembershipActionKind,
-    MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRuleBox,
-    MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId,
-    Role, SubscriberSyncState, Thread, ThreadId, ThreadParentRef,
+    AttachmentDescriptor, DeliveryCursor, Group, GroupCounters, GroupCrdtManager, GroupId,
+    GroupMember, GroupMetadata, GroupPermissions, GroupRoutingConfig, GroupTier, GroupVisibility,
+    HubSyncState, MembershipActionKind, MembershipDecision, MembershipDecisionStatus,
+    MembershipProposal, MembershipRuleBox, MembershipRuleConfig, MembershipRuleError,
+    MembershipStatus, MessageId, MessageMeta, NodeId, Role, SubscriberSyncState, Thread, ThreadId,
+    ThreadParentRef,
 };
-use crate::log_crdt_event;
 use crate::pubsub::PubSubRegistry;
-use hyperware_crdt::{
-    yrs::{Decode, Encode, StateVector},
-    CommitteeError,
-};
+use hyperware_crdt::CommitteeError;
 use hyperware_process_lib::our;
 use hyperware_pubsub_core::{whitelist::NodeId as BrokerNodeId, TopicId as BrokerTopicId};
-
-const SUBSCRIBER_LANE_TTL_SECS: u64 = 300;
-const SUBSCRIBER_ACK_DEADLINE_SECS: u64 = 45;
-const DELIVERY_DEDUPE_WINDOW_SECS: u64 = 120;
-const DELIVERY_DEDUPE_LIMIT: usize = 2048;
-const SUBSCRIBER_EVENT_BUFFER: usize = 256;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PushSubscription {
@@ -37,7 +26,7 @@ pub struct PushSubscription {
     pub keys: SubscriptionKeys,
 }
 
-fn aggregate_rule_decisions(
+pub(crate) fn aggregate_rule_decisions(
     rules: &[MembershipRuleBox],
     proposal: &MembershipProposal,
 ) -> MembershipDecision {
@@ -68,7 +57,7 @@ fn aggregate_rule_decisions(
     }
 }
 
-fn active_member_count(group: &Group) -> u32 {
+pub(crate) fn active_member_count(group: &Group) -> u32 {
     group
         .members
         .values()
@@ -76,7 +65,7 @@ fn active_member_count(group: &Group) -> u32 {
         .count() as u32
 }
 
-fn membership_proposal_key(
+pub(crate) fn membership_proposal_key(
     group_id: &GroupId,
     candidate: &NodeId,
     action: MembershipActionKind,
@@ -88,7 +77,7 @@ fn membership_proposal_key(
     format!("{group_id}:{action_str}:{candidate}")
 }
 
-fn current_timestamp() -> u64 {
+pub(crate) fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -116,14 +105,14 @@ fn default_membership_rules(creator: &NodeId) -> Vec<MembershipRuleConfig> {
     )]
 }
 
-fn group_root_thread_id(group: &Group) -> Option<ThreadId> {
+pub(crate) fn group_root_thread_id(group: &Group) -> Option<ThreadId> {
     group
         .metadata
         .as_ref()
         .map(|metadata| metadata.root_thread_id.clone())
 }
 
-fn sync_member_membership_sets(group: &mut Group, member_id: &NodeId, timestamp: u64) {
+pub(crate) fn sync_member_membership_sets(group: &mut Group, member_id: &NodeId, timestamp: u64) {
     let Some(member) = group.members.get(member_id) else {
         group.hubs.active.remove(member_id);
         group.subscribers.entries.remove(member_id);
@@ -1107,578 +1096,6 @@ impl ChatState {
             .unwrap_or(0)
     }
 
-    fn dedupe_key(topic: &str, payload: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        topic.hash(&mut hasher);
-        payload.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn register_delivery_fingerprint(&mut self, topic: &str, payload: &str, now: u64) -> bool {
-        let key = Self::dedupe_key(topic, payload);
-        if let Some(ts) = self.delivery_dedupe.get(&key) {
-            if now.saturating_sub(*ts) < DELIVERY_DEDUPE_WINDOW_SECS {
-                return true;
-            }
-        }
-        self.delivery_dedupe.insert(key, now);
-        self.prune_dedupe_cache(now);
-        false
-    }
-
-    fn prune_dedupe_cache(&mut self, now: u64) {
-        let cutoff = now.saturating_sub(DELIVERY_DEDUPE_WINDOW_SECS);
-        self.delivery_dedupe.retain(|_, ts| *ts >= cutoff);
-        if self.delivery_dedupe.len() > DELIVERY_DEDUPE_LIMIT {
-            let overflow = self
-                .delivery_dedupe
-                .len()
-                .saturating_sub(DELIVERY_DEDUPE_LIMIT);
-            if overflow == 0 {
-                return;
-            }
-            let mut oldest: Vec<(u64, u64)> = self
-                .delivery_dedupe
-                .iter()
-                .map(|(k, ts)| (*k, *ts))
-                .collect();
-            oldest.sort_by_key(|(_, ts)| *ts);
-            for (key, _) in oldest.into_iter().take(overflow) {
-                self.delivery_dedupe.remove(&key);
-            }
-        }
-    }
-
-    fn record_subscriber_event(&mut self, event: SubscriberDeliveryEvent) {
-        self.subscriber_events.push_back(event);
-        if self.subscriber_events.len() > SUBSCRIBER_EVENT_BUFFER {
-            let overflow = self.subscriber_events.len() - SUBSCRIBER_EVENT_BUFFER;
-            for _ in 0..overflow {
-                self.subscriber_events.pop_front();
-            }
-        }
-    }
-
-    pub fn rebuild_group_doc_managers(&mut self) -> Result<(), CommitteeError> {
-        self.ensure_routing_defaults_for_all();
-        self.group_doc_managers.clear();
-        self.groups_pending_bootstrap.clear();
-        for (group_id, group) in &self.groups {
-            if self.should_seed_group_doc(group) {
-                let manager = GroupCrdtManager::from_group(group_id, group)?;
-                self.group_doc_managers.insert(group_id.clone(), manager);
-            } else {
-                self.groups_pending_bootstrap.insert(group_id.clone());
-            }
-        }
-        self.pubsub.rebuild_all(&self.groups);
-        Ok(())
-    }
-
-    pub(crate) fn enqueue_replication_task(&mut self, task: ReplicationTask) {
-        self.replication_queue.push_back(task);
-        self.wake_replication_worker();
-    }
-
-    pub(crate) fn next_ready_replication_task(&mut self, now: u64) -> Option<ReplicationTask> {
-        let mut rotate = 0usize;
-        while let Some(task) = self.replication_queue.pop_front() {
-            if task.not_before <= now {
-                return Some(task);
-            }
-            self.replication_queue.push_back(task);
-            rotate += 1;
-            if rotate >= self.replication_queue.len() {
-                break;
-            }
-        }
-        None
-    }
-
-    pub(crate) fn has_replication_task(
-        &self,
-        group_id: &GroupId,
-        peer: &str,
-        kind: ReplicationKind,
-    ) -> bool {
-        self.replication_queue.iter().any(|t| {
-            &t.group_id == group_id
-                && t.peer == peer
-                && std::mem::discriminant(&t.kind) == std::mem::discriminant(&kind)
-        })
-    }
-
-    pub fn wake_replication_worker(&self) {
-        if let Some(tx) = &self.replication_wake_tx {
-            tx.wake();
-        }
-    }
-
-    pub fn rebuild_pubsub_for_group(&mut self, group_id: &GroupId) {
-        if let Some(group) = self.groups.get(group_id) {
-            self.pubsub.rebuild_group(group_id, group);
-        } else {
-            self.pubsub.remove_group(group_id);
-        }
-    }
-
-    fn ensure_routing_defaults_for_all(&mut self) {
-        for (group_id, group) in self.groups.iter_mut() {
-            if group.routing.hub_topic.is_empty() || group.routing.subscriber_topic.is_empty() {
-                group.routing = GroupRoutingConfig::for_group(group_id);
-            }
-        }
-    }
-
-    pub(crate) fn peer_state_vector(&self, group_id: &GroupId, peer: &str) -> Option<StateVector> {
-        let group = self.groups.get(group_id)?;
-        let sync = group.hubs.sync.get(peer)?;
-        let bytes = sync.last_state_vector.as_ref()?;
-        StateVector::decode_v1(bytes).ok()
-    }
-
-    pub(crate) fn update_peer_state_vector(
-        &mut self,
-        group_id: &GroupId,
-        peer: &str,
-        sv: &StateVector,
-    ) {
-        if let Some(group) = self.groups.get_mut(group_id) {
-            let now = Self::now_secs();
-            group.hubs.upsert_sync(
-                peer.to_string(),
-                HubSyncState {
-                    last_state_vector: Some(sv.encode_v1()),
-                    last_seen_ts: now,
-                    ..HubSyncState::default()
-                },
-            );
-        }
-    }
-
-    pub(crate) fn update_local_hub_sync_state(&mut self, group_id: &GroupId, sv: &StateVector) {
-        if let Some(group) = self.groups.get_mut(group_id) {
-            let now = Self::now_secs();
-            group.hubs.upsert_sync(
-                our().node.clone(),
-                HubSyncState {
-                    last_state_vector: Some(sv.encode_v1()),
-                    last_seen_ts: now,
-                    ..HubSyncState::default()
-                },
-            );
-        }
-    }
-
-    pub(crate) fn update_delivery_cursor(
-        &mut self,
-        group_id: &GroupId,
-        peer: &str,
-        is_hub: bool,
-        queue_id: String,
-        offset: Option<u64>,
-    ) {
-        if let Some(group) = self.groups.get_mut(group_id) {
-            let now = Self::now_secs();
-            let cursors = if is_hub {
-                &mut group.delivery.hub_cursors
-            } else {
-                &mut group.delivery.subscriber_cursors
-            };
-            let entry = cursors
-                .entry(peer.to_string())
-                .or_insert_with(|| DeliveryCursor {
-                    queue_id: queue_id.clone(),
-                    last_offset: 0,
-                    updated_at: now,
-                });
-            entry.queue_id = queue_id;
-            let next = offset.unwrap_or_else(|| entry.last_offset.saturating_add(1));
-            entry.last_offset = next;
-            entry.updated_at = now;
-        }
-    }
-
-    pub(crate) fn enqueue_replication_pushes(
-        &mut self,
-        group_id: &GroupId,
-        state_vector_bytes: Vec<u8>,
-    ) {
-        let now = Self::now_secs();
-        let Some(group) = self.groups.get(group_id).cloned() else {
-            return;
-        };
-        // Hubs
-        for hub in &group.hubs.active {
-            if hub == &our().node {
-                continue;
-            }
-            let since = self
-                .peer_state_vector(group_id, hub)
-                .map(|sv| sv.encode_v1());
-            let hub_age = group
-                .delivery
-                .hub_cursors
-                .get(hub)
-                .map(|c| now.saturating_sub(c.updated_at))
-                .unwrap_or(u64::MAX);
-            let kind = if since.is_none() || hub_age > SUBSCRIBER_LANE_TTL_SECS {
-                ReplicationKind::PushSnapshot
-            } else {
-                ReplicationKind::PushDelta
-            };
-            let task = ReplicationTask {
-                group_id: group_id.clone(),
-                peer: hub.clone(),
-                kind,
-                since,
-                attempt: 0,
-                not_before: now,
-            };
-            self.enqueue_replication_task(task);
-        }
-
-        // Subscribers
-        for (node_id, member) in &group.members {
-            if node_id == &our().node {
-                continue;
-            }
-            if let Some(role) = group.roles.get(&member.role_id) {
-                if role.tier == GroupTier::Hub {
-                    continue;
-                }
-            }
-            let since = self
-                .peer_state_vector(group_id, node_id)
-                .map(|sv| sv.encode_v1());
-            let cursor_age = group
-                .delivery
-                .subscriber_cursors
-                .get(node_id)
-                .map(|c| now.saturating_sub(c.updated_at))
-                .unwrap_or(u64::MAX);
-            let kind = if since.is_none() || cursor_age > SUBSCRIBER_LANE_TTL_SECS {
-                ReplicationKind::PushSnapshot
-            } else {
-                ReplicationKind::PushDelta
-            };
-            self.enqueue_replication_task(ReplicationTask {
-                group_id: group_id.clone(),
-                peer: node_id.clone(),
-                kind,
-                since,
-                attempt: 0,
-                not_before: now,
-            });
-        }
-
-        // Ensure we have our own sync recorded
-        if let Ok(sv) = StateVector::decode_v1(&state_vector_bytes) {
-            self.update_local_hub_sync_state(group_id, &sv);
-        }
-    }
-
-    pub(crate) fn publish_broker_message(
-        &mut self,
-        topic: &str,
-        payload: &str,
-        acl_version: Option<u64>,
-        kind: ReplicationKind,
-    ) {
-        let next = *self.broker_offsets.get(topic).unwrap_or(&0);
-        let env = BrokerEnvelope {
-            offset: next,
-            payload: payload.to_string(),
-            acl_version,
-            kind,
-            ts: Self::now_secs(),
-        };
-        let entry = self
-            .broker_queues
-            .entry(topic.to_string())
-            .or_insert_with(VecDeque::new);
-        entry.push_back(env);
-        self.broker_offsets
-            .insert(topic.to_string(), next.saturating_add(1));
-        println!(
-            "[BROKER] topic={} enqueued offset={} len={}",
-            topic,
-            next,
-            entry.len()
-        );
-        self.wake_replication_worker();
-    }
-
-    pub(crate) fn consume_broker_topics(&mut self, max_per_topic: usize) -> usize {
-        let mut applied = 0usize;
-        let now = Self::now_secs();
-        let topics: Vec<String> = self
-            .groups
-            .values()
-            .flat_map(|g| {
-                let mut t = Vec::new();
-                if g.hubs.active.contains(&our().node) && !g.routing.hub_topic.is_empty() {
-                    t.push(g.routing.hub_topic.clone());
-                }
-                // subscriber lane consumption if we are in subscribers
-                if g.subscribers.entries.contains_key(&our().node)
-                    && !g.routing.subscriber_topic.is_empty()
-                {
-                    t.push(g.routing.subscriber_topic.clone());
-                }
-                t
-            })
-            .collect();
-
-        for topic in topics {
-            let from = *self.broker_cursors.get(&topic).unwrap_or(&0);
-            let envelopes: Vec<BrokerEnvelope> = self
-                .broker_queues
-                .get(&topic)
-                .map(|q| {
-                    q.iter()
-                        .filter(|e| e.offset >= from)
-                        .take(max_per_topic)
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            for env in envelopes {
-                if let Err(err) = self.apply_broker_envelope(&topic, &env, now) {
-                    println!(
-                        "[BROKER] topic={} offset={} apply error: {}",
-                        topic, env.offset, err
-                    );
-                    continue;
-                }
-                applied += 1;
-                self.broker_cursors.insert(topic.clone(), env.offset + 1);
-            }
-        }
-        applied
-    }
-
-    #[cfg(feature = "test-helpers")]
-    pub fn enqueue_stale_subscriber_replays(&mut self, now: u64) {
-        self.enqueue_stale_subscriber_replays_inner(now);
-    }
-
-    #[cfg(not(feature = "test-helpers"))]
-    pub(crate) fn enqueue_stale_subscriber_replays(&mut self, now: u64) {
-        self.enqueue_stale_subscriber_replays_inner(now);
-    }
-
-    fn enqueue_stale_subscriber_replays_inner(&mut self, now: u64) {
-        let groups: Vec<(GroupId, Group)> = self
-            .groups
-            .iter()
-            .map(|(id, group)| (id.clone(), group.clone()))
-            .collect();
-        for (group_id, group) in groups {
-            if group.routing.subscriber_topic.is_empty() {
-                continue;
-            }
-            for (node_id, _) in group.subscribers.entries.iter() {
-                if node_id == &our().node {
-                    continue;
-                }
-                if self.has_replication_task(&group_id, node_id, ReplicationKind::PushSnapshot)
-                    || self.has_replication_task(&group_id, node_id, ReplicationKind::PushDelta)
-                {
-                    continue;
-                }
-                let cursor_age = group
-                    .delivery
-                    .subscriber_cursors
-                    .get(node_id)
-                    .map(|cursor| now.saturating_sub(cursor.updated_at));
-                let stale = cursor_age
-                    .map(|age| age > SUBSCRIBER_ACK_DEADLINE_SECS)
-                    .unwrap_or(true);
-                if !stale {
-                    continue;
-                }
-                let since = self
-                    .peer_state_vector(&group_id, node_id)
-                    .map(|sv| sv.encode_v1());
-                let age = cursor_age.unwrap_or(0);
-                let kind = if since.is_none() || age > SUBSCRIBER_LANE_TTL_SECS {
-                    ReplicationKind::PushSnapshot
-                } else {
-                    ReplicationKind::PushDelta
-                };
-                let kind_for_log = kind.clone();
-                self.enqueue_replication_task(ReplicationTask {
-                    group_id: group_id.clone(),
-                    peer: node_id.clone(),
-                    kind,
-                    since,
-                    attempt: 0,
-                    not_before: now,
-                });
-                self.replication_metrics.stale_replays =
-                    self.replication_metrics.stale_replays.saturating_add(1);
-                println!(
-                    "[REPL][{}] queued {} replay to subscriber {} (age={}s)",
-                    group_id,
-                    match kind_for_log {
-                        ReplicationKind::PushSnapshot => "snapshot",
-                        _ => "delta",
-                    },
-                    node_id,
-                    age
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "test-helpers")]
-    pub fn apply_broker_envelope(
-        &mut self,
-        topic: &str,
-        env: &BrokerEnvelope,
-        now: u64,
-    ) -> Result<(), String> {
-        self.apply_broker_envelope_inner(topic, env, now)
-    }
-
-    #[cfg(not(feature = "test-helpers"))]
-    fn apply_broker_envelope(
-        &mut self,
-        topic: &str,
-        env: &BrokerEnvelope,
-        now: u64,
-    ) -> Result<(), String> {
-        self.apply_broker_envelope_inner(topic, env, now)
-    }
-
-    fn apply_broker_envelope_inner(
-        &mut self,
-        topic: &str,
-        env: &BrokerEnvelope,
-        now: u64,
-    ) -> Result<(), String> {
-        // find group by topic
-        let group_id = self
-            .groups
-            .iter()
-            .find(|(_, g)| g.routing.hub_topic == topic || g.routing.subscriber_topic == topic)
-            .map(|(id, _)| id.clone())
-            .ok_or_else(|| "no group for topic".to_string())?;
-        let is_subscriber_topic = self
-            .groups
-            .get(&group_id)
-            .map(|g| g.routing.subscriber_topic == topic)
-            .unwrap_or(false);
-        let created_at = if env.ts == 0 { now } else { env.ts };
-        let age = now.saturating_sub(created_at);
-        if age > SUBSCRIBER_ACK_DEADLINE_SECS {
-            println!(
-                "[BROKER][{}] delivery lag {}s topic={} offset={}",
-                group_id, age, topic, env.offset
-            );
-        }
-        if is_subscriber_topic {
-            self.replication_metrics.last_subscriber_lag_secs = age;
-            if age > SUBSCRIBER_LANE_TTL_SECS {
-                self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
-                println!(
-                    "[BROKER][{}] drop stale subscriber envelope topic={} offset={} age={}s",
-                    group_id, topic, env.offset, age
-                );
-                return Ok(());
-            }
-            if self.register_delivery_fingerprint(topic, &env.payload, now) {
-                self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
-                println!(
-                    "[BROKER][{}] drop duplicate subscriber envelope topic={} offset={}",
-                    group_id, topic, env.offset
-                );
-                return Ok(());
-            }
-        } else {
-            self.replication_metrics.last_lag_secs = age;
-        }
-
-        // ACL drift log
-        if let Some(in_acl) = env.acl_version {
-            if let Some(wl) = self.pubsub.whitelist(&group_id) {
-                let local = wl.version();
-                if local != in_acl {
-                    println!(
-                        "[BROKER][{}] ACL drift topic {} incoming={} local={}",
-                        group_id, topic, in_acl, local
-                    );
-                    self.replication_metrics.acl_drifts =
-                        self.replication_metrics.acl_drifts.saturating_add(1);
-                }
-            }
-        }
-
-        self.apply_group_update_payload(
-            &group_id,
-            &env.payload,
-            "broker_delivery",
-            env.acl_version,
-            is_subscriber_topic,
-        )
-        .map_err(|err| {
-            self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
-            err
-        })?;
-        // update cursors/delivery trackers
-        let is_hub = self
-            .groups
-            .get(&group_id)
-            .map(|g| g.routing.hub_topic == topic)
-            .unwrap_or(false);
-        self.update_delivery_cursor(
-            &group_id,
-            &our().node,
-            is_hub,
-            topic.to_string(),
-            Some(env.offset),
-        );
-        // bump heartbeat
-        if let Some(group) = self.groups.get_mut(&group_id) {
-            group.hubs.upsert_sync(
-                our().node.clone(),
-                HubSyncState {
-                    last_seen_ts: now,
-                    ..HubSyncState::default()
-                },
-            );
-            if is_subscriber_topic {
-                let subscriber = group
-                    .subscribers
-                    .entries
-                    .entry(our().node.clone())
-                    .or_insert_with(SubscriberSyncState::default);
-                subscriber.last_seen_ts = now;
-                subscriber.last_state_vector = self
-                    .group_doc_managers
-                    .get(&group_id)
-                    .and_then(|mgr| mgr.last_state_vector().map(|sv| sv.encode_v1()));
-                if let ReplicationKind::PushSnapshot = env.kind {
-                    let digest = format!("{:x}", Self::dedupe_key(topic, &env.payload));
-                    subscriber.last_snapshot_digest = Some(digest);
-                }
-            }
-        }
-        if is_subscriber_topic {
-            self.record_subscriber_event(SubscriberDeliveryEvent {
-                group_id,
-                topic: topic.to_string(),
-                offset: env.offset,
-                kind: env.kind.clone(),
-                age_secs: age,
-                recorded_at: now,
-            });
-        }
-        Ok(())
-    }
-
     pub(crate) fn require_hub_access(
         &self,
         group_id: &GroupId,
@@ -1769,7 +1186,7 @@ impl ChatState {
         }
     }
 
-    fn require_group_permission(
+    pub(crate) fn require_group_permission(
         &self,
         group_id: &GroupId,
         node_id: &NodeId,
@@ -1845,7 +1262,7 @@ impl ChatState {
         }
     }
 
-    fn should_seed_group_doc(&self, group: &Group) -> bool {
+    pub(crate) fn should_seed_group_doc(&self, group: &Group) -> bool {
         group
             .metadata
             .as_ref()
@@ -1929,43 +1346,6 @@ impl ChatState {
             .expect("group manager initialised"))
     }
 
-    pub fn commit_group_crdt(&mut self, group_id: &GroupId) -> Result<(), CommitteeError> {
-        if self.group_needs_bootstrap(group_id) {
-            return Err(CommitteeError::Observer(format!(
-                "group {} requires bootstrap before CRDT commit",
-                group_id
-            )));
-        }
-
-        let group = self.groups.get(group_id).ok_or_else(|| {
-            CommitteeError::Observer(format!("missing group {} for CRDT commit", group_id))
-        })?;
-        self.pubsub.rebuild_group(group_id, group);
-        let snapshot: GroupDocState = (group_id, group).into();
-        let manager = self.ensure_group_doc_manager(group_id)?;
-        manager.refresh_with_snapshot(snapshot)?;
-        let state_vector = {
-            let doc = manager.doc();
-            let state_vector = doc.state_vector();
-            log_crdt_event(doc.id(), "commit_group_crdt", &state_vector, None);
-            state_vector
-        };
-        manager.set_last_state_vector(state_vector.clone());
-        self.update_local_hub_sync_state(group_id, &state_vector);
-        // enqueue per-peer fanout for hubs and subscribers
-        self.enqueue_replication_pushes(group_id, state_vector.encode_v1());
-        Ok(())
-    }
-
-    pub fn commit_group_crdt_or_log(&mut self, group_id: &GroupId, context: &str) {
-        if let Err(err) = self.commit_group_crdt(group_id) {
-            println!(
-                "Failed to commit group CRDT state (group={} context={}): {:?}",
-                group_id, context, err
-            );
-        }
-    }
-
     pub fn groups(&self) -> &HashMap<GroupId, Group> {
         &self.groups
     }
@@ -1993,70 +1373,6 @@ impl ChatState {
         self.membership_rule_cache.remove(group_id);
         self.pubsub.remove_group(group_id);
         removed
-    }
-
-    fn next_group_thread_id(&mut self, group_id: &GroupId) -> Result<ThreadId, String> {
-        let group = self
-            .groups
-            .get_mut(group_id)
-            .ok_or_else(|| "Group not found".to_string())?;
-        Ok(group.counters.next_thread_id(group_id))
-    }
-
-    fn next_group_message_id(&mut self, group_id: &GroupId) -> Result<MessageId, String> {
-        let group = self
-            .groups
-            .get_mut(group_id)
-            .ok_or_else(|| "Group not found".to_string())?;
-        Ok(group.counters.next_message_id(group_id))
-    }
-
-    pub fn set_group_membership_rules(
-        &mut self,
-        group_id: GroupId,
-        rules: Vec<MembershipRuleConfig>,
-    ) {
-        let entry = self
-            .groups
-            .entry(group_id.clone())
-            .or_insert_with(Group::default);
-        entry.membership_rules = rules;
-        self.invalidate_group_rules(&group_id);
-        self.commit_group_crdt_or_log(&group_id, "set_group_membership_rules");
-    }
-
-    pub fn group_rules(
-        &mut self,
-        group_id: &GroupId,
-    ) -> Result<&[MembershipRuleBox], MembershipRuleError> {
-        if !self.membership_rule_cache.contains_key(group_id) {
-            self.rebuild_group_rule_cache(group_id)?;
-        }
-
-        Ok(self
-            .membership_rule_cache
-            .get(group_id)
-            .expect("group rules cache populated after rebuild")
-            .as_slice())
-    }
-
-    pub fn invalidate_group_rules(&mut self, group_id: &GroupId) {
-        self.membership_rule_cache.remove(group_id);
-    }
-
-    pub fn rebuild_group_rule_cache(
-        &mut self,
-        group_id: &GroupId,
-    ) -> Result<(), MembershipRuleError> {
-        let configs = self
-            .groups
-            .get(group_id)
-            .map(|group| group.membership_rules.as_slice())
-            .unwrap_or(&[]);
-        let compiled = compile_membership_rules(configs)?;
-        self.membership_rule_cache
-            .insert(group_id.clone(), compiled);
-        Ok(())
     }
 
     pub fn create_group_state(
@@ -2266,290 +1582,5 @@ impl ChatState {
         }
         self.commit_group_crdt_or_log(&req.group_id, "create_group_thread");
         Ok(CreateGroupThreadRes { thread_id })
-    }
-
-    pub fn send_group_message_state(
-        &mut self,
-        mut req: SendGroupMessageReq,
-    ) -> Result<SendGroupMessageRes, String> {
-        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
-            .map_err(|err| format!("cannot send group message: {}", err))?;
-        self.require_subscriber_access(&req.group_id, &our().node)
-            .map_err(|err| format!("cannot send group message: {}", err))?;
-
-        let message_id = self.next_group_message_id(&req.group_id)?;
-        let now = current_timestamp();
-        let sender = our().node.clone();
-
-        let message = {
-            let group = self
-                .groups
-                .get_mut(&req.group_id)
-                .ok_or_else(|| "Group not found".to_string())?;
-
-            let thread_id = req
-                .thread_id
-                .take()
-                .or_else(|| group_root_thread_id(group))
-                .ok_or_else(|| "Group missing root thread".to_string())?;
-
-            let thread = group
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| "Thread not found".to_string())?;
-
-            let mut message = MessageMeta::new(
-                message_id.clone(),
-                thread_id.clone(),
-                req.group_id.clone(),
-                sender.clone(),
-                now,
-                req.message_type,
-            );
-            message.reply_to = req.reply_to.take();
-            message.attachments = req.attachments.clone();
-
-            if thread.root_message_id.is_none() {
-                thread.root_message_id = Some(message_id.clone());
-            }
-            thread.summary.message_count += 1;
-            thread.summary.last_message_id = Some(message_id.clone());
-            thread.summary.last_activity = now;
-            thread.summary.last_sender = Some(sender.clone());
-
-            group.messages.insert(message_id.clone(), message.clone());
-            if let Some(meta) = group.metadata.as_mut() {
-                meta.updated_at = now;
-            }
-
-            let subscriber = group
-                .subscribers
-                .entries
-                .entry(sender.clone())
-                .or_insert_with(SubscriberSyncState::default);
-            subscriber.last_seen_ts = now;
-
-            message
-        };
-        self.commit_group_crdt_or_log(&req.group_id, "send_group_message");
-        Ok(SendGroupMessageRes { message })
-    }
-
-    pub fn invite_member(
-        &mut self,
-        group_id: &GroupId,
-        proposer: NodeId,
-        candidate: NodeId,
-        role_id: String,
-    ) -> Result<MembershipDecision, MembershipActionError> {
-        self.require_group_permission(group_id, &proposer, GroupPermissions::INVITE_MEMBERS)
-            .map_err(MembershipActionError::PermissionDenied)?;
-
-        let proposal_id =
-            membership_proposal_key(group_id, &candidate, MembershipActionKind::Invite);
-        let eligible_voters = {
-            let group = self
-                .groups
-                .get(group_id)
-                .ok_or_else(|| MembershipActionError::GroupNotFound(group_id.clone()))?;
-            if let Some(member) = group.members.get(&candidate) {
-                if member.status != MembershipStatus::Removed {
-                    return Err(MembershipActionError::MemberExists(candidate));
-                }
-            }
-            if group.membership_proposals.contains_key(&proposal_id) {
-                return Err(MembershipActionError::ProposalExists(proposal_id));
-            }
-            active_member_count(group)
-        };
-
-        let mut proposal = MembershipProposal {
-            proposal_id,
-            candidate,
-            requested_role: role_id,
-            proposer,
-            action: MembershipActionKind::Invite,
-            approvals: HashSet::new(),
-            rejections: HashSet::new(),
-            eligible_voters,
-            token_support: 0,
-            token_opposition: 0,
-        };
-        proposal.approvals.insert(proposal.proposer.clone());
-        self.process_membership_proposal(group_id, proposal)
-    }
-
-    pub fn approve_membership(
-        &mut self,
-        group_id: &GroupId,
-        proposal_id: &str,
-        approver: NodeId,
-    ) -> Result<MembershipDecision, MembershipActionError> {
-        self.require_group_permission(group_id, &approver, GroupPermissions::INVITE_MEMBERS)
-            .map_err(MembershipActionError::PermissionDenied)?;
-
-        let proposal = {
-            let group = self
-                .groups
-                .get_mut(group_id)
-                .ok_or_else(|| MembershipActionError::GroupNotFound(group_id.clone()))?;
-            let proposal = group
-                .membership_proposals
-                .get_mut(proposal_id)
-                .ok_or_else(|| MembershipActionError::ProposalNotFound(proposal_id.to_string()))?;
-            proposal.approvals.insert(approver);
-            proposal.clone()
-        };
-        self.process_membership_proposal(group_id, proposal)
-    }
-
-    pub fn remove_member(
-        &mut self,
-        group_id: &GroupId,
-        proposer: NodeId,
-        target: NodeId,
-    ) -> Result<MembershipDecision, MembershipActionError> {
-        self.require_group_permission(group_id, &proposer, GroupPermissions::MANAGE_ROLES)
-            .map_err(MembershipActionError::PermissionDenied)?;
-
-        let proposal_id = membership_proposal_key(group_id, &target, MembershipActionKind::Remove);
-        let (eligible_voters, role_id) = {
-            let group = self
-                .groups
-                .get(group_id)
-                .ok_or_else(|| MembershipActionError::GroupNotFound(group_id.clone()))?;
-            let member = group
-                .members
-                .get(&target)
-                .ok_or_else(|| MembershipActionError::MemberNotFound(target.clone()))?;
-            if member.status == MembershipStatus::Removed {
-                return Err(MembershipActionError::MemberNotFound(target));
-            }
-            if group.membership_proposals.contains_key(&proposal_id) {
-                return Err(MembershipActionError::ProposalExists(proposal_id));
-            }
-            (active_member_count(group), member.role_id.clone())
-        };
-
-        let mut proposal = MembershipProposal {
-            proposal_id,
-            candidate: target,
-            requested_role: role_id,
-            proposer,
-            action: MembershipActionKind::Remove,
-            approvals: HashSet::new(),
-            rejections: HashSet::new(),
-            eligible_voters,
-            token_support: 0,
-            token_opposition: 0,
-        };
-        proposal.approvals.insert(proposal.proposer.clone());
-        self.process_membership_proposal(group_id, proposal)
-    }
-
-    fn evaluate_membership(
-        &mut self,
-        group_id: &GroupId,
-        proposal: &MembershipProposal,
-    ) -> Result<MembershipDecision, MembershipActionError> {
-        let rules = self.group_rules(group_id)?;
-        Ok(aggregate_rule_decisions(rules, proposal))
-    }
-
-    fn apply_membership_decision(
-        &mut self,
-        group_id: &GroupId,
-        proposal: MembershipProposal,
-        decision: &MembershipDecision,
-        now: u64,
-    ) -> Result<(), MembershipActionError> {
-        let group = self
-            .groups
-            .get_mut(group_id)
-            .ok_or_else(|| MembershipActionError::GroupNotFound(group_id.clone()))?;
-
-        if let Some(meta) = group.metadata.as_mut() {
-            meta.updated_at = now;
-        }
-
-        match proposal.action {
-            MembershipActionKind::Invite => match decision.status {
-                MembershipDecisionStatus::Approved => {
-                    let entry = group
-                        .members
-                        .entry(proposal.candidate.clone())
-                        .or_insert_with(|| {
-                            GroupMember::new(
-                                proposal.candidate.clone(),
-                                proposal.requested_role.clone(),
-                                MembershipStatus::Active,
-                                now,
-                            )
-                        });
-                    entry.role_id = proposal.requested_role.clone();
-                    entry.status = MembershipStatus::Active;
-                    entry.last_activity = now;
-                    group.membership_proposals.remove(&proposal.proposal_id);
-                    sync_member_membership_sets(group, &proposal.candidate, now);
-                }
-                MembershipDecisionStatus::Pending => {
-                    group
-                        .membership_proposals
-                        .insert(proposal.proposal_id.clone(), proposal.clone());
-                    let entry = group
-                        .members
-                        .entry(proposal.candidate.clone())
-                        .or_insert_with(|| {
-                            GroupMember::new(
-                                proposal.candidate.clone(),
-                                proposal.requested_role.clone(),
-                                MembershipStatus::Pending,
-                                now,
-                            )
-                        });
-                    entry.role_id = proposal.requested_role.clone();
-                    entry.status = MembershipStatus::Pending;
-                    entry.last_activity = now;
-                    sync_member_membership_sets(group, &proposal.candidate, now);
-                }
-                MembershipDecisionStatus::Rejected => {
-                    group.membership_proposals.remove(&proposal.proposal_id);
-                    group.members.remove(&proposal.candidate);
-                    sync_member_membership_sets(group, &proposal.candidate, now);
-                }
-            },
-            MembershipActionKind::Remove => match decision.status {
-                MembershipDecisionStatus::Approved => {
-                    if let Some(member) = group.members.get_mut(&proposal.candidate) {
-                        member.status = MembershipStatus::Removed;
-                        member.last_activity = now;
-                    }
-                    group.membership_proposals.remove(&proposal.proposal_id);
-                    sync_member_membership_sets(group, &proposal.candidate, now);
-                }
-                MembershipDecisionStatus::Pending => {
-                    group
-                        .membership_proposals
-                        .insert(proposal.proposal_id.clone(), proposal.clone());
-                }
-                MembershipDecisionStatus::Rejected => {
-                    group.membership_proposals.remove(&proposal.proposal_id);
-                }
-            },
-        }
-
-        Ok(())
-    }
-
-    fn process_membership_proposal(
-        &mut self,
-        group_id: &GroupId,
-        proposal: MembershipProposal,
-    ) -> Result<MembershipDecision, MembershipActionError> {
-        let decision = self.evaluate_membership(group_id, &proposal)?;
-        let now = current_timestamp();
-        self.apply_membership_decision(group_id, proposal, &decision, now)?;
-        self.commit_group_crdt_or_log(group_id, "membership_proposal");
-        Ok(decision)
     }
 }
