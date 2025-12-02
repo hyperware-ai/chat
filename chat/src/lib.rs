@@ -31,6 +31,7 @@ use chat_caller_utils::chat::{
 };
 use chat_caller_utils::ChatMessage as CUChatMessage;
 use chat_caller_utils::UserProfile as CUUserProfile;
+use types::ReplicationWakeRx;
 
 mod crdt;
 mod groups;
@@ -125,11 +126,47 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
     ::base64::decode(input)
 }
 
+/// Send the WIT `ReplicationWork` unit variant to ourselves. This wakes the
+/// replication handler, which runs with a ~12s budget to drain queues.
 async fn trigger_replication(target: Address) {
     // WIT defines ReplicationWork as a unit variant; use null payload.
     let body =
         serde_json::to_vec(&serde_json::json!({"ReplicationWork": null})).unwrap_or_default();
     let _ = Request::new().target(target).body(body).send();
+}
+
+/// Spawn the event + timer replication scheduler. It listens for wake signals
+/// (new work enqueued) and also ticks every 5s as a safety net, sending the WIT
+/// `ReplicationWork` variant to our own address. The receiver side (`replication_work`)
+/// enforces the 12s budget for draining tasks.
+fn start_replication_scheduler(mut wake_rx: ReplicationWakeRx) {
+    let mut wake_rx = wake_rx.into_stream();
+    let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
+    spawn(async move {
+        let debounce = Duration::from_millis(250);
+        let mut last_wake: Option<Instant> = None;
+        loop {
+            let wake = wake_rx.next().fuse();
+            let tick = sleep(5000).fuse();
+            pin_mut!(wake, tick);
+            select! {
+                _ = wake => {
+                    let now = Instant::now();
+                    let should_fire = last_wake
+                        .map(|ts| now.duration_since(ts) >= debounce)
+                        .unwrap_or(true);
+                    if should_fire {
+                        last_wake = Some(now);
+                        trigger_replication(self_addr.clone()).await;
+                    }
+                }
+                _ = tick => {
+                    last_wake = None;
+                    trigger_replication(self_addr.clone()).await;
+                }
+            }
+        }
+    });
 }
 
 pub(crate) fn log_crdt_event(
@@ -379,33 +416,7 @@ impl ChatState {
 
         // Kick off replication worker loop (event-driven with periodic safety net)
         if let Some(wake_rx) = self.replication_wake_rx.take() {
-            let mut wake_rx = wake_rx.into_stream();
-            let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
-            spawn(async move {
-                let debounce = Duration::from_millis(250);
-                let mut last_wake: Option<Instant> = None;
-                loop {
-                    let wake = wake_rx.next().fuse();
-                    let tick = sleep(5000).fuse();
-                    pin_mut!(wake, tick);
-                    select! {
-                        _ = wake => {
-                            let now = Instant::now();
-                            let should_fire = last_wake
-                                .map(|ts| now.duration_since(ts) >= debounce)
-                                .unwrap_or(true);
-                            if should_fire {
-                                last_wake = Some(now);
-                                trigger_replication(self_addr.clone()).await;
-                            }
-                        }
-                        _ = tick => {
-                            last_wake = None;
-                            trigger_replication(self_addr.clone()).await;
-                        }
-                    }
-                }
-            });
+            start_replication_scheduler(wake_rx);
         }
 
         println!(
