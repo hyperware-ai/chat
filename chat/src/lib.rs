@@ -1603,45 +1603,38 @@ impl ChatState {
             let is_image = updated_message.message_type == MessageType::Image;
             let original_url = file_info.url.clone();
 
-            let file_data = if file_info.url.starts_with("compressed:") {
-                // Handle compressed file data
-                let compressed_b64 = &file_info.url[11..]; // Skip "compressed:" prefix
-
-                // Decode base64
-                let compressed_data = match base64_decode(compressed_b64) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        println!("Failed to decode compressed file: {}", e);
-                        vec![]
-                    }
-                };
-
-                // Decompress
-                match decompress_data(&compressed_data) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        println!("Failed to decompress file: {}", e);
-                        vec![]
-                    }
-                }
-            } else if file_info.url.starts_with("data:") {
-                // Handle data URL (for images)
-                if let Some(comma_pos) = file_info.url.find(',') {
-                    let base64_data = &file_info.url[comma_pos + 1..];
-
-                    // Decode base64
-                    match base64_decode(base64_data) {
+            let file_data = match file_info.url_kind() {
+                crate::types::FileUrlKind::CompressedBase64(rest) => {
+                    let compressed_data = match base64_decode(rest) {
                         Ok(data) => data,
                         Err(e) => {
-                            println!("Failed to decode file data: {}", e);
+                            println!("Failed to decode compressed file: {}", e);
+                            vec![]
+                        }
+                    };
+                    match decompress_data(&compressed_data) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            println!("Failed to decompress file: {}", e);
                             vec![]
                         }
                     }
-                } else {
-                    vec![]
                 }
-            } else {
-                vec![]
+                crate::types::FileUrlKind::DataUrl(data_url) => {
+                    if let Some(comma_pos) = data_url.find(',') {
+                        let base64_data = &data_url[comma_pos + 1..];
+                        match base64_decode(base64_data) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                println!("Failed to decode file data: {}", e);
+                                vec![]
+                            }
+                        }
+                    } else {
+                        vec![]
+                    }
+                }
+                _ => vec![],
             };
 
             if !file_data.is_empty() {

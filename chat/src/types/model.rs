@@ -213,7 +213,34 @@ pub struct FileInfo {
     pub filename: String,
     pub mime_type: String,
     pub size: u64,
+    /// Encoded file reference. Expected variants:
+    /// - `data:<mime>;base64,<bytes>` for inline images.
+    /// - `compressed:<base64>` for non-image payloads we compress before send.
+    /// - `/files/<chat_id>/<file_id>` or other VFS paths once stored locally.
+    /// Other strings are treated as opaque remote paths.
     pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileUrlKind<'a> {
+    DataUrl(&'a str),
+    CompressedBase64(&'a str),
+    VfsPath(&'a str),
+    Other(&'a str),
+}
+
+impl FileInfo {
+    pub fn url_kind(&self) -> FileUrlKind<'_> {
+        if let Some(rest) = self.url.strip_prefix("compressed:") {
+            FileUrlKind::CompressedBase64(rest)
+        } else if self.url.starts_with("data:") {
+            FileUrlKind::DataUrl(&self.url)
+        } else if self.url.starts_with("/files/") {
+            FileUrlKind::VfsPath(&self.url)
+        } else {
+            FileUrlKind::Other(&self.url)
+        }
+    }
 }
 
 /// MessageStatus lifecycle: outbound messages start at `Sending`, flip to `Sent`
