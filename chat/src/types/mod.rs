@@ -224,6 +224,9 @@ pub struct FileInfo {
     pub url: String,
 }
 
+/// MessageStatus lifecycle: outbound messages start at `Sending`, flip to `Sent`
+/// once stored locally, move to `Delivered` on ack/receipt from the counterparty,
+/// and may be marked `Failed` by delivery retries if a destination remains unreachable.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum MessageStatus {
     Sending,

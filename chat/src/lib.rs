@@ -31,7 +31,6 @@ use chat_caller_utils::chat::{
 };
 use chat_caller_utils::ChatMessage as CUChatMessage;
 use chat_caller_utils::UserProfile as CUUserProfile;
-use types::ReplicationWakeRx;
 
 mod crdt;
 mod groups;
@@ -139,7 +138,7 @@ async fn trigger_replication(target: Address) {
 /// (new work enqueued) and also ticks every 5s as a safety net, sending the WIT
 /// `ReplicationWork` variant to our own address. The receiver side (`replication_work`)
 /// enforces the 12s budget for draining tasks.
-fn start_replication_scheduler(mut wake_rx: ReplicationWakeRx) {
+fn start_replication_scheduler(wake_rx: ReplicationWakeRx) {
     let mut wake_rx = wake_rx.into_stream();
     let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
     spawn(async move {
@@ -745,37 +744,46 @@ impl ChatState {
 
     // MESSAGE OPERATIONS
 
-    // uncomment #[remote] for tests
-    #[remote]
-    #[local]
-    #[http]
-    async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
+    /// MessageStatus lifecycle:
+    /// - New outbound messages start as `Sending`, immediately transition to `Sent` once enqueued
+    ///   locally and broadcast to connected clients.
+    /// - Counterparty delivery uses RPC with an offline queue; WebSocket delivery is used if the
+    ///   counterparty is connected locally.
+    /// - `MessageAck` from the recipient (or receipt via WebSocket) moves status to `Delivered`.
+    /// - Failures in RPC enqueue a retry via the delivery worker; persistent failure can be marked
+    ///   as `Failed` by the delivery pipeline.
+    /// - Frontends may optimistically render temp IDs; the `MessageAck` emitted to the origin
+    ///   channel contains the canonical message_id for dedupe/update.
+    fn send_message_internal(
+        &mut self,
+        chat_id: &str,
+        content: String,
+        reply_to: Option<String>,
+        origin_channel: Option<u32>,
+    ) -> Result<ChatMessage, String> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-
         let message_id = format!("{}:{}", timestamp, rand::random::<u32>());
 
-        let chat_id = req.chat_id.clone();
-
         let mut message = ChatMessage {
-            id: message_id,
+            id: message_id.clone(),
             sender: our().node.clone(),
-            content: req.content,
+            content,
             timestamp,
             sequence: None,
             status: MessageStatus::Sending,
-            reply_to: req.reply_to,
+            reply_to,
             reactions: Vec::new(),
             message_type: MessageType::Text,
             file_info: None,
         };
 
-        self.assign_sequence_to_message(&chat_id, &mut message);
+        self.assign_sequence_to_message(chat_id, &mut message);
 
         let (counterparty, chat_snapshot) = {
-            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
+            let chat = self.get_or_create_chat(chat_id, timestamp, None, None);
             chat.messages.push(message.clone());
             chat.last_activity = timestamp;
 
@@ -786,21 +794,53 @@ impl ChatState {
             (chat.counterparty.clone(), chat.clone())
         };
 
-        // Send ChatUpdate immediately to show Sent status
-        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-        self.broadcast_ws_message(&chat_update);
+        // Notify local clients with the updated chat state
+        self.broadcast_ws_message(&WsServerMessage::ChatUpdate(chat_snapshot));
 
-        // Send to counterparty via P2P using generated RPC
-        let msg_to_send = message.clone();
-        let message_id_clone = message.id.clone();
-        let delivery_tx = self.delivery_tx.clone();
-        let pending_deliveries = self.pending_deliveries.clone();
+        // Ack back to the originating browser channel, if applicable
+        if let Some(ch_id) = origin_channel {
+            self.push_ws_message(
+                ch_id,
+                &WsServerMessage::MessageAck {
+                    message_id: message.id.clone(),
+                },
+            );
+        }
 
-        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+        // Try fast-path WebSocket delivery if the counterparty is connected locally; otherwise
+        // fall back to RPC with offline queue retry.
+        if let Some((&ch_id, _)) = self
+            .ws_connections
+            .iter()
+            .find(|(_, node)| *node == &counterparty)
+        {
+            self.push_ws_message(ch_id, &WsServerMessage::NewMessage(message.clone()));
+        } else {
+            ChatState::spawn_delivery_attempt(
+                counterparty,
+                message.clone(),
+                self.delivery_tx.clone(),
+                self.pending_deliveries.clone(),
+            );
+        }
 
-        // Spawn task to attempt delivery without blocking
+        // Return the latest stored version (with sequence/status) if available.
+        Ok(self
+            .chats
+            .get(chat_id)
+            .and_then(|chat| chat.messages.iter().find(|m| m.id == message.id).cloned())
+            .unwrap_or(message))
+    }
+
+    fn spawn_delivery_attempt(
+        counterparty: String,
+        msg_to_send: ChatMessage,
+        delivery_tx: DeliveryTx,
+        pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    ) {
+        let message_id_clone = msg_to_send.id.clone();
         spawn(async move {
-            // Try to send using generated RPC method and queue if it fails
+            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
             let msg_json = serde_json::to_value(&msg_to_send).unwrap();
             let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
             match receive_message_remote_rpc(&target, msg_for_rpc).await {
@@ -809,7 +849,7 @@ impl ChatState {
                         "Message {} sent successfully to {}",
                         message_id_clone, counterparty
                     );
-                    // Message delivered successfully, counterparty will send ACK
+                    // Counterparty will send ACK on success.
                 }
                 Err(_) => {
                     println!(
@@ -825,17 +865,14 @@ impl ChatState {
                 }
             }
         });
+    }
 
-        let updated_msg = self
-            .chats
-            .get(&req.chat_id)
-            .and_then(|chat| chat.messages.iter().find(|m| m.id == message.id).cloned());
-
-        if let Some(updated_msg) = updated_msg {
-            return Ok(updated_msg);
-        }
-
-        Ok(message)
+    // uncomment #[remote] for tests
+    #[remote]
+    #[local]
+    #[http]
+    async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
+        self.send_message_internal(&req.chat_id, req.content, req.reply_to, None)
     }
 
     // uncomment #[remote] for tests

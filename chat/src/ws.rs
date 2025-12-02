@@ -4,7 +4,7 @@ use crate::{
 };
 use hyperware_process_lib::{
     http::server::{send_ws_push, WsMessageType},
-    our, println, LazyLoadBlob,
+    println, LazyLoadBlob,
 };
 use serde_json;
 
@@ -16,74 +16,10 @@ impl ChatState {
                 content,
                 reply_to,
             } => {
-                // Create and send message
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                let message_id = format!("{}:{}", timestamp, rand::random::<u32>());
-                let sender = self
-                    .ws_connections
-                    .get(&channel_id)
-                    .cloned()
-                    .unwrap_or_else(|| our().node.clone());
-
-                let mut message = ChatMessage {
-                    id: message_id.clone(),
-                    sender,
-                    content,
-                    timestamp,
-                    sequence: None,
-                    status: MessageStatus::Sending,
-                    reply_to,
-                    reactions: Vec::new(),
-                    message_type: MessageType::Text,
-                    file_info: None,
-                };
-
-                // Add to chat
-                if self.chats.contains_key(&chat_id) {
-                    self.assign_sequence_to_message(&chat_id, &mut message);
-                }
-                let mut pending_pushes: Vec<(u32, WsServerMessage)> = Vec::new();
-                let mut queued_delivery: Option<(String, ChatMessage)> = None;
+                if let Err(err) =
+                    self.send_message_internal(&chat_id, content, reply_to, Some(channel_id))
                 {
-                    if let Some(chat) = self.chats.get_mut(&chat_id) {
-                        chat.messages.push(message.clone());
-                        chat.last_activity = timestamp;
-
-                        let counterparty = chat.counterparty.clone();
-
-                        if let Some((&ch_id, _)) = self
-                            .ws_connections
-                            .iter()
-                            .find(|(_, node)| *node == &counterparty)
-                        {
-                            pending_pushes
-                                .push((ch_id, WsServerMessage::NewMessage(message.clone())));
-                        } else {
-                            queued_delivery = Some((counterparty.clone(), message.clone()));
-                        }
-
-                        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                            msg.status =
-                                safe_update_message_status(&msg.status, MessageStatus::Sent);
-                        }
-
-                        pending_pushes
-                            .push((channel_id, WsServerMessage::ChatUpdate(chat.clone())));
-                    }
-                }
-
-                if let Some((counterparty, queued_message)) = queued_delivery {
-                    self.enqueue_delivery_message(&counterparty, queued_message);
-                }
-
-                pending_pushes.push((channel_id, WsServerMessage::MessageAck { message_id }));
-
-                for (ch_id, payload) in pending_pushes {
-                    self.push_ws_message(ch_id, &payload);
+                    println!("Failed to send message via WS: {}", err);
                 }
             }
             WsClientMessage::Ack { message_id } => {
