@@ -15,3 +15,11 @@ kit build --hyperapp --features "caller-utils"
 ![chat-list](https://raw.githubusercontent.com/hyperware-ai/chat/refs/heads/master/assets/chat-list.png)
 
 ![chat](https://raw.githubusercontent.com/hyperware-ai/chat/refs/heads/master/assets/chat.png)
+
+## Tests
+
+To run integration tests:
+`kit run-tests`
+
+To run unit tests at the end of files:
+`cargo test -p chat --tests`
