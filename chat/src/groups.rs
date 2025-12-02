@@ -114,6 +114,7 @@ impl ChatState {
                 sender.clone(),
                 now,
                 req.message_type,
+                req.content.clone(),
             );
             message.reply_to = req.reply_to.take();
             message.attachments = req.attachments.clone();

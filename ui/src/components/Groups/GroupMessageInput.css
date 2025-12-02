@@ -1,0 +1,52 @@
+.group-message-input {
+  border-top: 1px solid var(--border-color);
+  padding: 10px 12px calc(12px + var(--safe-area-bottom, 0px));
+  background: var(--background);
+}
+
+.group-input-warning {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 204, 0, 0.12);
+  border: 1px solid rgba(255, 204, 0, 0.3);
+  color: #b57700;
+  font-size: 13px;
+}
+
+.group-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 8px 10px;
+}
+
+.group-input-row textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 15px;
+  min-height: 32px;
+}
+
+.group-input-row textarea:focus {
+  outline: none;
+}
+
+.group-send {
+  background: linear-gradient(135deg, #007aff, #5ac8fa);
+  border: none;
+  color: white;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-weight: 700;
+}
+
+.group-input-row.disabled {
+  opacity: 0.6;
+}

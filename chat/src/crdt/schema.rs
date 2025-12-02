@@ -822,6 +822,8 @@ pub struct MessageMeta {
     pub timestamp: u64,
     pub message_type: MessageType,
     #[serde(default)]
+    pub body: String,
+    #[serde(default)]
     pub reply_to: Option<MessageId>,
     #[serde(default)]
     pub reply_in_thread: Option<MessageId>,
@@ -839,6 +841,7 @@ impl MessageMeta {
         sender: NodeId,
         timestamp: u64,
         message_type: MessageType,
+        body: String,
     ) -> Self {
         Self {
             message_id,
@@ -847,6 +850,7 @@ impl MessageMeta {
             sender,
             timestamp,
             message_type,
+            body,
             reply_to: None,
             reply_in_thread: None,
             reactions: Vec::new(),
