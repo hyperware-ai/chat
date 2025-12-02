@@ -15,6 +15,7 @@ mod membership_acl_tests;
 mod group_threading_tests;
 mod dm_extended_tests;
 mod replication_admin_tests;
+mod multi_replication_tests;
 
 wit_bindgen::generate!({
     path: "../target/wit",
@@ -79,6 +80,7 @@ fn handle_message(our: &Address) {
     group_threading_tests::run_group_threading_tests(&our.node);
     dm_extended_tests::run_dm_extended_tests(&our.node, &remote_node);
     replication_admin_tests::run_replication_admin_tests(&our.node, &remote_node);
+    multi_replication_tests::run_multi_replication_tests(&node_names);
 
     Response::new()
         .body(TesterResponse::Run(Ok(())))

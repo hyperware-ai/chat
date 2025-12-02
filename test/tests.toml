@@ -27,3 +27,15 @@ port = 8081
 home = "home/fake2"
 fake_node_name = "fake2.os"
 runtime_verbosity = 2
+
+[[tests.nodes]]
+port = 8082
+home = "home/fake3"
+fake_node_name = "fake3.os"
+runtime_verbosity = 2
+
+[[tests.nodes]]
+port = 8083
+home = "home/fake4"
+fake_node_name = "fake4.os"
+runtime_verbosity = 2
