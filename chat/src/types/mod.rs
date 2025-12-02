@@ -753,6 +753,9 @@ impl fmt::Display for MembershipActionError {
 
 impl std::error::Error for MembershipActionError {}
 
+/// Persisted fields: profile, chats, chat_keys, settings, message_sequence_counters, groups.
+/// Runtime-only state (connections, heartbeats, channels, replication queues, caches, pubsub) is
+/// skipped during serialization and rebuilt on startup.
 #[derive(Serialize)]
 pub struct ChatState {
     pub profile: UserProfile,
@@ -791,12 +794,15 @@ pub struct ChatState {
     pub replication_metrics: ReplicationMetrics,
     #[serde(skip)]
     pub pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    #[serde(skip)]
     pub ws_connections: HashMap<u32, String>,
+    #[serde(skip)]
     pub browser_connections: HashMap<String, u32>,
+    #[serde(skip)]
     pub last_heartbeat: HashMap<u32, u64>,
-    #[serde(default)]
+    #[serde(skip)]
     pub active_connections: HashSet<u32>,
-    #[serde(default)]
+    #[serde(skip)]
     pub node_profiles: HashMap<String, UserProfile>,
     #[serde(default)]
     pub groups: HashMap<GroupId, Group>,
@@ -993,13 +999,6 @@ impl<'de> Deserialize<'de> for ChatState {
             settings: Settings,
             #[serde(default)]
             message_sequence_counters: HashMap<String, u64>,
-            ws_connections: HashMap<u32, String>,
-            browser_connections: HashMap<String, u32>,
-            last_heartbeat: HashMap<u32, u64>,
-            #[serde(default)]
-            active_connections: HashSet<u32>,
-            #[serde(default)]
-            node_profiles: HashMap<String, UserProfile>,
             #[serde(default)]
             groups: HashMap<GroupId, Group>,
         }
@@ -1030,11 +1029,11 @@ impl<'de> Deserialize<'de> for ChatState {
             subscriber_events: VecDeque::new(),
             replication_metrics: ReplicationMetrics::default(),
             pending_deliveries: Arc::new(Mutex::new(HashMap::new())),
-            ws_connections: data.ws_connections,
-            browser_connections: data.browser_connections,
-            last_heartbeat: data.last_heartbeat,
-            active_connections: data.active_connections,
-            node_profiles: data.node_profiles,
+            ws_connections: HashMap::new(),
+            browser_connections: HashMap::new(),
+            last_heartbeat: HashMap::new(),
+            active_connections: HashSet::new(),
+            node_profiles: HashMap::new(),
             groups: data.groups,
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
@@ -1582,5 +1581,44 @@ impl ChatState {
         }
         self.commit_group_crdt_or_log(&req.group_id, "create_group_thread");
         Ok(CreateGroupThreadRes { thread_id })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_state_runtime_fields_are_not_serialized() {
+        let mut state = ChatState::default();
+        state.profile.name = "alice".to_string();
+        state.ws_connections.insert(1, "peer".to_string());
+        state.browser_connections.insert("browser".to_string(), 2);
+        state.last_heartbeat.insert(3, 123);
+        state.active_connections.insert(4);
+        state.node_profiles.insert(
+            "peer".to_string(),
+            UserProfile {
+                name: "bob".into(),
+                profile_pic: None,
+            },
+        );
+
+        let value = serde_json::to_value(&state).expect("serialize ChatState");
+
+        assert!(value.get("ws_connections").is_none());
+        assert!(value.get("browser_connections").is_none());
+        assert!(value.get("last_heartbeat").is_none());
+        assert!(value.get("active_connections").is_none());
+        assert!(value.get("node_profiles").is_none());
+
+        let restored: ChatState = serde_json::from_value(value).expect("deserialize ChatState");
+
+        assert_eq!(restored.profile.name, "alice");
+        assert!(restored.ws_connections.is_empty());
+        assert!(restored.browser_connections.is_empty());
+        assert!(restored.last_heartbeat.is_empty());
+        assert!(restored.active_connections.is_empty());
+        assert!(restored.node_profiles.is_empty());
     }
 }
