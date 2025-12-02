@@ -128,10 +128,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
 /// Send the WIT `ReplicationWork` unit variant to ourselves. This wakes the
 /// replication handler, which runs with a ~12s budget to drain queues.
 async fn trigger_replication(target: Address) {
-    // WIT defines ReplicationWork as a unit variant; use null payload.
-    let body =
-        serde_json::to_vec(&serde_json::json!({"ReplicationWork": null})).unwrap_or_default();
-    let _ = Request::new().target(target).body(body).send();
+    let _ = chat_caller_utils::chat::replication_work_local_rpc(&target).await;
 }
 
 /// Spawn the event + timer replication scheduler. It listens for wake signals
@@ -745,15 +742,75 @@ impl ChatState {
     // MESSAGE OPERATIONS
 
     /// MessageStatus lifecycle:
-    /// - New outbound messages start as `Sending`, immediately transition to `Sent` once enqueued
-    ///   locally and broadcast to connected clients.
+    /// - New outbound messages start as `Sending`, are marked `Sent` once staged locally and
+    ///   broadcast to connected clients, and move to `Delivered` when an ack arrives.
     /// - Counterparty delivery uses RPC with an offline queue; WebSocket delivery is used if the
     ///   counterparty is connected locally.
-    /// - `MessageAck` from the recipient (or receipt via WebSocket) moves status to `Delivered`.
     /// - Failures in RPC enqueue a retry via the delivery worker; persistent failure can be marked
     ///   as `Failed` by the delivery pipeline.
     /// - Frontends may optimistically render temp IDs; the `MessageAck` emitted to the origin
     ///   channel contains the canonical message_id for dedupe/update.
+    fn stage_outgoing_message(
+        &mut self,
+        chat_id: &str,
+        mut message: ChatMessage,
+        origin_channel: Option<u32>,
+    ) -> (String, ChatMessage) {
+        self.assign_sequence_to_message(chat_id, &mut message);
+
+        let chat_snapshot = {
+            let chat = self.get_or_create_chat(chat_id, message.timestamp, None, None);
+            chat.messages.push(message.clone());
+            chat.last_activity = message.timestamp;
+
+            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
+            }
+
+            chat.clone()
+        };
+
+        let counterparty = chat_snapshot.counterparty.clone();
+        let stored_message = chat_snapshot
+            .messages
+            .iter()
+            .find(|m| m.id == message.id)
+            .cloned()
+            .unwrap_or(message);
+
+        self.broadcast_ws_message(&WsServerMessage::ChatUpdate(chat_snapshot));
+
+        if let Some(ch_id) = origin_channel {
+            self.push_ws_message(
+                ch_id,
+                &WsServerMessage::MessageAck {
+                    message_id: stored_message.id.clone(),
+                },
+            );
+        }
+
+        (counterparty, stored_message)
+    }
+
+    fn dispatch_outgoing_message(&self, counterparty: String, message: ChatMessage) {
+        // Try fast-path WebSocket delivery if the counterparty is connected locally; otherwise
+        // fall back to RPC with offline queue retry.
+        if let Some((&ch_id, _)) = self
+            .ws_connections
+            .iter()
+            .find(|(_, node)| *node == &counterparty)
+        {
+            self.push_ws_message(ch_id, &WsServerMessage::NewMessage(message));
+        } else {
+            ChatState::spawn_delivery_attempt(
+                counterparty,
+                message,
+                self.delivery_tx.clone(),
+                self.pending_deliveries.clone(),
+            );
+        }
+    }
+
     fn send_message_internal(
         &mut self,
         chat_id: &str,
@@ -767,7 +824,7 @@ impl ChatState {
             .as_secs();
         let message_id = format!("{}:{}", timestamp, rand::random::<u32>());
 
-        let mut message = ChatMessage {
+        let message = ChatMessage {
             id: message_id.clone(),
             sender: our().node.clone(),
             content,
@@ -780,56 +837,21 @@ impl ChatState {
             file_info: None,
         };
 
-        self.assign_sequence_to_message(chat_id, &mut message);
-
-        let (counterparty, chat_snapshot) = {
-            let chat = self.get_or_create_chat(chat_id, timestamp, None, None);
-            chat.messages.push(message.clone());
-            chat.last_activity = timestamp;
-
-            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-            }
-
-            (chat.counterparty.clone(), chat.clone())
-        };
-
-        // Notify local clients with the updated chat state
-        self.broadcast_ws_message(&WsServerMessage::ChatUpdate(chat_snapshot));
-
-        // Ack back to the originating browser channel, if applicable
-        if let Some(ch_id) = origin_channel {
-            self.push_ws_message(
-                ch_id,
-                &WsServerMessage::MessageAck {
-                    message_id: message.id.clone(),
-                },
-            );
-        }
-
-        // Try fast-path WebSocket delivery if the counterparty is connected locally; otherwise
-        // fall back to RPC with offline queue retry.
-        if let Some((&ch_id, _)) = self
-            .ws_connections
-            .iter()
-            .find(|(_, node)| *node == &counterparty)
-        {
-            self.push_ws_message(ch_id, &WsServerMessage::NewMessage(message.clone()));
-        } else {
-            ChatState::spawn_delivery_attempt(
-                counterparty,
-                message.clone(),
-                self.delivery_tx.clone(),
-                self.pending_deliveries.clone(),
-            );
-        }
+        let (counterparty, stored_message) =
+            self.stage_outgoing_message(chat_id, message, origin_channel);
+        self.dispatch_outgoing_message(counterparty, stored_message.clone());
 
         // Return the latest stored version (with sequence/status) if available.
         Ok(self
             .chats
             .get(chat_id)
-            .and_then(|chat| chat.messages.iter().find(|m| m.id == message.id).cloned())
-            .unwrap_or(message))
+            .and_then(|chat| {
+                chat.messages
+                    .iter()
+                    .find(|m| m.id == stored_message.id)
+                    .cloned()
+            })
+            .unwrap_or(stored_message))
     }
 
     fn spawn_delivery_attempt(
@@ -1409,7 +1431,7 @@ impl ChatState {
 
         let chat_id = req.chat_id.clone();
 
-        let mut message = ChatMessage {
+        let message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
             content: req.filename,
@@ -1422,52 +1444,19 @@ impl ChatState {
             file_info: Some(file_info),
         };
 
-        self.assign_sequence_to_message(&chat_id, &mut message);
+        let (counterparty, stored_message) = self.stage_outgoing_message(&chat_id, message, None);
 
-        let (counterparty, chat_snapshot) = {
-            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
-            chat.messages.push(message.clone());
-            chat.last_activity = timestamp;
-            (chat.counterparty.clone(), chat.clone())
-        };
-
-        let mut msg_to_send = message.clone();
-
-        // For files (not images), replace URL with compressed data for transmission
+        let mut remote_message = stored_message.clone();
         if message_type == MessageType::File {
-            if let Some(compressed) = compressed_data {
-                if let Some(ref mut file_info) = msg_to_send.file_info {
-                    file_info.url = format!("compressed:{}", compressed);
+            if let Some(info) = remote_message.file_info.as_mut() {
+                if let Some(compressed) = compressed_data {
+                    info.url = format!("compressed:{}", compressed);
                 }
             }
         }
 
-        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-
-        // Send using generated RPC method
-        // Convert our local type to the generated type via JSON serialization
-        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-        match receive_message_remote_rpc(&target, msg_for_rpc).await {
-            Ok(_) => {
-                if let Some(chat) = self.chats.get_mut(&req.chat_id) {
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-                    }
-
-                    // Send ChatUpdate with the updated message status
-                    let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-                    self.broadcast_ws_message(&chat_update);
-                }
-            }
-            Err(_) => {
-                self.enqueue_delivery_message(&counterparty, msg_to_send);
-                // Still broadcast NewMessage for failed sends
-                let msg = WsServerMessage::NewMessage(message.clone());
-                self.broadcast_ws_message(&msg);
-            }
-        }
-        Ok(message)
+        self.dispatch_outgoing_message(counterparty, remote_message);
+        Ok(stored_message)
     }
     // uncomment #[remote] for tests
     #[remote]
@@ -1492,7 +1481,7 @@ impl ChatState {
 
         let chat_id = req.chat_id.clone();
 
-        let mut message = ChatMessage {
+        let message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
             content: format!("Voice note ({}s)", req.duration),
@@ -1505,43 +1494,10 @@ impl ChatState {
             file_info: Some(file_info),
         };
 
-        self.assign_sequence_to_message(&chat_id, &mut message);
-
-        let (counterparty, chat_snapshot) = {
-            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
-            chat.messages.push(message.clone());
-            chat.last_activity = timestamp;
-            (chat.counterparty.clone(), chat.clone())
-        };
-
-        let msg_to_send = message.clone();
-
-        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-
-        // Send using generated RPC method
-        // Convert our local type to the generated type via JSON serialization
-        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-        match receive_message_remote_rpc(&target, msg_for_rpc).await {
-            Ok(_) => {
-                if let Some(chat) = self.chats.get_mut(&req.chat_id) {
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-                    }
-
-                    // Send ChatUpdate with the updated message status
-                    let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
-                    self.broadcast_ws_message(&chat_update);
-                }
-            }
-            Err(_) => {
-                self.enqueue_delivery_message(&counterparty, msg_to_send);
-                // Still broadcast NewMessage for failed sends
-                let msg = WsServerMessage::NewMessage(message.clone());
-                self.broadcast_ws_message(&msg);
-            }
-        }
-        Ok(message)
+        let (counterparty, stored_message) =
+            self.stage_outgoing_message(&chat_id, message, None);
+        self.dispatch_outgoing_message(counterparty, stored_message.clone());
+        Ok(stored_message)
     }
 
     // P2P MESSAGE RECEIVING

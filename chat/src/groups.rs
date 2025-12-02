@@ -1,53 +1,18 @@
 use crate::crdt::{
-    compile_membership_rules, Group, GroupCrdtManager, GroupDocState, GroupId, GroupMember,
-    GroupPermissions, GroupRoutingConfig, MembershipActionKind, MembershipDecision,
-    MembershipDecisionStatus, MembershipProposal, MembershipRuleBox, MembershipRuleConfig,
-    MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId, SubscriberSyncState,
-    ThreadId,
+    compile_membership_rules, Group, GroupId, GroupMember, GroupPermissions, MembershipActionKind,
+    MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRuleBox,
+    MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId,
+    SubscriberSyncState, ThreadId,
 };
 use crate::types::{
     active_member_count, aggregate_rule_decisions, current_timestamp, group_root_thread_id,
     membership_proposal_key, sync_member_membership_sets,
 };
-use crate::{log_crdt_event, ChatState};
-use hyperware_crdt::yrs::Encode;
-use hyperware_crdt::CommitteeError;
+use crate::ChatState;
 use hyperware_process_lib::our;
 use std::collections::HashSet;
 
 impl ChatState {
-    pub fn rebuild_group_doc_managers(&mut self) -> Result<(), CommitteeError> {
-        self.ensure_routing_defaults_for_all();
-        self.group_doc_managers.clear();
-        self.groups_pending_bootstrap.clear();
-        for (group_id, group) in &self.groups {
-            if self.should_seed_group_doc(group) {
-                let manager = GroupCrdtManager::from_group(group_id, group)?;
-                self.group_doc_managers.insert(group_id.clone(), manager);
-            } else {
-                self.groups_pending_bootstrap.insert(group_id.clone());
-            }
-        }
-        self.pubsub.rebuild_all(&self.groups);
-        Ok(())
-    }
-
-    pub fn rebuild_pubsub_for_group(&mut self, group_id: &GroupId) {
-        if let Some(group) = self.groups.get(group_id) {
-            self.pubsub.rebuild_group(group_id, group);
-        } else {
-            self.pubsub.remove_group(group_id);
-        }
-    }
-
-    fn ensure_routing_defaults_for_all(&mut self) {
-        for (group_id, group) in self.groups.iter_mut() {
-            if group.routing.hub_topic.is_empty() || group.routing.subscriber_topic.is_empty() {
-                group.routing = GroupRoutingConfig::for_group(group_id);
-            }
-        }
-    }
-
     pub fn group_rules(
         &mut self,
         group_id: &GroupId,
@@ -80,43 +45,6 @@ impl ChatState {
         self.membership_rule_cache
             .insert(group_id.clone(), compiled);
         Ok(())
-    }
-
-    pub fn commit_group_crdt(&mut self, group_id: &GroupId) -> Result<(), CommitteeError> {
-        if self.group_needs_bootstrap(group_id) {
-            return Err(CommitteeError::Observer(format!(
-                "group {} requires bootstrap before CRDT commit",
-                group_id
-            )));
-        }
-
-        let group = self.groups.get(group_id).ok_or_else(|| {
-            CommitteeError::Observer(format!("missing group {} for CRDT commit", group_id))
-        })?;
-        self.pubsub.rebuild_group(group_id, group);
-        let snapshot: GroupDocState = (group_id, group).into();
-        let manager = self.ensure_group_doc_manager(group_id)?;
-        manager.refresh_with_snapshot(snapshot)?;
-        let state_vector = {
-            let doc = manager.doc();
-            let state_vector = doc.state_vector();
-            log_crdt_event(doc.id(), "commit_group_crdt", &state_vector, None);
-            state_vector
-        };
-        manager.set_last_state_vector(state_vector.clone());
-        self.update_local_hub_sync_state(group_id, &state_vector);
-        // enqueue per-peer fanout for hubs and subscribers
-        self.enqueue_replication_pushes(group_id, state_vector.encode_v1());
-        Ok(())
-    }
-
-    pub fn commit_group_crdt_or_log(&mut self, group_id: &GroupId, context: &str) {
-        if let Err(err) = self.commit_group_crdt(group_id) {
-            println!(
-                "Failed to commit group CRDT state (group={} context={}): {:?}",
-                group_id, context, err
-            );
-        }
     }
 
     pub fn set_group_membership_rules(
