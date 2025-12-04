@@ -32,18 +32,38 @@ function persistBodyCache(bodies: BodyCache): BodyCache {
   return trimmed;
 }
 
-function toMap<T>(
+function toFlexibleMap<T>(
   input:
     | [string, T][]
     | Record<string, T>
     | Map<string, T>
+    | T[]
     | null
     | undefined,
+  keySelector: (value: T) => string | null | undefined,
 ): Map<string, T> {
-  if (!input) return new Map<string, T>();
-  if (input instanceof Map) return new Map(input);
-  if (Array.isArray(input)) return new Map<string, T>(input);
-  return new Map<string, T>(Object.entries(input));
+  const map = new Map<string, T>();
+  if (!input) return map;
+  if (input instanceof Map) {
+    return new Map(input);
+  }
+  if (Array.isArray(input)) {
+    for (const entry of input) {
+      if (Array.isArray(entry) && entry.length >= 2) {
+        map.set(String(entry[0]), entry[1] as T);
+      } else {
+        const key = keySelector(entry as T);
+        if (key) {
+          map.set(String(key), entry as T);
+        }
+      }
+    }
+    return map;
+  }
+  Object.entries(input).forEach(([k, v]) => {
+    map.set(k, v as T);
+  });
+  return map;
 }
 
 function ensureMetadata(
@@ -82,12 +102,16 @@ function normalizeGroup(
   bodyCache: BodyCache,
 ): NormalizedGroup {
   const metadata = ensureMetadata(groupId, group.metadata);
-  const roles = toMap<Chat.Role>(group.roles as any);
-  const members = toMap<Chat.GroupMember>(group.members as any);
-  const threads = toMap<Chat.Thread>(group.threads as any);
-  const messagesRaw = toMap<Chat.MessageMeta>(group.messages as any);
-  const proposalsRaw = toMap<Chat.MembershipProposal>(
+  const roles = toFlexibleMap<Chat.Role>(group.roles as any, (role) => role?.id);
+  const members = toFlexibleMap<Chat.GroupMember>(group.members as any, (m) => (m as any)?.node_id);
+  const threads = toFlexibleMap<Chat.Thread>(group.threads as any, (t) => (t as any)?.id);
+  const messagesRaw = toFlexibleMap<Chat.MessageMeta>(
+    group.messages as any,
+    (m) => (m as any)?.message_id,
+  );
+  const proposalsRaw = toFlexibleMap<Chat.MembershipProposal>(
     group.membership_proposals as any,
+    (p) => (p as any)?.proposal_id,
   );
 
   const messages: GroupMessage[] = Array.from(messagesRaw.values()).map(
@@ -140,6 +164,7 @@ interface GroupStore {
   subscriberEvents: Chat.SubscriberDeliveryEvent[];
   replication: Record<string, Chat.GroupReplicationState>;
   replicationMetrics: Chat.ReplicationMetrics | null;
+  whitelists: Record<string, Chat.AdminWhitelistRes | null>;
   isLoading: boolean;
   isSyncing: boolean;
   error: string | null;
@@ -155,12 +180,15 @@ interface GroupStore {
   }) => Promise<string | null>;
   setActiveThread: (threadId: string) => void;
   clearActiveGroup: () => void;
-  createThread: (title: string | null) => Promise<string | null>;
+  createThread: (title: string | null, parentThreadId?: string | null) => Promise<string | null>;
   sendMessage: (content: string) => Promise<void>;
   fetchSubscriberEvents: (clear?: boolean) => Promise<void>;
   fetchReplicationState: (groupId?: string | null) => Promise<void>;
+  fetchWhitelist: (groupId?: string | null) => Promise<void>;
   inviteMember: (candidate: string, roleId: string) => Promise<Chat.MembershipDecision | null>;
   approveProposal: (proposalId: string) => Promise<Chat.MembershipDecision | null>;
+  removeMember: (member: string) => Promise<Chat.MembershipDecision | null>;
+  leaveGroup: () => Promise<Chat.MembershipDecision | null>;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
@@ -171,6 +199,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
   subscriberEvents: [],
   replication: {},
   replicationMetrics: null,
+  whitelists: {},
   isLoading: false,
   isSyncing: false,
   error: null,
@@ -180,7 +209,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     try {
       set({ isLoading: true });
       const res = await Chat.list_groups();
-      const sorted = [...res.groups].sort((a, b) => {
+      const groups = (Array.isArray(res.groups)
+        ? res.groups
+        : Object.values(res.groups || {})) as Chat.GroupSummary[];
+      const sorted = [...groups].sort((a, b) => {
         const aTs = a.metadata?.updated_at ?? 0;
         const bTs = b.metadata?.updated_at ?? 0;
         return bTs - aTs;
@@ -203,7 +235,14 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         return;
       }
 
-      const normalized = normalizeGroup(groupId, res.group, get().messageBodies);
+      let normalized: NormalizedGroup;
+      try {
+        normalized = normalizeGroup(groupId, res.group, get().messageBodies);
+      } catch (err) {
+        console.error('[GROUPS] Failed to normalize group', err);
+        set({ error: 'Unable to load group', activeGroup: null, activeThreadId: null });
+        return;
+      }
       const activeThreadId =
         normalized.rootThreadId ||
         normalized.messages[normalized.messages.length - 1]?.threadId ||
@@ -233,7 +272,14 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       const res = await Chat.get_group({ group_id: groupId });
       if (!res.group) return;
 
-      const normalized = normalizeGroup(groupId, res.group, get().messageBodies);
+      let normalized: NormalizedGroup;
+      try {
+        normalized = normalizeGroup(groupId, res.group, get().messageBodies);
+      } catch (err) {
+        console.error('[GROUPS] Failed to normalize group on refresh', err);
+        set({ error: 'Failed to refresh group', isSyncing: false });
+        return;
+      }
       set((state) => ({
         activeGroup: normalized,
         activeThreadId:
@@ -287,9 +333,12 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       isSyncing: false,
     }),
 
-  createThread: async (title) => {
+  createThread: async (title, parentThreadIdOverride = null) => {
     const groupId = get().activeGroupId;
-    const parentThreadId = get().activeGroup?.rootThreadId ?? null;
+    const parentThreadId =
+      parentThreadIdOverride !== null && parentThreadIdOverride !== undefined
+        ? parentThreadIdOverride
+        : get().activeGroup?.rootThreadId ?? null;
     if (!groupId) return null;
     try {
       const res = await Chat.create_group_thread({
@@ -405,7 +454,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     try {
       const res = await Chat.admin_replication_state({ group_id: groupId });
       const replication = { ...get().replication };
-      res.groups.forEach((g) => {
+      const groups = (Array.isArray(res.groups)
+        ? res.groups
+        : Object.values(res.groups || {})) as Chat.GroupReplicationState[];
+      groups.forEach((g) => {
         replication[g.group_id] = g;
       });
       set({
@@ -414,6 +466,19 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       });
     } catch (error) {
       console.error('[GROUPS] Failed to fetch replication state', error);
+    }
+  },
+
+  fetchWhitelist: async (groupId: string | null = null) => {
+    const id = groupId ?? get().activeGroupId;
+    if (!id) return;
+    try {
+      const res = await Chat.admin_whitelist({ group_id: id });
+      set((state) => ({
+        whitelists: { ...state.whitelists, [id]: res },
+      }));
+    } catch (error) {
+      console.error('[GROUPS] Failed to fetch whitelist', error);
     }
   },
 
@@ -450,5 +515,29 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       set({ error: 'Failed to approve membership' });
       return null;
     }
+  },
+
+  removeMember: async (member) => {
+    const groupId = get().activeGroupId;
+    if (!groupId) return null;
+    try {
+      const res = await Chat.remove_group_member({
+        group_id: groupId,
+        member,
+      });
+      await get().refreshActiveGroup();
+      return res.decision;
+    } catch (error) {
+      console.error('[GROUPS] Failed to remove member', error);
+      set({ error: 'Failed to remove member' });
+      return null;
+    }
+  },
+
+  leaveGroup: async () => {
+    const groupId = get().activeGroupId;
+    const me = (window as any).our?.node || null;
+    if (!groupId || !me) return null;
+    return get().removeMember(me);
   },
 }));

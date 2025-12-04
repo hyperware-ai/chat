@@ -39,11 +39,16 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     inviteMember,
     approveProposal,
     refreshActiveGroup,
+    removeMember,
+    leaveGroup,
+    clearActiveGroup,
   } = useGroupStore();
   const [candidate, setCandidate] = useState('');
   const [roleId, setRoleId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [busyMember, setBusyMember] = useState<string | null>(null);
+  const [leaveBusy, setLeaveBusy] = useState(false);
 
   const currentNode = (window as any).our?.node || null;
   if (!activeGroup) return null;
@@ -54,6 +59,7 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     me?.status === Chat.MembershipStatus.Active &&
     myRole &&
     hasGroupPermission(myRole.permissions as unknown as number, 'INVITE_MEMBERS');
+  const canRemove = canInvite;
 
   const roles = useMemo(() => Array.from(activeGroup.roles.values()), [activeGroup.roles]);
   const defaultRoleId =
@@ -98,6 +104,33 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     await approveProposal(proposalId);
   };
 
+  const handleRemove = async (member: string) => {
+    if (!canRemove) {
+      setError('You do not have permission to manage members.');
+      return;
+    }
+    setBusyMember(member);
+    const decision = await removeMember(member);
+    if (!decision) {
+      setError('Unable to remove member. Try again.');
+    }
+    setBusyMember(null);
+  };
+
+  const handleLeave = async () => {
+    if (!currentNode) return;
+    setLeaveBusy(true);
+    const decision = await leaveGroup();
+    if (!decision) {
+      setError('Unable to leave group. Try again.');
+      setLeaveBusy(false);
+      return;
+    }
+    setLeaveBusy(false);
+    clearActiveGroup();
+    onClose();
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content members-modal" onClick={(e) => e.stopPropagation()}>
@@ -124,10 +157,35 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
                         <span>{role?.label || 'Member'}</span>
                         <span className="dot">•</span>
                         <span>{statusLabel(member.status)}</span>
+                        {role?.tier && (
+                          <>
+                            <span className="dot">•</span>
+                            <span>{role.tier === Chat.GroupTier.Hub ? 'Hub' : 'Subscriber'}</span>
+                          </>
+                        )}
                       </div>
                     </div>
                     <div className="member-meta">
                       <span>Last seen {formatLastSeen(member.last_activity)}</span>
+                      <div className="member-actions">
+                        {currentNode === node ? (
+                          <button
+                            className="danger"
+                            onClick={handleLeave}
+                            disabled={leaveBusy}
+                          >
+                            {leaveBusy ? 'Leaving…' : 'Leave group'}
+                          </button>
+                        ) : (
+                          <button
+                            className="secondary danger"
+                            onClick={() => handleRemove(node)}
+                            disabled={!canRemove || busyMember === node}
+                          >
+                            {busyMember === node ? 'Removing…' : 'Remove'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );

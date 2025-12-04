@@ -7,6 +7,7 @@ import GroupMessage from './GroupMessage';
 import GroupMessageInput from './GroupMessageInput';
 import GroupStatusBar from './GroupStatusBar';
 import GroupMembersModal from './GroupMembersModal';
+import GroupReplicationPanel from './GroupReplicationPanel';
 import './GroupView.css';
 
 const GroupView: React.FC = () => {
@@ -22,9 +23,12 @@ const GroupView: React.FC = () => {
     replication,
     isSyncing,
     fetchSubscriberEvents,
+    whitelists,
+    fetchWhitelist,
   } = useGroupStore();
   const { nodeId } = useChatStore();
   const [showMembers, setShowMembers] = useState(false);
+  const [isFetchingWhitelist, setIsFetchingWhitelist] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -61,9 +65,10 @@ const GroupView: React.FC = () => {
       ...thread,
       id,
     }));
-    return list.sort(
-      (a, b) => (b.summary?.last_activity ?? 0) - (a.summary?.last_activity ?? 0),
-    );
+    return list.sort((a, b) => {
+      if (a.depth !== b.depth) return a.depth - b.depth;
+      return (b.summary?.last_activity ?? 0) - (a.summary?.last_activity ?? 0);
+    });
   }, [activeGroup.threads]);
 
   const selectedThreadId = activeThreadId || activeGroup.rootThreadId;
@@ -86,6 +91,7 @@ const GroupView: React.FC = () => {
     member?.status === Chat.MembershipStatus.Active &&
     role &&
     hasGroupPermission(role.permissions as unknown as number, 'INVITE_MEMBERS');
+  const whitelist = whitelists[activeGroup.id];
 
   let disabledReason: string | undefined;
   if (!member) disabledReason = 'You are not a member of this group.';
@@ -102,7 +108,20 @@ const GroupView: React.FC = () => {
   const handleCreateThread = async () => {
     if (!canCreateThread) return;
     const title = window.prompt('Thread title (optional)') || null;
-    await createThread(title);
+    await createThread(title, activeGroup.rootThreadId);
+  };
+
+  const handleStartThreadFromMessage = async (parentThreadId: string) => {
+    if (!canCreateThread) return;
+    const title = window.prompt('Thread title (optional)') || null;
+    await createThread(title, parentThreadId);
+  };
+
+  const handleFetchWhitelist = async () => {
+    if (isFetchingWhitelist) return;
+    setIsFetchingWhitelist(true);
+    await fetchWhitelist(activeGroup.id);
+    setIsFetchingWhitelist(false);
   };
 
   return (
@@ -126,6 +145,9 @@ const GroupView: React.FC = () => {
           </div>
         </div>
         <div className="group-header-actions">
+          <div className="group-dev-badge" aria-label="Development preview">
+            Dev preview
+          </div>
           <button className="group-members" onClick={() => setShowMembers(true)}>
             Members
           </button>
@@ -142,6 +164,14 @@ const GroupView: React.FC = () => {
         isSyncing={isSyncing}
       />
 
+      <GroupReplicationPanel
+        replication={replicationState}
+        whitelist={whitelist}
+        onRefresh={refreshActiveGroup}
+        onFetchWhitelist={handleFetchWhitelist}
+        isFetchingWhitelist={isFetchingWhitelist}
+      />
+
       <div className="group-thread-bar">
         <div className="group-thread-chips">
           {threads.map((thread) => (
@@ -151,6 +181,7 @@ const GroupView: React.FC = () => {
                 thread.id === activeThreadId ? 'active' : ''
               }`}
               onClick={() => setActiveThread(thread.id)}
+              style={{ marginLeft: thread.depth * 12 }}
             >
               <span className="thread-title">
                 {thread.title || (thread.depth === 0 ? 'Main thread' : thread.id)}
@@ -175,7 +206,14 @@ const GroupView: React.FC = () => {
           </div>
         ) : (
           threadMessages.map((msg) => (
-            <GroupMessage key={msg.id} message={msg} currentNode={nodeId} />
+            <GroupMessage
+              key={msg.id}
+              message={msg}
+              currentNode={nodeId}
+              onOpenThread={(id) => setActiveThread(id)}
+              onStartThread={() => handleStartThreadFromMessage(msg.threadId)}
+              isActiveThread={msg.threadId === selectedThreadId}
+            />
           ))
         )}
         <div ref={messagesEndRef} />

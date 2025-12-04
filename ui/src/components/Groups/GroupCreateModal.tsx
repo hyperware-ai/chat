@@ -48,6 +48,7 @@ const GroupCreateModal: React.FC<GroupCreateModalProps> = ({ onClose }) => {
             <input
               type="text"
               placeholder="Team updates"
+              data-testid="group-name-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
@@ -55,7 +56,8 @@ const GroupCreateModal: React.FC<GroupCreateModalProps> = ({ onClose }) => {
           <label>
             <span>Description</span>
             <textarea
-              placeholder="What is this group for?"
+              placeholder="What is this group for? (e.g., announcements)"
+              data-testid="group-description-input"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
@@ -83,6 +85,7 @@ const GroupCreateModal: React.FC<GroupCreateModalProps> = ({ onClose }) => {
               className="primary"
               onClick={handleCreate}
               disabled={isLoading}
+              data-testid="group-create-submit"
             >
               {isLoading ? 'Creating…' : 'Create'}
             </button>

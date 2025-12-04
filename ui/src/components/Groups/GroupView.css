@@ -29,6 +29,16 @@
 .group-header-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.group-dev-badge {
+  padding: 4px 8px;
+  background: #eef2ff;
+  color: #4a56e2;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 12px;
 }
 
 .group-members {

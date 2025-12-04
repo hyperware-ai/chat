@@ -70,6 +70,20 @@
   white-space: nowrap;
 }
 
+.member-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.member-actions .danger {
+  border: 1px solid rgba(255, 59, 48, 0.4);
+  color: #b71b1c;
+  background: rgba(255, 59, 48, 0.08);
+  border-radius: 10px;
+  padding: 6px 10px;
+}
+
 .invite-form {
   display: flex;
   flex-direction: column;

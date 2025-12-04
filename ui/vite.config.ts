@@ -40,6 +40,10 @@ export default defineConfig({
   server: {
     open: true,
     proxy: {
+      '/our.js': {
+        target: PROXY_URL,
+        changeOrigin: true,
+      },
       '/our': {
         target: PROXY_URL,
         changeOrigin: true,

@@ -5,6 +5,9 @@ import './GroupMessage.css';
 interface GroupMessageProps {
   message: GroupMessageType;
   currentNode?: string | null;
+  onStartThread?: () => void;
+  onOpenThread?: (threadId: string) => void;
+  isActiveThread?: boolean;
 }
 
 const formatTime = (timestamp: number) => {
@@ -12,7 +15,13 @@ const formatTime = (timestamp: number) => {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-const GroupMessage: React.FC<GroupMessageProps> = ({ message, currentNode }) => {
+const GroupMessage: React.FC<GroupMessageProps> = ({
+  message,
+  currentNode,
+  onStartThread,
+  onOpenThread,
+  isActiveThread,
+}) => {
   const isMine = currentNode && message.sender === currentNode;
   const statusLabel =
     message.status === 'sending'
@@ -30,6 +39,24 @@ const GroupMessage: React.FC<GroupMessageProps> = ({ message, currentNode }) => 
           <span>{formatTime(message.timestamp)}</span>
           {statusLabel && <span className="group-message-status">{statusLabel}</span>}
         </div>
+        {(onStartThread || onOpenThread) && (
+          <div className="group-message-actions">
+            {onOpenThread && (
+              <button
+                className="link"
+                onClick={() => onOpenThread(message.threadId)}
+                disabled={isActiveThread}
+              >
+                {isActiveThread ? 'In thread' : 'Open thread'}
+              </button>
+            )}
+            {onStartThread && (
+              <button className="link" onClick={onStartThread}>
+                Start sub-thread
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
