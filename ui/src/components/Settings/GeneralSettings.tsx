@@ -56,17 +56,6 @@ const GeneralSettings: React.FC = () => {
         <label>
           <input
             type="checkbox"
-            checked={settings.combine_chats_groups}
-            onChange={() => handleToggle('combine_chats_groups')}
-          />
-          <span>Combine Chats & Groups tabs</span>
-        </label>
-      </div>
-
-      <div className="setting-item">
-        <label>
-          <input
-            type="checkbox"
             checked={settings.allow_browser_chats}
             onChange={() => handleToggle('allow_browser_chats')}
           />

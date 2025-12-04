@@ -71,7 +71,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   settings: {
     show_images: true,
     show_profile_pics: true,
-    combine_chats_groups: false,
+    combine_chats_groups: true,
     notify_chats: true,
     notify_groups: true,
     notify_calls: true,
@@ -384,7 +384,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   loadSettings: async () => {
     try {
       const settings = await api.get_settings();
-      set({ settings });
+      set({ settings: { ...settings, combine_chats_groups: true } });
     } catch (error) {
       set({ error: 'Failed to load settings' });
     }
@@ -681,8 +681,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Update settings
   updateSettings: async (settings: api.Settings) => {
     try {
-      await api.update_settings(settings);
-      set({ settings });
+      const nextSettings = { ...settings, combine_chats_groups: true };
+      await api.update_settings(nextSettings);
+      set({ settings: nextSettings });
     } catch (error) {
       set({ error: 'Failed to update settings' });
     }
