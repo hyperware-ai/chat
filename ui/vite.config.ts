@@ -3,12 +3,18 @@ import react from '@vitejs/plugin-react'
 import { resolve } from 'node:path'
 import { randomFillSync, webcrypto } from 'node:crypto'
 
+// Use the existing global crypto when available to avoid reassigning a readonly getter.
 const cryptoPolyfill = (webcrypto as unknown as Crypto) ?? ({} as Crypto)
-if (!cryptoPolyfill.getRandomValues) {
-  (cryptoPolyfill as any).getRandomValues = (array: ArrayBufferView) =>
+const globalCrypto = (globalThis as any).crypto ?? cryptoPolyfill
+
+if (!globalCrypto.getRandomValues) {
+  (globalCrypto as any).getRandomValues = (array: ArrayBufferView) =>
     randomFillSync(array as unknown as NodeJS.ArrayBufferView)
 }
-(globalThis as any).crypto = cryptoPolyfill
+
+if (!(globalThis as any).crypto) {
+  (globalThis as any).crypto = globalCrypto
+}
 
 /*
 If you are developing a UI outside of a Hyperware project,

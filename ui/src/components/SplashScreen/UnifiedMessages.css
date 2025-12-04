@@ -83,20 +83,6 @@
   color: var(--text-secondary);
 }
 
-.unified-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--background);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-  font-weight: 600;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
 .unified-list {
   display: flex;
   flex-direction: column;

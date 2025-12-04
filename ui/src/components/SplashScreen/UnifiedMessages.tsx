@@ -196,7 +196,6 @@ const UnifiedMessages: React.FC = () => {
                 All direct messages and groups, sorted by latest activity
               </div>
             </div>
-            <span className="unified-count">{unifiedItems.length}</span>
           </div>
           <div className="unified-list">
             {isLoading && unifiedItems.length === 0 ? (
