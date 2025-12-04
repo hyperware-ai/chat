@@ -211,6 +211,55 @@
   text-align: center;
 }
 
+.modal-content.chooser {
+  max-width: 420px;
+}
+
+.chooser-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0;
+}
+
+.chooser-action {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--surface);
+}
+
+.chooser-action:hover {
+  background: var(--background);
+}
+
+.chooser-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  background: linear-gradient(135deg, #eef2ff, #dbeafe);
+  color: #1e3a8a;
+}
+
+.chooser-title {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.chooser-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 .unified-empty {
   padding: 16px;
   border: 1px dashed var(--border-color);

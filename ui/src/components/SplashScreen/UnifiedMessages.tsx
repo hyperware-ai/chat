@@ -15,6 +15,7 @@ const UnifiedMessages: React.FC = () => {
   const [dmResults, setDmResults] = useState(chats);
   const [showNewChat, setShowNewChat] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showChooser, setShowChooser] = useState(false);
 
   // Keep group data fresh when we land on the unified view
   useEffect(() => {
@@ -75,7 +76,7 @@ const UnifiedMessages: React.FC = () => {
     });
 
     const groupItems = filteredGroups.map((group) => {
-      const lastActivity = group.metadata?.updated_at || 0;
+      const lastActivity = group.metadata?.updated_at || Math.floor(Date.now() / 1000);
       return {
         id: `group-${group.group_id}`,
         kind: 'group' as const,
@@ -111,6 +112,47 @@ const UnifiedMessages: React.FC = () => {
     }
   };
 
+  const NewChatChooser = () => (
+    <div className="modal-overlay" onClick={() => setShowChooser(false)}>
+      <div className="modal-content chooser" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>New chat</h3>
+          <button className="close-button" onClick={() => setShowChooser(false)}>
+            ×
+          </button>
+        </div>
+        <div className="chooser-actions">
+          <button
+            className="chooser-action"
+            onClick={() => {
+              setShowChooser(false);
+              setShowCreateGroup(true);
+            }}
+          >
+            <span className="chooser-icon">👥</span>
+            <div>
+              <div className="chooser-title">Create Group Chat</div>
+              <div className="chooser-subtitle">Name it and invite members</div>
+            </div>
+          </button>
+          <button
+            className="chooser-action"
+            onClick={() => {
+              setShowChooser(false);
+              setShowNewChat(true);
+            }}
+          >
+            <span className="chooser-icon">💬</span>
+            <div>
+              <div className="chooser-title">Start One-on-One</div>
+              <div className="chooser-subtitle">Message a single user</div>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   const handleRefreshGroups = () => {
     loadGroups();
     fetchReplicationState(null);
@@ -126,19 +168,11 @@ const UnifiedMessages: React.FC = () => {
         />
         <div className="unified-actions">
           <button
-            className="unified-action"
-            onClick={() => setShowNewChat(true)}
-            aria-label="Start a new direct message"
-          >
-            + DM
-          </button>
-          <button
             className="unified-action primary"
-            onClick={() => setShowCreateGroup(true)}
-            disabled={connectionStatus !== 'connected'}
-            aria-label="Create group"
+            onClick={() => setShowChooser(true)}
+            aria-label="New chat"
           >
-            + Group
+            + New
           </button>
           <button
             className="unified-action ghost"
@@ -216,6 +250,7 @@ const UnifiedMessages: React.FC = () => {
       {showCreateGroup && (
         <GroupCreateModal onClose={() => setShowCreateGroup(false)} />
       )}
+      {showChooser && <NewChatChooser />}
     </div>
   );
 };
