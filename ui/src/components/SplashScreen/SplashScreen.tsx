@@ -1,20 +1,11 @@
 import React, { useState } from 'react';
-import TabBar from './TabBar';
 import ProfileButton from './ProfileButton';
-import CallHistory from '../Calls/CallHistory';
 import SettingsModal from '../Settings/SettingsModal';
 import UnifiedMessages from './UnifiedMessages';
 import './SplashScreen.css';
 
-type TabType = 'chats' | 'calls';
-
 const SplashScreen: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<TabType>('chats');
   const [showSettings, setShowSettings] = useState(false);
-
-  const renderContent = () => {
-    return activeTab === 'calls' ? <CallHistory /> : <UnifiedMessages />;
-  };
 
   return (
     <div className="splash-screen">
@@ -25,13 +16,8 @@ const SplashScreen: React.FC = () => {
       </div>
       
       <div className="splash-content">
-        {renderContent()}
+        <UnifiedMessages />
       </div>
-      
-      <TabBar
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-      />
       
       {showSettings && (
         <SettingsModal onClose={() => setShowSettings(false)} />

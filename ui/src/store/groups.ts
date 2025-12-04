@@ -3,6 +3,10 @@ import { Chat } from '#caller-utils';
 import { GroupMessage, NormalizedGroup } from '../types/groups';
 
 type BodyCache = Record<string, string>;
+type GroupPreview = {
+  text: string;
+  timestamp: number | null;
+};
 
 const BODY_CACHE_KEY = 'group-message-bodies';
 const BODY_CACHE_LIMIT = 400;
@@ -96,6 +100,49 @@ function describeAttachments(
   return 'Attachment';
 }
 
+function buildMessagePreview(
+  meta: Chat.MessageMeta | undefined,
+  bodyCache: BodyCache,
+): { text: string; timestamp: number | null; cache: BodyCache } {
+  if (!meta) {
+    return { text: 'No messages yet', timestamp: null, cache: bodyCache };
+  }
+
+  const cache = { ...bodyCache };
+  const metaBody = (meta as any).body as string | undefined;
+  if (metaBody?.trim?.()) {
+    cache[meta.message_id] = metaBody.trim();
+  }
+  const text =
+    metaBody?.trim?.() ||
+    cache[meta.message_id] ||
+    describeAttachments(meta.attachments) ||
+    'Message payload unavailable';
+
+  const timestamp = meta.timestamp ?? null;
+  return { text, timestamp, cache };
+}
+
+function extractLatestMessagePreview(
+  group: Chat.Group,
+  bodyCache: BodyCache,
+): { text: string; timestamp: number | null; cache: BodyCache } {
+  const messagesRaw = toFlexibleMap<Chat.MessageMeta>(
+    group.messages as any,
+    (m) => (m as any)?.message_id,
+  );
+  const messages = Array.from(messagesRaw.values()).sort(
+    (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
+  );
+  const latest = messages[messages.length - 1];
+  const { text, timestamp, cache } = buildMessagePreview(latest, bodyCache);
+  return {
+    text,
+    timestamp: timestamp ?? group.metadata?.updated_at ?? null,
+    cache,
+  };
+}
+
 function normalizeGroup(
   groupId: string,
   group: Chat.Group,
@@ -158,6 +205,7 @@ function normalizeGroup(
 
 interface GroupStore {
   groups: Chat.GroupSummary[];
+  groupPreviews: Record<string, GroupPreview>;
   activeGroupId: string | null;
   activeGroup: NormalizedGroup | null;
   activeThreadId: string | null;
@@ -189,10 +237,12 @@ interface GroupStore {
   approveProposal: (proposalId: string) => Promise<Chat.MembershipDecision | null>;
   removeMember: (member: string) => Promise<Chat.MembershipDecision | null>;
   leaveGroup: () => Promise<Chat.MembershipDecision | null>;
+  refreshGroupPreviews: (groupIds?: string[]) => Promise<void>;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
   groups: [],
+  groupPreviews: {},
   activeGroupId: null,
   activeGroup: null,
   activeThreadId: null,
@@ -218,6 +268,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         return bTs - aTs;
       });
       set({ groups: sorted, error: null });
+      await get().refreshGroupPreviews(sorted.map((g) => g.group_id));
     } catch (error) {
       console.error('[GROUPS] Failed to load groups', error);
       set({ error: 'Failed to load groups' });
@@ -248,10 +299,27 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         normalized.messages[normalized.messages.length - 1]?.threadId ||
         null;
 
-      set({
-        activeGroup: normalized,
-        activeThreadId,
-        error: null,
+      set((state) => {
+        const lastMessage = normalized.messages[normalized.messages.length - 1];
+        const previewText = lastMessage?.content || 'No messages yet';
+        const previewTimestamp = lastMessage?.timestamp ?? normalized.metadata.updated_at ?? null;
+        const updatedBodies =
+          lastMessage?.id && previewText
+            ? persistBodyCache({
+                ...state.messageBodies,
+                [lastMessage.id]: previewText,
+              })
+            : state.messageBodies;
+        return {
+          activeGroup: normalized,
+          activeThreadId,
+          error: null,
+          messageBodies: updatedBodies,
+          groupPreviews: {
+            ...state.groupPreviews,
+            [groupId]: { text: previewText, timestamp: previewTimestamp },
+          },
+        };
       });
       // Refresh delivery/replication state alongside opening the group.
       get().fetchReplicationState(groupId);
@@ -280,13 +348,30 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         set({ error: 'Failed to refresh group', isSyncing: false });
         return;
       }
-      set((state) => ({
-        activeGroup: normalized,
-        activeThreadId:
-          state.activeThreadId && normalized.threads.has(state.activeThreadId)
-            ? state.activeThreadId
-            : normalized.rootThreadId,
-      }));
+      set((state) => {
+        const lastMessage = normalized.messages[normalized.messages.length - 1];
+        const previewText = lastMessage?.content || 'No messages yet';
+        const previewTimestamp = lastMessage?.timestamp ?? normalized.metadata.updated_at ?? null;
+        const updatedBodies =
+          lastMessage?.id && previewText
+            ? persistBodyCache({
+                ...state.messageBodies,
+                [lastMessage.id]: previewText,
+              })
+            : state.messageBodies;
+        return {
+          activeGroup: normalized,
+          activeThreadId:
+            state.activeThreadId && normalized.threads.has(state.activeThreadId)
+              ? state.activeThreadId
+              : normalized.rootThreadId,
+          messageBodies: updatedBodies,
+          groupPreviews: {
+            ...state.groupPreviews,
+            [groupId]: { text: previewText, timestamp: previewTimestamp },
+          },
+        };
+      });
       get().fetchReplicationState(groupId);
     } catch (error) {
       console.error('[GROUPS] Failed to refresh group', error);
@@ -390,6 +475,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         },
         messageBodies: updatedBodies,
         error: null,
+        groupPreviews: {
+          ...state.groupPreviews,
+          [groupId]: { text: content, timestamp },
+        },
       };
     });
 
@@ -417,6 +506,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         return {
           activeGroup: { ...state.activeGroup, messages },
           messageBodies: updatedBodies,
+          groupPreviews: {
+            ...state.groupPreviews,
+            [groupId]: { text: content, timestamp },
+          },
         };
       });
       // Pull a fresh copy so we pick up any server-side mutations.
@@ -467,6 +560,34 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     } catch (error) {
       console.error('[GROUPS] Failed to fetch replication state', error);
     }
+  },
+
+  refreshGroupPreviews: async (groupIds) => {
+    const targets = groupIds ?? get().groups.map((g) => g.group_id);
+    if (!targets.length) return;
+
+    let cache = { ...get().messageBodies };
+    const previews = { ...get().groupPreviews };
+
+    for (const groupId of targets) {
+      try {
+        const res = await Chat.get_group({ group_id: groupId });
+        if (!res.group) continue;
+        const { text, timestamp, cache: updatedCache } = extractLatestMessagePreview(
+          res.group,
+          cache,
+        );
+        cache = updatedCache;
+        previews[groupId] = { text, timestamp };
+      } catch (error) {
+        console.error('[GROUPS] Failed to refresh preview for group', groupId, error);
+      }
+    }
+
+    set({
+      groupPreviews: previews,
+      messageBodies: persistBodyCache(cache),
+    });
   },
 
   fetchWhitelist: async (groupId: string | null = null) => {

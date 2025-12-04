@@ -8,8 +8,15 @@ import './UnifiedMessages.css';
 
 const UnifiedMessages: React.FC = () => {
   const { chats, searchChats, connectionStatus, setActiveChat } = useChatStore();
-  const { groups, loadGroups, fetchReplicationState, openGroup, isLoading, error } =
-    useGroupStore();
+  const {
+    groups,
+    groupPreviews,
+    loadGroups,
+    fetchReplicationState,
+    openGroup,
+    isLoading,
+    error,
+  } = useGroupStore();
 
   const [query, setQuery] = useState('');
   const [dmResults, setDmResults] = useState(chats);
@@ -76,15 +83,17 @@ const UnifiedMessages: React.FC = () => {
     });
 
     const groupItems = filteredGroups.map((group) => {
-      const lastActivity = group.metadata?.updated_at || Math.floor(Date.now() / 1000);
+      const preview = groupPreviews[group.group_id];
+      const lastActivity =
+        preview?.timestamp || group.metadata?.updated_at || Math.floor(Date.now() / 1000);
+      const subtitle = preview?.text || 'No messages yet';
       return {
         id: `group-${group.group_id}`,
         kind: 'group' as const,
         title: group.metadata?.name || 'Untitled group',
-        subtitle: group.metadata?.description || 'No description',
+        subtitle,
         lastActivity,
         onClick: () => openGroup(group.group_id),
-        meta: `${group.member_count} members`,
         unread: 0,
       };
     });
@@ -92,7 +101,7 @@ const UnifiedMessages: React.FC = () => {
     return [...dmItems, ...groupItems].sort(
       (a, b) => (b.lastActivity || 0) - (a.lastActivity || 0)
     );
-  }, [dmResults, filteredGroups, openGroup, setActiveChat]);
+  }, [dmResults, filteredGroups, openGroup, setActiveChat, groupPreviews]);
 
   const formatTime = (timestamp?: number | null) => {
     if (!timestamp) return '';
@@ -176,14 +185,6 @@ const UnifiedMessages: React.FC = () => {
 
       <div className="unified-scroll">
         <section className="unified-section">
-          <div className="unified-section-header">
-            <div>
-              <div className="unified-section-title">Chats</div>
-              <div className="unified-section-subtitle">
-                All direct messages and groups, sorted by latest activity
-              </div>
-            </div>
-          </div>
           <div className="unified-list">
             {isLoading && unifiedItems.length === 0 ? (
               <div className="unified-empty">Loading chats…</div>
@@ -201,9 +202,6 @@ const UnifiedMessages: React.FC = () => {
                     <div className="unified-item-row">
                       <div className="unified-item-title">{item.title}</div>
                       <div className="unified-item-meta">
-                        <span className="unified-chip">
-                          {item.kind === 'group' ? 'Group' : 'DM'}
-                        </span>
                         {item.lastActivity ? (
                           <span className="unified-time">
                             {formatTime(item.lastActivity)}
@@ -213,7 +211,6 @@ const UnifiedMessages: React.FC = () => {
                     </div>
                     <div className="unified-item-row secondary">
                       <div className="unified-item-subtitle">{item.subtitle}</div>
-                      {item.meta && <span className="unified-badge">{item.meta}</span>}
                       {'unread' in item && item.unread ? (
                         <span className="unified-unread">{item.unread}</span>
                       ) : null}
