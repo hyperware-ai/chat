@@ -8,6 +8,7 @@ import GroupMessageInput from './GroupMessageInput';
 import GroupStatusBar from './GroupStatusBar';
 import GroupMembersModal from './GroupMembersModal';
 import GroupReplicationPanel from './GroupReplicationPanel';
+import GroupSettingsModal from './GroupSettingsModal';
 import './GroupView.css';
 
 const GroupView: React.FC = () => {
@@ -28,6 +29,7 @@ const GroupView: React.FC = () => {
   } = useGroupStore();
   const { nodeId } = useChatStore();
   const [showMembers, setShowMembers] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [isFetchingWhitelist, setIsFetchingWhitelist] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -148,6 +150,9 @@ const GroupView: React.FC = () => {
           <div className="group-dev-badge" aria-label="Development preview">
             Dev preview
           </div>
+          <button className="group-settings" onClick={() => setShowSettings(true)}>
+            Settings
+          </button>
           <button className="group-members" onClick={() => setShowMembers(true)}>
             Members
           </button>
@@ -226,6 +231,7 @@ const GroupView: React.FC = () => {
       />
 
       {showMembers && <GroupMembersModal onClose={() => setShowMembers(false)} />}
+      {showSettings && <GroupSettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );
 };

@@ -162,6 +162,7 @@ body {
   overflow: auto;
   animation: slideUp 0.3s ease;
   padding: 0;
+  opacity: 1;
 }
 
 @keyframes slideUp {

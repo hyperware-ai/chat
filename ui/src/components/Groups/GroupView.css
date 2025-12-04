@@ -41,6 +41,15 @@
   font-size: 12px;
 }
 
+.group-settings {
+  border: 1px solid var(--border-color);
+  background: var(--surface);
+  padding: 8px 10px;
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 .group-members {
   border: 1px solid var(--border-color);
   background: var(--surface);
