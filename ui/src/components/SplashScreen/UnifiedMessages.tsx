@@ -153,11 +153,6 @@ const UnifiedMessages: React.FC = () => {
     </div>
   );
 
-  const handleRefreshGroups = () => {
-    loadGroups();
-    fetchReplicationState(null);
-  };
-
   return (
     <div className="unified-messages">
       <div className="unified-toolbar">
@@ -173,14 +168,6 @@ const UnifiedMessages: React.FC = () => {
             aria-label="New chat"
           >
             + New
-          </button>
-          <button
-            className="unified-action ghost"
-            onClick={handleRefreshGroups}
-            disabled={connectionStatus !== 'connected'}
-            aria-label="Refresh groups"
-          >
-            ⟳
           </button>
         </div>
       </div>
