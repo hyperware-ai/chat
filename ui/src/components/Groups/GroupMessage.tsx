@@ -5,9 +5,10 @@ import './GroupMessage.css';
 interface GroupMessageProps {
   message: GroupMessageType;
   currentNode?: string | null;
-  onStartThread?: () => void;
+  onStartThread?: (parentThreadId: string) => void | Promise<void>;
   onOpenThread?: (threadId: string) => void;
   isActiveThread?: boolean;
+  onJumpToParent?: (parentId: string) => void;
 }
 
 const formatTime = (timestamp: number) => {
@@ -15,13 +16,8 @@ const formatTime = (timestamp: number) => {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-const GroupMessage: React.FC<GroupMessageProps> = ({
-  message,
-  currentNode,
-  onStartThread,
-  onOpenThread,
-  isActiveThread,
-}) => {
+const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
+  ({ message, currentNode, onStartThread, onOpenThread, isActiveThread, onJumpToParent }, ref) => {
   const isMine = currentNode && message.sender === currentNode;
   const statusLabel =
     message.status === 'sending'
@@ -31,7 +27,7 @@ const GroupMessage: React.FC<GroupMessageProps> = ({
       : '';
 
   return (
-    <div className={`group-message ${isMine ? 'mine' : ''}`}>
+    <div className={`group-message ${isMine ? 'mine' : ''}`} ref={ref}>
       {!isMine && <div className="group-message-sender">{message.sender}</div>}
       <div className="group-message-bubble">
         <div className="group-message-text">{message.content}</div>
@@ -41,6 +37,24 @@ const GroupMessage: React.FC<GroupMessageProps> = ({
         </div>
         {(onStartThread || onOpenThread) && (
           <div className="group-message-actions">
+          {onJumpToParent && message.replyTo && (
+            <button className="link" onClick={() => onJumpToParent(message.replyTo!)}>
+              Jump to parent
+            </button>
+          )}
+            <button
+              className="link"
+              onClick={() => {
+                if (navigator.clipboard) {
+                  navigator.clipboard.writeText(message.content).catch(() => {});
+                }
+              }}
+            >
+              Copy
+            </button>
+            <button className="link" disabled title="Reactions require backend support">
+              React (disabled)
+            </button>
             {onOpenThread && (
               <button
                 className="link"
@@ -51,7 +65,7 @@ const GroupMessage: React.FC<GroupMessageProps> = ({
               </button>
             )}
             {onStartThread && (
-              <button className="link" onClick={onStartThread}>
+              <button className="link" onClick={() => onStartThread(message.threadId)}>
                 Start sub-thread
               </button>
             )}
@@ -60,6 +74,6 @@ const GroupMessage: React.FC<GroupMessageProps> = ({
       </div>
     </div>
   );
-};
+});
 
 export default GroupMessage;

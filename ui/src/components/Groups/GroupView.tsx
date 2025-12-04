@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Chat } from '#caller-utils';
 import { useGroupStore } from '../../store/groups';
 import { useChatStore } from '../../store/chat';
@@ -9,7 +9,11 @@ import GroupStatusBar from './GroupStatusBar';
 import GroupMembersModal from './GroupMembersModal';
 import GroupReplicationPanel from './GroupReplicationPanel';
 import GroupSettingsModal from './GroupSettingsModal';
+import ThreadsList from './ThreadsList';
+import ThreadView from './ThreadView';
 import './GroupView.css';
+
+type ThreadWithId = Chat.Thread & { id: string };
 
 const GroupView: React.FC = () => {
   const {
@@ -31,7 +35,6 @@ const GroupView: React.FC = () => {
   const [showMembers, setShowMembers] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [isFetchingWhitelist, setIsFetchingWhitelist] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!activeGroup) return;
@@ -56,42 +59,44 @@ const GroupView: React.FC = () => {
     return () => clearInterval(interval);
   }, [activeGroup?.id, fetchSubscriberEvents]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeGroup?.messages.length, activeThreadId]);
-
   if (!activeGroup) return null;
 
-  const threads = useMemo(() => {
+  const threads = useMemo<ThreadWithId[]>(() => {
     const list = Array.from(activeGroup.threads.entries()).map(([id, thread]) => ({
       ...thread,
       id,
     }));
     return list.sort((a, b) => {
-      if (a.depth !== b.depth) return a.depth - b.depth;
-      return (b.summary?.last_activity ?? 0) - (a.summary?.last_activity ?? 0);
+      const aTs = a.summary?.last_activity ?? 0;
+      const bTs = b.summary?.last_activity ?? 0;
+      if (aTs !== bTs) return bTs - aTs;
+      return a.depth - b.depth;
     });
   }, [activeGroup.threads]);
 
   const selectedThreadId = activeThreadId || activeGroup.rootThreadId;
-  const threadMessages = selectedThreadId
-    ? activeGroup.messages.filter((msg) => msg.threadId === selectedThreadId)
-    : activeGroup.messages;
+  useEffect(() => {
+    if (!threads.length) return;
+    const exists = threads.some((t) => t.id === selectedThreadId);
+    if (!exists) {
+      setActiveThread(threads[0].id);
+    }
+  }, [selectedThreadId, setActiveThread, threads]);
 
   const member = nodeId ? activeGroup.members.get(nodeId) : undefined;
   const role = member ? activeGroup.roles.get(member.role_id) : undefined;
 
   const canSend =
     member?.status === Chat.MembershipStatus.Active &&
-    role &&
+    !!role &&
     hasGroupPermission(role.permissions as unknown as number, 'SEND_MESSAGES');
   const canCreateThread =
     member?.status === Chat.MembershipStatus.Active &&
-    role &&
+    !!role &&
     hasGroupPermission(role.permissions as unknown as number, 'CREATE_THREADS');
   const canInvite =
     member?.status === Chat.MembershipStatus.Active &&
-    role &&
+    !!role &&
     hasGroupPermission(role.permissions as unknown as number, 'INVITE_MEMBERS');
   const whitelist = whitelists[activeGroup.id];
 
@@ -177,58 +182,45 @@ const GroupView: React.FC = () => {
         isFetchingWhitelist={isFetchingWhitelist}
       />
 
-      <div className="group-thread-bar">
-        <div className="group-thread-chips">
-          {threads.map((thread) => (
-            <button
-              key={thread.id}
-              className={`thread-chip ${
-                thread.id === activeThreadId ? 'active' : ''
-              }`}
-              onClick={() => setActiveThread(thread.id)}
-              style={{ marginLeft: thread.depth * 12 }}
-            >
-              <span className="thread-title">
-                {thread.title || (thread.depth === 0 ? 'Main thread' : thread.id)}
-              </span>
-              <span className="thread-meta">
-                {thread.summary?.message_count ?? 0} msgs
-              </span>
-            </button>
-          ))}
-        </div>
-        {canCreateThread && (
-          <button className="thread-add" onClick={handleCreateThread}>
-            + Thread
-          </button>
-        )}
-      </div>
-
-      <div className="group-messages">
-        {threadMessages.length === 0 ? (
-          <div className="group-empty-thread">
-            No messages yet. {canSend ? 'Start the conversation!' : 'Waiting for others.'}
+      <section className="group-thread-section">
+        <div className="group-thread-header">
+          <div>
+            <div className="section-title">Threads</div>
+            <div className="section-sub">
+              Fully separated from the main chat, sorted by recent activity.
+            </div>
           </div>
-        ) : (
-          threadMessages.map((msg) => (
-            <GroupMessage
-              key={msg.id}
-              message={msg}
-              currentNode={nodeId}
-              onOpenThread={(id) => setActiveThread(id)}
-              onStartThread={() => handleStartThreadFromMessage(msg.threadId)}
-              isActiveThread={msg.threadId === selectedThreadId}
-            />
-          ))
-        )}
-        <div ref={messagesEndRef} />
-      </div>
+          {canCreateThread && (
+            <button className="thread-add" onClick={handleCreateThread}>
+              + Thread
+            </button>
+          )}
+        </div>
 
-      <GroupMessageInput
-        onSend={sendMessage}
-        disabled={!canSend}
-        disabledReason={disabledReason}
-      />
+        <div className="group-thread-layout">
+          <div className="thread-list-column">
+            <ThreadsList
+              threads={threads}
+              activeThreadId={selectedThreadId}
+              onSelect={(id) => setActiveThread(id)}
+            />
+          </div>
+          <div className="thread-view-column">
+            <ThreadView
+              threadId={selectedThreadId}
+              threads={threads}
+              messages={activeGroup.messages}
+              currentNode={nodeId}
+              canSend={!!canSend}
+              disabledReason={disabledReason}
+              canStartThread={canCreateThread}
+              onSend={sendMessage}
+              onStartThread={canCreateThread ? handleStartThreadFromMessage : undefined}
+              onOpenThread={(id) => setActiveThread(id)}
+            />
+          </div>
+        </div>
+      </section>
 
       {showMembers && <GroupMembersModal onClose={() => setShowMembers(false)} />}
       {showSettings && <GroupSettingsModal onClose={() => setShowSettings(false)} />}

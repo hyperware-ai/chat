@@ -1,6 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'node:path'
+import { randomFillSync, webcrypto } from 'node:crypto'
+
+const cryptoPolyfill = (webcrypto as unknown as Crypto) ?? ({} as Crypto)
+if (!cryptoPolyfill.getRandomValues) {
+  (cryptoPolyfill as any).getRandomValues = (array: ArrayBufferView) =>
+    randomFillSync(array as unknown as NodeJS.ArrayBufferView)
+}
+(globalThis as any).crypto = cryptoPolyfill
 
 /*
 If you are developing a UI outside of a Hyperware project,
