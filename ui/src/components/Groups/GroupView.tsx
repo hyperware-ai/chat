@@ -33,6 +33,8 @@ const GroupView: React.FC = () => {
     fetchSubscriberEvents,
     whitelists,
     fetchWhitelist,
+    replyingTo,
+    setReplyingTo,
   } = useGroupStore();
   const { nodeId } = useChatStore();
   const [showMembers, setShowMembers] = useState(false);
@@ -144,15 +146,14 @@ const GroupView: React.FC = () => {
   };
 
   const handleReply = (messageId: string) => {
-    // For now, just pass the messageId to sendMessage
-    // Could implement a reply UI state here
     const message = activeGroup?.messages.find((m) => m.id === messageId);
     if (message) {
-      const replyText = window.prompt(`Reply to "${message.content.substring(0, 50)}..."`);
-      if (replyText) {
-        sendMessage(replyText, messageId);
-      }
+      setReplyingTo(message);
     }
+  };
+
+  const handleCancelReply = () => {
+    setReplyingTo(null);
   };
 
   const handleForward = (messageId: string) => {
@@ -220,10 +221,12 @@ const GroupView: React.FC = () => {
               canSend={!!canSend}
               disabledReason={disabledReason}
               canStartThread={canCreateThread}
+              replyingTo={replyingTo}
               onSend={sendMessage}
               onStartThread={canCreateThread ? handleStartThreadFromMessage : undefined}
               onOpenThread={(id) => setActiveThread(id)}
               onReply={handleReply}
+              onCancelReply={handleCancelReply}
               onEdit={editMessage}
               onDelete={deleteMessage}
               onForward={handleForward}

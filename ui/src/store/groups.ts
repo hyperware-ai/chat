@@ -215,6 +215,7 @@ interface GroupStore {
   activeGroupId: string | null;
   activeGroup: NormalizedGroup | null;
   activeThreadId: string | null;
+  replyingTo: GroupMessage | null;
   subscriberEvents: Chat.SubscriberDeliveryEvent[];
   replication: Record<string, Chat.GroupReplicationState>;
   replicationMetrics: Chat.ReplicationMetrics | null;
@@ -234,6 +235,7 @@ interface GroupStore {
   }) => Promise<string | null>;
   setActiveThread: (threadId: string) => void;
   clearActiveGroup: () => void;
+  setReplyingTo: (message: GroupMessage | null) => void;
   createThread: (
     title: string | null,
     parentThreadId?: string | null,
@@ -262,6 +264,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
   activeGroupId: null,
   activeGroup: null,
   activeThreadId: null,
+  replyingTo: null,
   subscriberEvents: [],
   replication: {},
   replicationMetrics: null,
@@ -435,8 +438,11 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       activeGroup: null,
       activeGroupId: null,
       activeThreadId: null,
+      replyingTo: null,
       isSyncing: false,
     }),
+
+  setReplyingTo: (message) => set({ replyingTo: message }),
 
   createThread: async (title, parentThreadIdOverride = null, rootMessageId = null) => {
     const groupId = get().activeGroupId;

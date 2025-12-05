@@ -7,6 +7,12 @@ import './ThreadView.css';
 
 type ThreadWithId = Chat.Thread & { id: string };
 
+interface ReplyingToMessage {
+  id: string;
+  sender: string;
+  content: string;
+}
+
 interface ThreadViewProps {
   threadId: string | null;
   threads: ThreadWithId[];
@@ -15,10 +21,12 @@ interface ThreadViewProps {
   canSend: boolean;
   disabledReason?: string;
   canStartThread: boolean;
+  replyingTo?: ReplyingToMessage | null;
   onSend: (content: string, replyTo?: string | null) => Promise<void>;
   onStartThread?: (parentThreadId: string, rootMessageId?: string) => Promise<void>;
   onOpenThread: (threadId: string) => void;
   onReply?: (messageId: string) => void;
+  onCancelReply?: () => void;
   onEdit?: (messageId: string, content: string) => void;
   onDelete?: (messageId: string) => void;
   onForward?: (messageId: string) => void;
@@ -33,10 +41,12 @@ const ThreadView: React.FC<ThreadViewProps> = ({
   canSend,
   disabledReason,
   canStartThread,
+  replyingTo,
   onSend,
   onStartThread,
   onOpenThread,
   onReply,
+  onCancelReply,
   onEdit,
   onDelete,
   onForward,
@@ -189,7 +199,13 @@ const ThreadView: React.FC<ThreadViewProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
-      <GroupMessageInput onSend={onSend} disabled={!canSend} disabledReason={disabledReason} />
+      <GroupMessageInput
+        onSend={onSend}
+        disabled={!canSend}
+        disabledReason={disabledReason}
+        replyingTo={replyingTo}
+        onCancelReply={onCancelReply}
+      />
     </div>
   );
 };
