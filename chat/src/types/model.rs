@@ -360,6 +360,9 @@ pub enum WsServerMessage {
     AuthFailed {
         reason: String,
     },
+    GroupUpdate {
+        group_id: String,
+    },
     Heartbeat,
     Error {
         message: String,

@@ -3,6 +3,7 @@ import { Chat as api } from '#caller-utils';
 import { ChatWebSocket } from '../utils/websocket';
 import { idbStorage } from '../utils/indexeddb';
 import { WsServerMessage } from 'src/types/chat';
+import { useGroupStore } from './groups';
 
 interface ChatStore {
   // State
@@ -759,6 +760,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   handleWebSocketMessage: (message: WsServerMessage) => {
     console.log('[WS] Received message:', message);
+
+    if (message.GroupUpdate) {
+      const { group_id } = message.GroupUpdate;
+      const { activeGroupId, refreshActiveGroup } = useGroupStore.getState();
+      if (activeGroupId === group_id) {
+        refreshActiveGroup();
+      }
+      return;
+    }
     
     if (message.ChatUpdate) {
       console.log('[WS] Processing ChatUpdate:', message.ChatUpdate);

@@ -162,6 +162,8 @@ pub struct CreateGroupThreadReq {
     pub parent_thread_id: Option<ThreadId>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub root_message_id: Option<MessageId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -186,6 +188,35 @@ pub struct SendGroupMessageReq {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SendGroupMessageRes {
     pub message: MessageMeta,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EditGroupMessageReq {
+    pub group_id: GroupId,
+    pub message_id: MessageId,
+    pub new_content: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DeleteGroupMessageReq {
+    pub group_id: GroupId,
+    pub message_id: MessageId,
+    #[serde(default)]
+    pub delete_for_both: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AddGroupReactionReq {
+    pub group_id: GroupId,
+    pub message_id: MessageId,
+    pub emoji: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RemoveGroupReactionReq {
+    pub group_id: GroupId,
+    pub message_id: MessageId,
+    pub emoji: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -11,6 +11,7 @@ export interface GroupMessage {
   content: string;
   status?: 'sending' | 'sent' | 'delivered' | 'failed';
   isLocal?: boolean;
+  reactions?: { emoji: string; user: string; timestamp?: number }[];
 }
 
 export interface NormalizedGroup {

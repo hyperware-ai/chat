@@ -19,6 +19,7 @@ export interface WsServerMessage {
   ProfileUpdate?: { node: string; profile: Chat.UserProfile };
   AuthSuccess?: { chat_id: string; history: Chat.ChatMessage[] };
   AuthFailed?: { reason: string };
+  GroupUpdate?: { group_id: string };
   Heartbeat?: null;
   Error?: { message: string };
 }

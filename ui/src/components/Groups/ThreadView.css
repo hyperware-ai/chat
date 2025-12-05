@@ -3,10 +3,10 @@
   flex-direction: column;
   gap: 10px;
   height: 100%;
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 12px;
-  background: var(--surface);
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: var(--background);
 }
 
 .thread-header {
@@ -15,6 +15,8 @@
   align-items: flex-start;
   gap: 8px;
   flex-wrap: wrap;
+  padding: 10px 15px;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .thread-title {
@@ -72,6 +74,8 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 10px 15px;
+  padding-bottom: 20px;
 }
 
 .thread-empty {
@@ -80,4 +84,22 @@
   border-radius: 10px;
   background: var(--background);
   color: var(--text-secondary);
+}
+
+/* Root message styling - subtle left border indicator */
+.thread-root-message {
+  padding-left: 12px;
+  margin-bottom: 16px;
+  border-left: 3px solid var(--border-color, #e0e0e0);
+  position: relative;
+}
+
+/* Make the root message slightly muted to distinguish it */
+.thread-root-message .group-message {
+  opacity: 0.7;
+}
+
+/* Prevent interaction with root message actions since it's just a reference */
+.thread-root-message .group-message-actions {
+  display: none;
 }

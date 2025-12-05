@@ -2,7 +2,7 @@ use crate::crdt::{
     compile_membership_rules, Group, GroupId, GroupMember, GroupPermissions, MembershipActionKind,
     MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRuleBox,
     MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId,
-    SubscriberSyncState, ThreadId,
+    SubscriberSyncState, ThreadId, MessageReactionMeta,
 };
 use crate::types::{
     active_member_count, aggregate_rule_decisions, current_timestamp, group_root_thread_id,
@@ -143,6 +143,170 @@ impl ChatState {
         };
         self.commit_group_crdt_or_log(&req.group_id, "send_group_message");
         Ok(crate::SendGroupMessageRes { message })
+    }
+
+    pub fn edit_group_message_state(
+        &mut self,
+        req: crate::EditGroupMessageReq,
+    ) -> Result<crate::SendGroupMessageRes, String> {
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
+            .map_err(|err| format!("cannot edit group message: {}", err))?;
+        let now = current_timestamp();
+
+        let updated = {
+            let group = self
+                .groups
+                .get_mut(&req.group_id)
+                .ok_or_else(|| "Group not found".to_string())?;
+
+            let message = group
+                .messages
+                .get_mut(&req.message_id)
+                .ok_or_else(|| "Message not found".to_string())?;
+
+            if message.sender != our().node {
+                return Err("Only the sender can edit this message".to_string());
+            }
+
+            message.body = req.new_content.clone();
+            message.timestamp = now;
+
+            if let Some(meta) = group.metadata.as_mut() {
+                meta.updated_at = now;
+            }
+
+            if let Some(thread) = group.threads.get_mut(&message.thread_id) {
+                thread.summary.last_activity = now;
+                thread.summary.last_message_id = Some(message.message_id.clone());
+                thread.summary.last_sender = Some(message.sender.clone());
+            }
+
+            message.clone()
+        };
+
+        self.commit_group_crdt_or_log(&req.group_id, "edit_group_message");
+        Ok(crate::SendGroupMessageRes { message: updated })
+    }
+
+    pub fn delete_group_message_state(
+        &mut self,
+        req: crate::DeleteGroupMessageReq,
+    ) -> Result<String, String> {
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
+            .map_err(|err| format!("cannot delete group message: {}", err))?;
+
+        {
+            let group = self
+                .groups
+                .get_mut(&req.group_id)
+                .ok_or_else(|| "Group not found".to_string())?;
+
+            let message = group
+                .messages
+                .remove(&req.message_id)
+                .ok_or_else(|| "Message not found".to_string())?;
+
+            if message.sender != our().node {
+                // restore message to avoid destructive delete when unauthorized
+                group.messages.insert(req.message_id.clone(), message);
+                return Err("Only the sender can delete this message".to_string());
+            }
+
+            if let Some(thread) = group.threads.get_mut(&message.thread_id) {
+                thread.summary.message_count = thread.summary.message_count.saturating_sub(1);
+                if thread.summary.last_message_id == Some(req.message_id.clone()) {
+                    thread.summary.last_message_id = None;
+                }
+            }
+
+            if let Some(meta) = group.metadata.as_mut() {
+                meta.updated_at = current_timestamp();
+            }
+        }
+
+        self.commit_group_crdt_or_log(&req.group_id, "delete_group_message");
+        Ok("Message deleted".to_string())
+    }
+
+    pub fn add_group_reaction_state(
+        &mut self,
+        req: crate::AddGroupReactionReq,
+    ) -> Result<String, String> {
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
+            .map_err(|err| format!("cannot react to group message: {}", err))?;
+
+        {
+            let group = self
+                .groups
+                .get_mut(&req.group_id)
+                .ok_or_else(|| "Group not found".to_string())?;
+
+            let message = group
+                .messages
+                .get_mut(&req.message_id)
+                .ok_or_else(|| "Message not found".to_string())?;
+
+            // prevent duplicate reaction from same user/emoji
+            if message
+                .reactions
+                .iter()
+                .any(|r| r.node_id == our().node && r.emoji == req.emoji)
+            {
+                return Ok("Reaction already exists".to_string());
+            }
+
+            message.reactions.push(MessageReactionMeta {
+                node_id: our().node.clone(),
+                emoji: req.emoji.clone(),
+                timestamp: current_timestamp(),
+            });
+            println!(
+                "[REACTION] Added reaction: msg_id={} emoji={} reactions_count={}",
+                req.message_id, req.emoji, message.reactions.len()
+            );
+
+            if let Some(meta) = group.metadata.as_mut() {
+                meta.updated_at = current_timestamp();
+            }
+        }
+
+        self.commit_group_crdt_or_log(&req.group_id, "add_group_reaction");
+        Ok("Reaction added".to_string())
+    }
+
+    pub fn remove_group_reaction_state(
+        &mut self,
+        req: crate::RemoveGroupReactionReq,
+    ) -> Result<String, String> {
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
+            .map_err(|err| format!("cannot remove reaction: {}", err))?;
+
+        {
+            let group = self
+                .groups
+                .get_mut(&req.group_id)
+                .ok_or_else(|| "Group not found".to_string())?;
+
+            let message = group
+                .messages
+                .get_mut(&req.message_id)
+                .ok_or_else(|| "Message not found".to_string())?;
+
+            let before = message.reactions.len();
+            message
+                .reactions
+                .retain(|r| !(r.node_id == our().node && r.emoji == req.emoji));
+            if message.reactions.len() == before {
+                return Ok("Reaction missing".to_string());
+            }
+
+            if let Some(meta) = group.metadata.as_mut() {
+                meta.updated_at = current_timestamp();
+            }
+        }
+
+        self.commit_group_crdt_or_log(&req.group_id, "remove_group_reaction");
+        Ok("Reaction removed".to_string())
     }
 
     pub fn invite_member(

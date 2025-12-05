@@ -25,6 +25,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  position: relative;
 }
 
 .group-message.mine .group-message-bubble {
@@ -70,4 +71,11 @@
 .group-message-actions .link:disabled {
   color: var(--text-secondary);
   cursor: default;
+}
+
+.group-message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
 }

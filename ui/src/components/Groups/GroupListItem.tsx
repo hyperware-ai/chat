@@ -42,10 +42,9 @@ const GroupListItem: React.FC<GroupListItemProps> = ({
       replicationState.subscriber_lag_secs &&
       replicationState.subscriber_lag_secs > 45
     ) {
-      return {
-        label: `Lag ${replicationState.subscriber_lag_secs}s`,
-        tone: 'warn' as const,
-      };
+      console.warn(
+        `[GROUP REPL] Subscriber lag for ${summary.group_id}: ${replicationState.subscriber_lag_secs}s`,
+      );
     }
     return { label: 'Live', tone: 'ok' as const };
   })();

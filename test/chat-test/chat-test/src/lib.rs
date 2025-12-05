@@ -13,6 +13,7 @@ mod tester_lib;
 mod crdt_core_tests;
 mod membership_acl_tests;
 mod group_threading_tests;
+mod group_message_actions_tests;
 mod dm_extended_tests;
 mod replication_admin_tests;
 mod multi_replication_tests;
@@ -78,6 +79,7 @@ fn handle_message(our: &Address) {
     crdt_core_tests::run_group_crdt_flow_tests(&our.node, &remote_node);
     membership_acl_tests::run_membership_acl_tests(&our.node, &remote_node);
     group_threading_tests::run_group_threading_tests(&our.node);
+    group_message_actions_tests::run_group_message_actions_tests(&our.node);
     dm_extended_tests::run_dm_extended_tests(&our.node, &remote_node);
     replication_admin_tests::run_replication_admin_tests(&our.node, &remote_node);
     multi_replication_tests::run_multi_replication_tests(&node_names);

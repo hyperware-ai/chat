@@ -698,6 +698,40 @@ impl ChatState {
     // uncomment #[remote] for tests
     #[remote]
     #[http]
+    async fn edit_group_message(
+        &mut self,
+        req: EditGroupMessageReq,
+    ) -> Result<SendGroupMessageRes, String> {
+        self.edit_group_message_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn delete_group_message(
+        &mut self,
+        req: DeleteGroupMessageReq,
+    ) -> Result<String, String> {
+        self.delete_group_message_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn add_group_reaction(&mut self, req: AddGroupReactionReq) -> Result<String, String> {
+        self.add_group_reaction_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
+    async fn remove_group_reaction(&mut self, req: RemoveGroupReactionReq) -> Result<String, String> {
+        self.remove_group_reaction_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    #[remote]
+    #[http]
     async fn invite_group_member(
         &mut self,
         req: InviteGroupMemberReq,

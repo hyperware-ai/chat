@@ -180,6 +180,12 @@ function normalizeGroup(
         attachments: meta.attachments ?? [],
         content,
         status: 'delivered',
+        reactions:
+          (meta as any).reactions?.map((r: any) => ({
+            emoji: r.emoji,
+            user: r.node_id,
+            timestamp: r.timestamp,
+          })) ?? [],
       };
     },
   );
@@ -228,8 +234,17 @@ interface GroupStore {
   }) => Promise<string | null>;
   setActiveThread: (threadId: string) => void;
   clearActiveGroup: () => void;
-  createThread: (title: string | null, parentThreadId?: string | null) => Promise<string | null>;
-  sendMessage: (content: string) => Promise<void>;
+  createThread: (
+    title: string | null,
+    parentThreadId?: string | null,
+    rootMessageId?: string | null,
+  ) => Promise<string | null>;
+  sendMessage: (content: string, replyTo?: string | null) => Promise<void>;
+  editMessage: (messageId: string, newContent: string) => Promise<void>;
+  deleteMessage: (messageId: string) => Promise<void>;
+  forwardMessage: (messageId: string, toGroupId: string) => Promise<void>;
+  addReaction: (messageId: string, emoji: string) => Promise<void>;
+  removeReaction: (messageId: string, emoji: string) => Promise<void>;
   fetchSubscriberEvents: (clear?: boolean) => Promise<void>;
   fetchReplicationState: (groupId?: string | null) => Promise<void>;
   fetchWhitelist: (groupId?: string | null) => Promise<void>;
@@ -238,6 +253,7 @@ interface GroupStore {
   removeMember: (member: string) => Promise<Chat.MembershipDecision | null>;
   leaveGroup: () => Promise<Chat.MembershipDecision | null>;
   refreshGroupPreviews: (groupIds?: string[]) => Promise<void>;
+  toggleReaction: (messageId: string, emoji: string) => Promise<void>;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
@@ -340,6 +356,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       const res = await Chat.get_group({ group_id: groupId });
       if (!res.group) return;
 
+      // Debug: log raw messages to check for reactions
+      const rawMessages = (res.group as any).messages;
+      console.log('[GROUPS DEBUG] Raw messages from get_group:', JSON.stringify(rawMessages, null, 2));
+
       let normalized: NormalizedGroup;
       try {
         normalized = normalizeGroup(groupId, res.group, get().messageBodies);
@@ -418,7 +438,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       isSyncing: false,
     }),
 
-  createThread: async (title, parentThreadIdOverride = null) => {
+  createThread: async (title, parentThreadIdOverride = null, rootMessageId = null) => {
     const groupId = get().activeGroupId;
     const parentThreadId =
       parentThreadIdOverride !== null && parentThreadIdOverride !== undefined
@@ -426,13 +446,24 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         : get().activeGroup?.rootThreadId ?? null;
     if (!groupId) return null;
     try {
+      // rootMessageId is captured here so we can send it once the backend accepts it.
+      if (rootMessageId) {
+        console.log('[GROUPS] Start sub-thread from message', {
+          groupId,
+          parentThreadId,
+          rootMessageId,
+        });
+      }
+
       const res = await Chat.create_group_thread({
         group_id: groupId,
         parent_thread_id: parentThreadId,
         title: title || null,
+        root_message_id: rootMessageId ?? null,
       });
-      await get().refreshActiveGroup();
+      // Set the active thread BEFORE refreshing so it doesn't get reset to root
       set({ activeThreadId: res.thread_id });
+      await get().refreshActiveGroup();
       return res.thread_id;
     } catch (error) {
       console.error('[GROUPS] Failed to create thread', error);
@@ -441,7 +472,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string) => {
+  sendMessage: async (content: string, replyTo: string | null = null) => {
     const groupId = get().activeGroupId;
     const threadId = get().activeThreadId;
     const sender = (window as any).our?.node || 'me';
@@ -455,7 +486,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       sender,
       timestamp,
       type: Chat.MessageType.Text,
-      replyTo: null,
+      replyTo,
       attachments: [],
       content,
       status: 'sending' as const,
@@ -488,7 +519,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         thread_id: threadId,
         content,
         message_type: Chat.MessageType.Text,
-        reply_to: null,
+        reply_to: replyTo,
         attachments: [],
       });
       const realId = res.message.message_id;
@@ -528,6 +559,139 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
           error: 'Failed to send message',
         };
       });
+    }
+  },
+
+  toggleReaction: async (messageId: string, emoji: string) => {
+    const groupId = get().activeGroupId;
+    if (!groupId) return;
+    const ourNode = (window as any).our?.node || 'me';
+
+    // Check if already reacted BEFORE optimistic update
+    const msg = get().activeGroup?.messages.find((m) => m.id === messageId);
+    const hasReacted = msg?.reactions?.some((r) => r.user === ourNode && r.emoji === emoji);
+
+    // Optimistic update
+    set((state) => {
+      if (!state.activeGroup) return state;
+      const updatedMessages = state.activeGroup.messages.map((m) => {
+        if (m.id !== messageId) return m;
+        const existing = m.reactions || [];
+        const alreadyReacted = existing.some((r) => r.user === ourNode && r.emoji === emoji);
+        const reactions = alreadyReacted
+          ? existing.filter((r) => !(r.user === ourNode && r.emoji === emoji))
+          : [...existing, { emoji, user: ourNode, timestamp: Math.floor(Date.now() / 1000) }];
+        return { ...m, reactions };
+      });
+      return {
+        ...state,
+        activeGroup: { ...state.activeGroup, messages: updatedMessages },
+      };
+    });
+
+    try {
+      if (hasReacted) {
+        await Chat.remove_group_reaction({
+          group_id: groupId,
+          message_id: messageId,
+          emoji,
+        });
+      } else {
+        await Chat.add_group_reaction({
+          group_id: groupId,
+          message_id: messageId,
+          emoji,
+        });
+      }
+    } catch (error) {
+      console.error('[GROUPS] Failed to toggle reaction', error);
+      get().refreshActiveGroup();
+    }
+  },
+
+  editMessage: async (messageId: string, newContent: string) => {
+    const groupId = get().activeGroupId;
+    if (!groupId) return;
+
+    try {
+      await Chat.edit_message({
+        chat_id: groupId,
+        message_id: messageId,
+        new_content: newContent,
+      });
+      await get().refreshActiveGroup();
+    } catch (error) {
+      console.error('[GROUPS] Failed to edit message', error);
+      set({ error: 'Failed to edit message' });
+    }
+  },
+
+  deleteMessage: async (messageId: string) => {
+    const groupId = get().activeGroupId;
+    if (!groupId) return;
+
+    try {
+      await Chat.delete_message({
+        chat_id: groupId,
+        message_id: messageId,
+        delete_for_both: true,
+      });
+      await get().refreshActiveGroup();
+    } catch (error) {
+      console.error('[GROUPS] Failed to delete message', error);
+      set({ error: 'Failed to delete message' });
+    }
+  },
+
+  forwardMessage: async (messageId: string, toGroupId: string) => {
+    const groupId = get().activeGroupId;
+    if (!groupId) return;
+
+    try {
+      await Chat.forward_message({
+        from_chat_id: groupId,
+        message_id: messageId,
+        to_chat_id: toGroupId,
+      });
+      // Refresh both the current group and potentially the target group
+      await get().refreshActiveGroup();
+    } catch (error) {
+      console.error('[GROUPS] Failed to forward message', error);
+      set({ error: 'Failed to forward message' });
+    }
+  },
+
+  addReaction: async (messageId: string, emoji: string) => {
+    const groupId = get().activeGroupId;
+    if (!groupId) return;
+
+    try {
+      await Chat.add_group_reaction({
+        group_id: groupId,
+        message_id: messageId,
+        emoji,
+      });
+      await get().refreshActiveGroup();
+    } catch (error) {
+      console.error('[GROUPS] Failed to add reaction', error);
+      set({ error: 'Failed to add reaction' });
+    }
+  },
+
+  removeReaction: async (messageId: string, emoji: string) => {
+    const groupId = get().activeGroupId;
+    if (!groupId) return;
+
+    try {
+      await Chat.remove_group_reaction({
+        group_id: groupId,
+        message_id: messageId,
+        emoji,
+      });
+      await get().refreshActiveGroup();
+    } catch (error) {
+      console.error('[GROUPS] Failed to remove reaction', error);
+      set({ error: 'Failed to remove reaction' });
     }
   },
 

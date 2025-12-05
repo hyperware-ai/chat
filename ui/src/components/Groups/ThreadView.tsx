@@ -15,9 +15,14 @@ interface ThreadViewProps {
   canSend: boolean;
   disabledReason?: string;
   canStartThread: boolean;
-  onSend: (content: string) => Promise<void>;
-  onStartThread?: (parentThreadId: string) => Promise<void>;
+  onSend: (content: string, replyTo?: string | null) => Promise<void>;
+  onStartThread?: (parentThreadId: string, rootMessageId?: string) => Promise<void>;
   onOpenThread: (threadId: string) => void;
+  onReply?: (messageId: string) => void;
+  onEdit?: (messageId: string, content: string) => void;
+  onDelete?: (messageId: string) => void;
+  onForward?: (messageId: string) => void;
+  onReact?: (messageId: string, emoji: string) => void;
 }
 
 const ThreadView: React.FC<ThreadViewProps> = ({
@@ -31,20 +36,53 @@ const ThreadView: React.FC<ThreadViewProps> = ({
   onSend,
   onStartThread,
   onOpenThread,
+  onReply,
+  onEdit,
+  onDelete,
+  onForward,
+  onReact,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
 
   const threadMeta = useMemo(() => threads.find((t) => t.id === threadId), [threads, threadId]);
+  const threadMap = useMemo(() => {
+    const map = new Map<string, ThreadWithId>();
+    threads.forEach((t) => map.set(t.id, t));
+    return map;
+  }, [threads]);
   const rootThreadId = useMemo(
     () => threads.find((t) => t.depth === 0)?.id ?? null,
     [threads],
   );
+  const threadPath = useMemo(() => {
+    if (!threadId) return [];
+    const path: ThreadWithId[] = [];
+    let current: ThreadWithId | undefined | null = threadMap.get(threadId);
+    while (current) {
+      path.unshift(current);
+      const parentRef = current.parent as any;
+      if (parentRef && 'Thread' in parentRef) {
+        const parentId = parentRef.Thread as string;
+        current = threadMap.get(parentId);
+      } else {
+        current = null;
+      }
+    }
+    return path;
+  }, [threadId, threadMap]);
 
-  const filtered = useMemo(
-    () => (threadId ? messages.filter((m) => m.threadId === threadId) : []),
-    [messages, threadId],
-  );
+  const filtered = useMemo(() => {
+    if (!threadId) return [];
+    // Only include messages that belong to this thread
+    // Don't include the root message here since it's shown separately
+    return messages.filter((m) => m.threadId === threadId);
+  }, [messages, threadId]);
+
+  const rootMessage = useMemo(() => {
+    if (!threadMeta?.root_message_id) return null;
+    return messages.find((m) => m.id === threadMeta.root_message_id) || null;
+  }, [messages, threadMeta?.root_message_id]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -73,20 +111,31 @@ const ThreadView: React.FC<ThreadViewProps> = ({
     <div className="thread-view">
       <div className="thread-header">
         <div className="thread-crumbs">
-          <button
-            className="crumb-link"
-            onClick={() => rootThreadId && onOpenThread(rootThreadId)}
-            disabled={!rootThreadId || threadMeta?.depth === 0}
-          >
-            Main thread
-          </button>
-          {threadMeta?.depth !== undefined && threadMeta.depth > 0 && (
-            <>
-              <span className="crumb-sep">/</span>
-              <span className="crumb-current">
-                {threadMeta?.title || `Thread ${threadMeta?.id ?? ''}`}
-              </span>
-            </>
+          {threadPath.length === 0 ? (
+            <button
+              className="crumb-link"
+              onClick={() => rootThreadId && onOpenThread(rootThreadId)}
+              disabled={!rootThreadId || threadMeta?.depth === 0}
+            >
+              Main thread
+            </button>
+          ) : (
+            threadPath.map((crumb, idx) => {
+              const isLast = idx === threadPath.length - 1;
+              const label = crumb.depth === 0 ? 'Main thread' : crumb.title || `Thread ${crumb.id}`;
+              return (
+                <React.Fragment key={crumb.id}>
+                  {idx > 0 && <span className="crumb-sep">/</span>}
+                  {isLast ? (
+                    <span className="crumb-current">{label}</span>
+                  ) : (
+                    <button className="crumb-link" onClick={() => onOpenThread(crumb.id)}>
+                      {label}
+                    </button>
+                  )}
+                </React.Fragment>
+              );
+            })
           )}
         </div>
         <div className="thread-sub">
@@ -96,6 +145,22 @@ const ThreadView: React.FC<ThreadViewProps> = ({
       </div>
 
       <div className="thread-messages">
+        {/* Show root message at the top if it exists and is from a different thread */}
+        {rootMessage && rootMessage.threadId !== threadId && (
+          <div className="thread-root-message">
+            <GroupMessage
+              key={`root-${rootMessage.id}`}
+              message={rootMessage}
+              currentNode={currentNode}
+              onOpenThread={undefined}
+              onStartThread={undefined}
+              onJumpToParent={handleJumpToParent}
+              onReact={onReact}
+              isActiveThread={false}
+            />
+          </div>
+        )}
+
         {filtered.length === 0 ? (
           <div className="thread-empty">No messages yet. Start the conversation!</div>
         ) : (
@@ -105,14 +170,19 @@ const ThreadView: React.FC<ThreadViewProps> = ({
               ref={(el) => registerMessageRef(msg.id, el)}
               message={msg}
               currentNode={currentNode}
-              onOpenThread={onOpenThread}
+              onOpenThread={undefined}
               onStartThread={
                 canStartThread && onStartThread
-                  ? (parentId) => onStartThread(parentId)
+                  ? (parentId, rootMsgId) => onStartThread(parentId, rootMsgId)
                   : undefined
               }
               onJumpToParent={handleJumpToParent}
-              isActiveThread={msg.threadId === threadId}
+              onReply={onReply}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onForward={onForward}
+              onReact={onReact}
+              isActiveThread={false}
             />
           ))
         )}

@@ -5,7 +5,6 @@ import { useChatStore } from '../../store/chat';
 import { hasGroupPermission } from '../../constants/group';
 import GroupMessage from './GroupMessage';
 import GroupMessageInput from './GroupMessageInput';
-import GroupStatusBar from './GroupStatusBar';
 import GroupMembersModal from './GroupMembersModal';
 import GroupReplicationPanel from './GroupReplicationPanel';
 import GroupSettingsModal from './GroupSettingsModal';
@@ -23,6 +22,10 @@ const GroupView: React.FC = () => {
     clearActiveGroup,
     createThread,
     sendMessage,
+    editMessage,
+    deleteMessage,
+    forwardMessage,
+    toggleReaction,
     refreshActiveGroup,
     subscriberEvents,
     replication,
@@ -118,10 +121,19 @@ const GroupView: React.FC = () => {
     await createThread(title, activeGroup.rootThreadId);
   };
 
-  const handleStartThreadFromMessage = async (parentThreadId: string) => {
+  const handleStartThreadFromMessage = async (parentThreadId: string, rootMessageId?: string) => {
     if (!canCreateThread) return;
-    const title = window.prompt('Thread title (optional)') || null;
-    await createThread(title, parentThreadId);
+    let title: string | null = null;
+    if (rootMessageId) {
+      const rootMessage = activeGroup.messages.find((m) => m.id === rootMessageId);
+      if (rootMessage) {
+        const maxLen = 50;
+        title = rootMessage.content.length > maxLen
+          ? rootMessage.content.substring(0, maxLen).trim() + '…'
+          : rootMessage.content.trim();
+      }
+    }
+    await createThread(title, parentThreadId, rootMessageId || null);
   };
 
   const handleFetchWhitelist = async () => {
@@ -129,6 +141,29 @@ const GroupView: React.FC = () => {
     setIsFetchingWhitelist(true);
     await fetchWhitelist(activeGroup.id);
     setIsFetchingWhitelist(false);
+  };
+
+  const handleReply = (messageId: string) => {
+    // For now, just pass the messageId to sendMessage
+    // Could implement a reply UI state here
+    const message = activeGroup?.messages.find((m) => m.id === messageId);
+    if (message) {
+      const replyText = window.prompt(`Reply to "${message.content.substring(0, 50)}..."`);
+      if (replyText) {
+        sendMessage(replyText, messageId);
+      }
+    }
+  };
+
+  const handleForward = (messageId: string) => {
+    const targetGroupId = window.prompt('Enter target group ID to forward to:');
+    if (targetGroupId) {
+      forwardMessage(messageId, targetGroupId);
+    }
+  };
+
+  const handleReact = (messageId: string, emoji: string) => {
+    toggleReaction(messageId, emoji);
   };
 
   return (
@@ -139,22 +174,8 @@ const GroupView: React.FC = () => {
         </button>
         <div className="group-header-info">
           <div className="group-header-name">{activeGroup.metadata.name}</div>
-          <div className="group-header-sub">
-            <span>{activeGroup.members.size} members</span>
-            <span className="dot">•</span>
-            <span>{threads.length} threads</span>
-            {role && (
-              <>
-                <span className="dot">•</span>
-                <span>Role: {role.label}</span>
-              </>
-            )}
-          </div>
         </div>
         <div className="group-header-actions">
-          <div className="group-dev-badge" aria-label="Development preview">
-            Dev preview
-          </div>
           <button className="group-settings" onClick={() => setShowSettings(true)}>
             Settings
           </button>
@@ -167,29 +188,14 @@ const GroupView: React.FC = () => {
         </div>
       </header>
 
-      <GroupStatusBar
-        replication={replicationState}
-        events={groupEvents}
-        onRefresh={refreshActiveGroup}
-        isSyncing={isSyncing}
-      />
-
       <GroupReplicationPanel
         replication={replicationState}
         whitelist={whitelist}
-        onRefresh={refreshActiveGroup}
-        onFetchWhitelist={handleFetchWhitelist}
-        isFetchingWhitelist={isFetchingWhitelist}
       />
 
       <section className="group-thread-section">
         <div className="group-thread-header">
-          <div>
-            <div className="section-title">Threads</div>
-            <div className="section-sub">
-              Fully separated from the main chat, sorted by recent activity.
-            </div>
-          </div>
+          <div />
           {canCreateThread && (
             <button className="thread-add" onClick={handleCreateThread}>
               + Thread
@@ -217,6 +223,11 @@ const GroupView: React.FC = () => {
               onSend={sendMessage}
               onStartThread={canCreateThread ? handleStartThreadFromMessage : undefined}
               onOpenThread={(id) => setActiveThread(id)}
+              onReply={handleReply}
+              onEdit={editMessage}
+              onDelete={deleteMessage}
+              onForward={handleForward}
+              onReact={handleReact}
             />
           </div>
         </div>

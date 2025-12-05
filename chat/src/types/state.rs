@@ -23,6 +23,7 @@ use super::model::{
     generate_group_id, group_root_thread_id, membership_proposal_key, sync_member_membership_sets,
 };
 use super::model::*;
+use crate::WsServerMessage;
 use super::replication::{
     BrokerEnvelope, ReplicationKind, ReplicationMetrics, ReplicationTask, ReplicationTx,
     ReplicationWakeRx, ReplicationWakeTx, SubscriberDeliveryEvent,
@@ -664,6 +665,10 @@ impl ChatState {
         self.update_local_hub_sync_state(group_id, &state_vector);
         // enqueue per-peer fanout for hubs and subscribers
         self.enqueue_replication_pushes(group_id, state_vector.encode_v1());
+        // Notify browser clients so they can refresh group state without polling.
+        self.broadcast_ws_message(&WsServerMessage::GroupUpdate {
+            group_id: group_id.clone(),
+        });
         Ok(())
     }
 
@@ -809,9 +814,20 @@ impl ChatState {
     }
 
     pub fn get_group_state(&self, req: GetGroupReq) -> GetGroupRes {
-        GetGroupRes {
-            group: self.groups.get(&req.group_id).cloned(),
+        let group = self.groups.get(&req.group_id).cloned();
+        if let Some(ref g) = group {
+            for msg in g.messages.values() {
+                if !msg.reactions.is_empty() {
+                    println!(
+                        "[GET_GROUP] msg_id={} has {} reactions: {:?}",
+                        msg.message_id,
+                        msg.reactions.len(),
+                        msg.reactions.iter().map(|r| &r.emoji).collect::<Vec<_>>()
+                    );
+                }
+            }
         }
+        GetGroupRes { group }
     }
 
     pub fn create_group_thread_state(
@@ -859,6 +875,23 @@ impl ChatState {
                     )
                 };
 
+            // Validate and attach root message if provided.
+            let root_message_id = if let Some(root_id) = req.root_message_id.take() {
+                let msg = group
+                    .messages
+                    .get(&root_id)
+                    .ok_or_else(|| "Root message not found".to_string())?;
+                // Ensure the message belongs to the chosen parent thread (or root).
+                if let Some(parent_id) = &parent_child {
+                    if &msg.thread_id != parent_id {
+                        return Err("Root message does not belong to parent thread".to_string());
+                    }
+                }
+                Some(root_id)
+            } else {
+                None
+            };
+
             let mut thread = Thread::new(
                 thread_id.clone(),
                 req.group_id.clone(),
@@ -869,6 +902,7 @@ impl ChatState {
             );
             thread.title = req.title.take();
             thread.summary.last_activity = now;
+            thread.root_message_id = root_message_id;
 
             group.threads.insert(thread_id.clone(), thread);
             if let Some(parent_id) = parent_child {
