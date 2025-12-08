@@ -94,6 +94,18 @@ const ThreadView: React.FC<ThreadViewProps> = ({
     return messages.find((m) => m.id === threadMeta.root_message_id) || null;
   }, [messages, threadMeta?.root_message_id]);
 
+  // Map message IDs to threads that have them as root (for showing thread indicators)
+  // Exclude the current thread to avoid showing "has thread" for messages in their own thread
+  const messageToChildThread = useMemo(() => {
+    const map = new Map<string, { id: string; title: string | null }>();
+    threads.forEach((t) => {
+      if (t.root_message_id && t.id !== threadId) {
+        map.set(t.root_message_id, { id: t.id, title: t.title || null });
+      }
+    });
+    return map;
+  }, [threads, threadId]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [filtered.length, threadId]);
@@ -180,7 +192,7 @@ const ThreadView: React.FC<ThreadViewProps> = ({
               ref={(el) => registerMessageRef(msg.id, el)}
               message={msg}
               currentNode={currentNode}
-              onOpenThread={undefined}
+              onOpenThread={onOpenThread}
               onStartThread={
                 canStartThread && onStartThread
                   ? (parentId, rootMsgId) => onStartThread(parentId, rootMsgId)
@@ -193,6 +205,7 @@ const ThreadView: React.FC<ThreadViewProps> = ({
               onForward={onForward}
               onReact={onReact}
               isActiveThread={false}
+              childThread={messageToChildThread.get(msg.id) || null}
             />
           ))
         )}

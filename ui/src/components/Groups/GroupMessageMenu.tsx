@@ -39,9 +39,7 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
     const optionCount = [
       Boolean(onJumpToParent && message.replyTo),
       true, // Copy always present
-      Boolean(onOpenThread),
-      Boolean(onStartThread),
-    ].filter(Boolean).length;
+    ].filter(Boolean).length + 5; // Reply, Forward, React, Edit, Delete
 
     const menuHeight = Math.max(140, optionCount * 44);
     const menuWidth = 170;
@@ -61,7 +59,7 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
     left = Math.max(padding, left);
 
     return { top, left };
-  }, [position, onOpenThread, onStartThread, onJumpToParent, message.replyTo]);
+  }, [position, onJumpToParent, message.replyTo]);
 
   const handleCopy = () => {
     if (navigator.clipboard) {
@@ -173,27 +171,6 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
               }}
             >
               Jump to parent
-            </button>
-          )}
-          {onOpenThread && (
-            <button
-              onClick={() => {
-                onOpenThread(message.threadId);
-                onClose();
-              }}
-              disabled={isActiveThread}
-            >
-              {isActiveThread ? 'Viewing thread' : 'Open thread'}
-            </button>
-          )}
-          {onStartThread && (
-            <button
-              onClick={() => {
-                onStartThread(message.threadId, message.id);
-                onClose();
-              }}
-            >
-              Start sub-thread
             </button>
           )}
         </div>

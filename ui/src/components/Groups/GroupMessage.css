@@ -79,3 +79,65 @@
   gap: 4px;
   margin-top: 4px;
 }
+
+.group-message-thread-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px dashed var(--border-color, #ccc);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.group-message-thread-indicator:hover {
+  background: rgba(0, 0, 0, 0.05);
+  border-style: solid;
+}
+
+.group-message-thread-indicator.has-thread {
+  background: rgba(0, 0, 0, 0.05);
+  border: none;
+  color: var(--primary-color, #007aff);
+}
+
+.group-message-thread-indicator.has-thread:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.group-message.mine .group-message-thread-indicator {
+  border-color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.group-message.mine .group-message-thread-indicator:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.group-message.mine .group-message-thread-indicator.has-thread {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: white;
+}
+
+.group-message.mine .group-message-thread-indicator.has-thread:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.thread-icon {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.thread-label {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
