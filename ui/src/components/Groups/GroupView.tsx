@@ -8,7 +8,7 @@ import GroupMessageInput from './GroupMessageInput';
 import GroupMembersModal from './GroupMembersModal';
 import GroupReplicationPanel from './GroupReplicationPanel';
 import GroupSettingsModal from './GroupSettingsModal';
-import ThreadsList from './ThreadsList';
+import ThreadsDropdown from './ThreadsDropdown';
 import ThreadView from './ThreadView';
 import './GroupView.css';
 
@@ -18,13 +18,13 @@ const GroupView: React.FC = () => {
   const {
     activeGroup,
     activeThreadId,
+    draftThread,
     setActiveThread,
     clearActiveGroup,
-    createThread,
+    startDraftThread,
     sendMessage,
     editMessage,
     deleteMessage,
-    forwardMessage,
     toggleReaction,
     refreshActiveGroup,
     subscriberEvents,
@@ -35,10 +35,14 @@ const GroupView: React.FC = () => {
     fetchWhitelist,
     replyingTo,
     setReplyingTo,
+    editingMessage,
+    setEditingMessage,
   } = useGroupStore();
   const { nodeId } = useChatStore();
   const [showMembers, setShowMembers] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showThreads, setShowThreads] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const [isFetchingWhitelist, setIsFetchingWhitelist] = useState(false);
 
   useEffect(() => {
@@ -117,25 +121,17 @@ const GroupView: React.FC = () => {
   );
   const replicationState = replication[activeGroup.id];
 
-  const handleCreateThread = async () => {
+  const handleCreateThread = () => {
     if (!canCreateThread) return;
-    const title = window.prompt('Thread title (optional)') || null;
-    await createThread(title, activeGroup.rootThreadId);
+    setShowThreads(false);
+    // Start a draft thread - actual creation happens when first message is sent
+    startDraftThread(activeGroup.rootThreadId || '', null);
   };
 
-  const handleStartThreadFromMessage = async (parentThreadId: string, rootMessageId?: string) => {
+  const handleStartThreadFromMessage = (parentThreadId: string, rootMessageId?: string) => {
     if (!canCreateThread) return;
-    let title: string | null = null;
-    if (rootMessageId) {
-      const rootMessage = activeGroup.messages.find((m) => m.id === rootMessageId);
-      if (rootMessage) {
-        const maxLen = 50;
-        title = rootMessage.content.length > maxLen
-          ? rootMessage.content.substring(0, maxLen).trim() + '…'
-          : rootMessage.content.trim();
-      }
-    }
-    await createThread(title, parentThreadId, rootMessageId || null);
+    // Start a draft thread - actual creation happens when first message is sent
+    startDraftThread(parentThreadId, rootMessageId || null);
   };
 
   const handleFetchWhitelist = async () => {
@@ -156,13 +152,6 @@ const GroupView: React.FC = () => {
     setReplyingTo(null);
   };
 
-  const handleForward = (messageId: string) => {
-    const targetGroupId = window.prompt('Enter target group ID to forward to:');
-    if (targetGroupId) {
-      forwardMessage(messageId, targetGroupId);
-    }
-  };
-
   const handleReact = (messageId: string, emoji: string) => {
     toggleReaction(messageId, emoji);
   };
@@ -176,16 +165,60 @@ const GroupView: React.FC = () => {
         <div className="group-header-info">
           <div className="group-header-name">{activeGroup.metadata.name}</div>
         </div>
-        <div className="group-header-actions">
-          <button className="group-settings" onClick={() => setShowSettings(true)}>
-            Settings
+        <div className="group-menu-wrapper">
+          <button className="group-menu-btn" onClick={() => setShowMenu(!showMenu)} aria-label="Group menu">
+            ⚙️
           </button>
-          <button className="group-members" onClick={() => setShowMembers(true)}>
-            Members
-          </button>
-          <button className="group-sync" onClick={refreshActiveGroup}>
-            {isSyncing ? 'Syncing…' : 'Sync'}
-          </button>
+          {showMenu && (
+            <>
+              <div className="group-menu-overlay" onClick={() => setShowMenu(false)} />
+              <div className="group-menu-dropdown">
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowThreads(true);
+                  }}
+                >
+                  Threads
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    refreshActiveGroup();
+                  }}
+                >
+                  {isSyncing ? 'Syncing…' : 'Sync'}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowMembers(true);
+                  }}
+                >
+                  Members
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowSettings(true);
+                  }}
+                >
+                  Settings
+                </button>
+              </div>
+            </>
+          )}
+          {showThreads && (
+            <ThreadsDropdown
+              threads={threads}
+              activeThreadId={selectedThreadId}
+              rootThreadId={activeGroup.rootThreadId}
+              onSelect={(id) => setActiveThread(id)}
+              onClose={() => setShowThreads(false)}
+              canCreateThread={canCreateThread}
+              onCreateThread={handleCreateThread}
+            />
+          )}
         </div>
       </header>
 
@@ -195,26 +228,10 @@ const GroupView: React.FC = () => {
       />
 
       <section className="group-thread-section">
-        <div className="group-thread-header">
-          <div />
-          {canCreateThread && (
-            <button className="thread-add" onClick={handleCreateThread}>
-              + Thread
-            </button>
-          )}
-        </div>
-
         <div className="group-thread-layout">
-          <div className="thread-list-column">
-            <ThreadsList
-              threads={threads}
-              activeThreadId={selectedThreadId}
-              onSelect={(id) => setActiveThread(id)}
-            />
-          </div>
           <div className="thread-view-column">
             <ThreadView
-              threadId={selectedThreadId}
+              threadId={draftThread ? null : selectedThreadId}
               threads={threads}
               messages={activeGroup.messages}
               currentNode={nodeId}
@@ -222,14 +239,17 @@ const GroupView: React.FC = () => {
               disabledReason={disabledReason}
               canStartThread={canCreateThread}
               replyingTo={replyingTo}
+              draftThread={draftThread}
+              editingMessage={editingMessage}
               onSend={sendMessage}
               onStartThread={canCreateThread ? handleStartThreadFromMessage : undefined}
               onOpenThread={(id) => setActiveThread(id)}
               onReply={handleReply}
               onCancelReply={handleCancelReply}
+              onSetEditingMessage={setEditingMessage}
+              onCancelEdit={() => setEditingMessage(null)}
               onEdit={editMessage}
               onDelete={deleteMessage}
-              onForward={handleForward}
               onReact={handleReact}
             />
           </div>

@@ -2,20 +2,24 @@ import React, { useMemo, useState } from 'react';
 import { GroupMessage } from '../../types/groups';
 import '../Chat/MessageMenu.css';
 
+interface ChildThreadInfo {
+  id: string;
+  title: string | null;
+}
+
 interface GroupMessageMenuProps {
   message: GroupMessage;
   position: { x: number; y: number };
   onClose: () => void;
   onStartThread?: (parentThreadId: string, rootMessageId?: string) => void | Promise<void>;
   onOpenThread?: (threadId: string) => void;
-  onJumpToParent?: (parentId: string) => void;
   onReply?: (messageId: string) => void;
-  onEdit?: (messageId: string, content: string) => void;
+  onSetEditingMessage?: (message: { id: string; content: string }) => void;
   onDelete?: (messageId: string) => void;
-  onForward?: (messageId: string) => void;
   onReact?: (messageId: string, emoji: string) => void;
   isActiveThread?: boolean;
   currentNode?: string | null;
+  childThread?: ChildThreadInfo | null;
 }
 
 const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
@@ -24,24 +28,16 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
   onClose,
   onStartThread,
   onOpenThread,
-  onJumpToParent,
   onReply,
-  onEdit,
+  onSetEditingMessage,
   onDelete,
-  onForward,
   onReact,
-  isActiveThread,
   currentNode,
+  childThread,
 }) => {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const menuStyle = useMemo(() => {
-    // Rough menu sizing based on how many options we render.
-    const optionCount = [
-      Boolean(onJumpToParent && message.replyTo),
-      true, // Copy always present
-    ].filter(Boolean).length + 5; // Reply, Forward, React, Edit, Delete
-
-    const menuHeight = Math.max(140, optionCount * 44);
+    const menuHeight = 240;
     const menuWidth = 170;
     const padding = 10;
 
@@ -59,7 +55,7 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
     left = Math.max(padding, left);
 
     return { top, left };
-  }, [position, onJumpToParent, message.replyTo]);
+  }, [position]);
 
   const handleCopy = () => {
     if (navigator.clipboard) {
@@ -76,11 +72,8 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
   };
 
   const handleEdit = () => {
-    if (onEdit) {
-      const newContent = window.prompt('Edit message:', message.content);
-      if (newContent && newContent !== message.content) {
-        onEdit(message.id, newContent);
-      }
+    if (onSetEditingMessage) {
+      onSetEditingMessage({ id: message.id, content: message.content });
       onClose();
     }
   };
@@ -90,13 +83,6 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
       if (window.confirm('Are you sure you want to delete this message?')) {
         onDelete(message.id);
       }
-      onClose();
-    }
-  };
-
-  const handleForward = () => {
-    if (onForward) {
-      onForward(message.id);
       onClose();
     }
   };
@@ -150,29 +136,35 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
           <button onClick={handleReply} disabled={!onReply}>
             Reply
           </button>
-          <button onClick={handleForward} disabled={!onForward}>
-            Forward
-          </button>
+          {childThread && onOpenThread ? (
+            <button
+              onClick={() => {
+                onOpenThread(childThread.id);
+                onClose();
+              }}
+            >
+              Open thread
+            </button>
+          ) : onStartThread ? (
+            <button
+              onClick={() => {
+                onStartThread(message.threadId, message.id);
+                onClose();
+              }}
+            >
+              Start thread
+            </button>
+          ) : null}
           <button onClick={handleCopy}>Copy</button>
           <button onClick={handleReact} disabled={!onReact}>
             React
           </button>
-          <button onClick={handleEdit} disabled={!onEdit || !isMyMessage}>
+          <button onClick={handleEdit} disabled={!onSetEditingMessage || !isMyMessage}>
             Edit
           </button>
           <button onClick={handleDelete} disabled={!onDelete || !isMyMessage}>
             Delete
           </button>
-          {onJumpToParent && message.replyTo && (
-            <button
-              onClick={() => {
-                onJumpToParent(message.replyTo!);
-                onClose();
-              }}
-            >
-              Jump to parent
-            </button>
-          )}
         </div>
       )}
     </>

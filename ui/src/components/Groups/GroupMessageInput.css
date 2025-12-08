@@ -4,7 +4,8 @@
   background: var(--background);
 }
 
-.group-reply-preview {
+.group-reply-preview,
+.group-edit-preview {
   padding: 8px 12px;
   margin-bottom: 8px;
   background: var(--surface);
@@ -12,20 +13,27 @@
   border-left: 3px solid var(--primary-color, #007aff);
 }
 
-.group-reply-info {
+.group-reply-info,
+.group-edit-info {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 4px;
 }
 
-.group-reply-label {
+.group-reply-label,
+.group-edit-label {
   font-size: 12px;
   color: var(--text-secondary);
   font-weight: 500;
 }
 
-.group-cancel-reply {
+.group-edit-label {
+  color: var(--primary-color, #007aff);
+}
+
+.group-cancel-reply,
+.group-cancel-edit {
   background: none;
   border: none;
   color: var(--text-secondary);
@@ -35,12 +43,14 @@
   border-radius: 4px;
 }
 
-.group-cancel-reply:hover {
+.group-cancel-reply:hover,
+.group-cancel-edit:hover {
   background: var(--border-color);
   color: var(--text-primary);
 }
 
-.group-reply-content {
+.group-reply-content,
+.group-edit-content {
   font-size: 13px;
   color: var(--text-primary);
   opacity: 0.8;
@@ -95,4 +105,9 @@
 
 .group-input-row.disabled {
   opacity: 0.6;
+}
+
+.group-input-row.editing {
+  background: rgba(0, 122, 255, 0.05);
+  border-color: var(--primary-color, #007aff);
 }

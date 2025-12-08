@@ -141,3 +141,69 @@
   text-overflow: ellipsis;
   max-width: 150px;
 }
+
+/* Reply preview */
+.group-message-reply-to {
+  max-width: 85%;
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border-left: 3px solid var(--primary-color, #007aff);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.group-message-reply-to:hover {
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.group-message.mine .group-message-reply-to {
+  align-self: flex-end;
+  background: rgba(255, 255, 255, 0.15);
+  border-left-color: rgba(255, 255, 255, 0.5);
+}
+
+.group-message.mine .group-message-reply-to:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.group-message-reply-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+  font-weight: 500;
+}
+
+.group-message.mine .group-message-reply-label {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.group-message-reply-content {
+  font-size: 13px;
+  color: var(--text-primary);
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.group-message.mine .group-message-reply-content {
+  color: white;
+  opacity: 0.9;
+}
+
+/* Highlight animation for scrolled-to messages */
+.group-message.highlight .group-message-bubble {
+  animation: highlight-pulse 2s ease-out;
+}
+
+@keyframes highlight-pulse {
+  0% {
+    box-shadow: 0 0 0 3px var(--primary-color, #007aff);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}

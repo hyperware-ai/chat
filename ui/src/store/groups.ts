@@ -209,13 +209,21 @@ function normalizeGroup(
   };
 }
 
+interface DraftThread {
+  parentThreadId: string;
+  rootMessageId: string | null;
+  title: string | null;
+}
+
 interface GroupStore {
   groups: Chat.GroupSummary[];
   groupPreviews: Record<string, GroupPreview>;
   activeGroupId: string | null;
   activeGroup: NormalizedGroup | null;
   activeThreadId: string | null;
+  draftThread: DraftThread | null;
   replyingTo: GroupMessage | null;
+  editingMessage: { id: string; content: string } | null;
   subscriberEvents: Chat.SubscriberDeliveryEvent[];
   replication: Record<string, Chat.GroupReplicationState>;
   replicationMetrics: Chat.ReplicationMetrics | null;
@@ -236,6 +244,12 @@ interface GroupStore {
   setActiveThread: (threadId: string) => void;
   clearActiveGroup: () => void;
   setReplyingTo: (message: GroupMessage | null) => void;
+  setEditingMessage: (message: { id: string; content: string } | null) => void;
+  startDraftThread: (
+    parentThreadId: string,
+    rootMessageId?: string | null,
+  ) => void;
+  clearDraftThread: () => void;
   createThread: (
     title: string | null,
     parentThreadId?: string | null,
@@ -264,7 +278,9 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
   activeGroupId: null,
   activeGroup: null,
   activeThreadId: null,
+  draftThread: null,
   replyingTo: null,
+  editingMessage: null,
   subscriberEvents: [],
   replication: {},
   replicationMetrics: null,
@@ -431,18 +447,45 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     }
   },
 
-  setActiveThread: (threadId: string) => set({ activeThreadId: threadId }),
+  setActiveThread: (threadId: string) => set({ activeThreadId: threadId, draftThread: null }),
 
   clearActiveGroup: () =>
     set({
       activeGroup: null,
       activeGroupId: null,
       activeThreadId: null,
+      draftThread: null,
       replyingTo: null,
       isSyncing: false,
     }),
 
   setReplyingTo: (message) => set({ replyingTo: message }),
+
+  setEditingMessage: (message) => set({ editingMessage: message }),
+
+  startDraftThread: (parentThreadId: string, rootMessageId: string | null = null) => {
+    const activeGroup = get().activeGroup;
+    if (!activeGroup) return;
+
+    // Generate title from root message if available
+    let title: string | null = null;
+    if (rootMessageId) {
+      const rootMessage = activeGroup.messages.find((m) => m.id === rootMessageId);
+      if (rootMessage) {
+        const maxLen = 50;
+        title = rootMessage.content.length > maxLen
+          ? rootMessage.content.substring(0, maxLen).trim() + '…'
+          : rootMessage.content.trim();
+      }
+    }
+
+    set({
+      draftThread: { parentThreadId, rootMessageId, title },
+      activeThreadId: null, // Clear active thread to show draft view
+    });
+  },
+
+  clearDraftThread: () => set({ draftThread: null }),
 
   createThread: async (title, parentThreadIdOverride = null, rootMessageId = null) => {
     const groupId = get().activeGroupId;
@@ -467,9 +510,9 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         title: title || null,
         root_message_id: rootMessageId ?? null,
       });
-      // Set the active thread BEFORE refreshing so it doesn't get reset to root
-      set({ activeThreadId: res.thread_id });
       await get().refreshActiveGroup();
+      // Set the active thread AFTER refreshing to ensure it sticks
+      set({ activeThreadId: res.thread_id });
       return res.thread_id;
     } catch (error) {
       console.error('[GROUPS] Failed to create thread', error);
@@ -480,8 +523,26 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
 
   sendMessage: async (content: string, replyTo: string | null = null) => {
     const groupId = get().activeGroupId;
-    const threadId = get().activeThreadId;
+    let threadId = get().activeThreadId;
+    const draftThread = get().draftThread;
     const sender = (window as any).our?.node || 'me';
+
+    // If we have a draft thread, create it first
+    if (draftThread && !threadId) {
+      console.log('[GROUPS] Creating thread from draft before sending message');
+      const newThreadId = await get().createThread(
+        draftThread.title,
+        draftThread.parentThreadId,
+        draftThread.rootMessageId,
+      );
+      if (!newThreadId) {
+        console.error('[GROUPS] Failed to create thread from draft');
+        return;
+      }
+      threadId = newThreadId;
+      set({ draftThread: null });
+    }
+
     if (!groupId || !threadId) return;
 
     const timestamp = Math.floor(Date.now() / 1000);
@@ -620,8 +681,8 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     if (!groupId) return;
 
     try {
-      await Chat.edit_message({
-        chat_id: groupId,
+      await Chat.edit_group_message({
+        group_id: groupId,
         message_id: messageId,
         new_content: newContent,
       });
@@ -637,8 +698,8 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     if (!groupId) return;
 
     try {
-      await Chat.delete_message({
-        chat_id: groupId,
+      await Chat.delete_group_message({
+        group_id: groupId,
         message_id: messageId,
         delete_for_both: true,
       });

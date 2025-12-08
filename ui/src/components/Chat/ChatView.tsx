@@ -17,8 +17,7 @@ const ChatView: React.FC = () => {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [swipeX, setSwipeX] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
-  const [showOfflineTooltip, setShowOfflineTooltip] = useState(false);
-  const [showScrollButton, setShowScrollButton] = useState(false);
+    const [showScrollButton, setShowScrollButton] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);
   const startXRef = useRef(0);
@@ -32,24 +31,7 @@ const ChatView: React.FC = () => {
     if (activeChat) {
       markChatAsRead(activeChat.id);
 
-      // Check if this is a new chat with no messages or only "Sent" messages
-      // This indicates the node might be offline
-      const hasOnlySentMessages = activeChat.messages.length > 0 &&
-        activeChat.messages.every(msg =>
-          msg.sender !== activeChat.counterparty &&
-          (msg.status === Chat.MessageStatus.Sent || msg.status === Chat.MessageStatus.Sending)
-        );
-
-      const isNewChat = activeChat.messages.length === 0 ||
-        (activeChat.messages.length === 1 && activeChat.messages[0].sender === 'System');
-
-      if (isNewChat || hasOnlySentMessages) {
-        setShowOfflineTooltip(true);
-        // Auto-hide after 10 seconds
-        const timer = setTimeout(() => setShowOfflineTooltip(false), 10000);
-        return () => clearTimeout(timer);
       }
-    }
   }, [activeChat, markChatAsRead]);
 
   useEffect(() => {
@@ -78,11 +60,6 @@ const ChatView: React.FC = () => {
 
     return () => container.removeEventListener('scroll', handleScroll);
   }, [activeChat]);
-
-  // Hide tooltip when user sends a message or taps
-  const handleUserInteraction = () => {
-    setShowOfflineTooltip(false);
-  };
 
   // Scroll to bottom function
   const scrollToBottom = () => {
@@ -212,7 +189,6 @@ const ChatView: React.FC = () => {
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
-      onClick={handleUserInteraction}
       style={{
         transform: `translateX(${swipeX}px)`,
         transition: isSwiping ? 'none' : 'transform 0.3s ease-out',
@@ -220,18 +196,6 @@ const ChatView: React.FC = () => {
       }}
     >
       <ChatHeader chat={activeChat} />
-
-      {showOfflineTooltip && (
-        <div className="offline-tooltip" onClick={handleUserInteraction}>
-          <div className="offline-tooltip-content" style={{ textAlign: 'center' }}>
-            Users can be messaged whether they are online or not. Messages display their delivery status:
-            <br />
-            • ✓ Attempting to deliver message
-            <br />
-            • ✓✓ Message successfully delivered
-          </div>
-        </div>
-      )}
 
       <div
         className="messages-container"
@@ -284,7 +248,7 @@ const ChatView: React.FC = () => {
         </button>
       )}
 
-      <MessageInput chatId={activeChat.id} onSendMessage={handleUserInteraction} />
+      <MessageInput chatId={activeChat.id} />
     </div>
   );
 };

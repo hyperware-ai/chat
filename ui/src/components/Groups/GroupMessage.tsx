@@ -14,13 +14,12 @@ interface GroupMessageProps {
   onStartThread?: (parentThreadId: string, rootMessageId?: string) => void | Promise<void>;
   onOpenThread?: (threadId: string) => void;
   isActiveThread?: boolean;
-  onJumpToParent?: (parentId: string) => void;
   onReply?: (messageId: string) => void;
-  onEdit?: (messageId: string, content: string) => void;
+  onSetEditingMessage?: (message: { id: string; content: string }) => void;
   onDelete?: (messageId: string) => void;
-  onForward?: (messageId: string) => void;
   onReact?: (messageId: string, emoji: string) => void;
   childThread?: ChildThreadInfo | null;
+  allMessages?: GroupMessageType[];
 }
 
 const formatTime = (timestamp: number) => {
@@ -29,7 +28,7 @@ const formatTime = (timestamp: number) => {
 };
 
 const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
-  ({ message, currentNode, onStartThread, onOpenThread, isActiveThread, onJumpToParent, onReply, onEdit, onDelete, onForward, onReact, childThread }, ref) => {
+  ({ message, currentNode, onStartThread, onOpenThread, isActiveThread, onReply, onSetEditingMessage, onDelete, onReact, childThread, allMessages }, ref) => {
     const isMine = currentNode && message.sender === currentNode;
     const statusLabel =
       message.status === 'sending'
@@ -63,23 +62,37 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
       }
     };
 
+    const replyToMessage = message.replyTo && allMessages
+      ? allMessages.find(m => m.id === message.replyTo)
+      : null;
+
+    const handleReplyClick = () => {
+      if (message.replyTo) {
+        const element = document.getElementById(`group-message-${message.replyTo}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          element.classList.add('highlight');
+          setTimeout(() => element.classList.remove('highlight'), 2000);
+        }
+      }
+    };
+
     return (
       <>
-        <div className={`group-message ${isMine ? 'mine' : ''}`} ref={ref}>
+        <div className={`group-message ${isMine ? 'mine' : ''}`} ref={ref} id={`group-message-${message.id}`}>
           {!isMine && <div className="group-message-sender">{message.sender}</div>}
+          {replyToMessage && (
+            <div className="group-message-reply-to" onClick={handleReplyClick}>
+              <div className="group-message-reply-label">↩ Reply to {replyToMessage.sender}</div>
+              <div className="group-message-reply-content">{replyToMessage.content}</div>
+            </div>
+          )}
           <div className="group-message-bubble" onContextMenu={handleContextMenu}>
             <div className="group-message-text">{message.content}</div>
             <div className="group-message-meta">
               <span>{formatTime(message.timestamp)}</span>
               {statusLabel && <span className="group-message-status">{statusLabel}</span>}
             </div>
-            {onJumpToParent && message.replyTo && (
-              <div className="group-message-actions">
-                <button className="link" onClick={() => onJumpToParent(message.replyTo!)}>
-                  Jump to parent
-                </button>
-              </div>
-            )}
             {message.reactions && message.reactions.length > 0 && (
               <div className="group-message-reactions">
                 {Object.entries(groupedReactions).map(([emoji, users]) => (
@@ -96,23 +109,19 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
                 ))}
               </div>
             )}
-            {(childThread || onStartThread) && (
+            {childThread && onOpenThread && (
               <button
                 type="button"
-                className={`group-message-thread-indicator ${childThread ? 'has-thread' : ''}`}
+                className="group-message-thread-indicator has-thread"
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  if (childThread && onOpenThread) {
-                    onOpenThread(childThread.id);
-                  } else if (onStartThread) {
-                    onStartThread(message.threadId, message.id);
-                  }
+                  onOpenThread(childThread.id);
                 }}
               >
                 <span className="thread-icon">↳</span>
                 <span className="thread-label">
-                  {childThread ? (childThread.title || 'Thread') : 'Thread'}
+                  {childThread.title || 'Thread'}
                 </span>
               </button>
             )}
@@ -125,14 +134,12 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
             onClose={() => setMenuPosition(null)}
             onStartThread={onStartThread}
             onOpenThread={onOpenThread}
-            onJumpToParent={onJumpToParent}
             onReply={onReply}
-            onEdit={onEdit}
+            onSetEditingMessage={onSetEditingMessage}
             onDelete={onDelete}
-            onForward={onForward}
             onReact={onReact}
-            isActiveThread={isActiveThread}
             currentNode={currentNode}
+            childThread={childThread}
           />
         )}
       </>

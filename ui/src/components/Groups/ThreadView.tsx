@@ -13,6 +13,17 @@ interface ReplyingToMessage {
   content: string;
 }
 
+interface DraftThread {
+  parentThreadId: string;
+  rootMessageId: string | null;
+  title: string | null;
+}
+
+interface EditingMessage {
+  id: string;
+  content: string;
+}
+
 interface ThreadViewProps {
   threadId: string | null;
   threads: ThreadWithId[];
@@ -22,14 +33,17 @@ interface ThreadViewProps {
   disabledReason?: string;
   canStartThread: boolean;
   replyingTo?: ReplyingToMessage | null;
+  draftThread?: DraftThread | null;
+  editingMessage?: EditingMessage | null;
   onSend: (content: string, replyTo?: string | null) => Promise<void>;
-  onStartThread?: (parentThreadId: string, rootMessageId?: string) => Promise<void>;
+  onStartThread?: (parentThreadId: string, rootMessageId?: string) => void;
   onOpenThread: (threadId: string) => void;
   onReply?: (messageId: string) => void;
   onCancelReply?: () => void;
-  onEdit?: (messageId: string, content: string) => void;
+  onSetEditingMessage?: (message: EditingMessage) => void;
+  onCancelEdit?: () => void;
+  onEdit?: (messageId: string, newContent: string) => void;
   onDelete?: (messageId: string) => void;
-  onForward?: (messageId: string) => void;
   onReact?: (messageId: string, emoji: string) => void;
 }
 
@@ -42,14 +56,17 @@ const ThreadView: React.FC<ThreadViewProps> = ({
   disabledReason,
   canStartThread,
   replyingTo,
+  draftThread,
+  editingMessage,
   onSend,
   onStartThread,
   onOpenThread,
   onReply,
   onCancelReply,
+  onSetEditingMessage,
+  onCancelEdit,
   onEdit,
   onDelete,
-  onForward,
   onReact,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -118,12 +135,61 @@ const ThreadView: React.FC<ThreadViewProps> = ({
     }
   };
 
-  const handleJumpToParent = (parentId: string) => {
-    const target = messageRefs.current.get(parentId);
-    if (target) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  };
+  // Draft thread mode - show empty thread view ready for first message
+  if (draftThread && !threadId) {
+    const parentThread = threads.find((t) => t.id === draftThread.parentThreadId);
+    const draftRootMessage = draftThread.rootMessageId
+      ? messages.find((m) => m.id === draftThread.rootMessageId)
+      : null;
+
+    return (
+      <div className="thread-view">
+        <div className="thread-header">
+          <div className="thread-crumbs">
+            {parentThread && (
+              <>
+                <button className="crumb-link" onClick={() => onOpenThread(parentThread.id)}>
+                  {parentThread.depth === 0 ? 'Main thread' : parentThread.title || `Thread`}
+                </button>
+                <span className="crumb-sep">/</span>
+              </>
+            )}
+            <span className="crumb-current crumb-draft">New Thread</span>
+          </div>
+          <div className="thread-sub">Draft • Send a message to create</div>
+        </div>
+
+        <div className="thread-messages">
+          {draftRootMessage && (
+            <div className="thread-root-message">
+              <GroupMessage
+                key={`root-${draftRootMessage.id}`}
+                message={draftRootMessage}
+                currentNode={currentNode}
+                onOpenThread={undefined}
+                onStartThread={undefined}
+                onReact={onReact}
+                isActiveThread={false}
+                allMessages={messages}
+              />
+            </div>
+          )}
+          <div className="thread-empty">Start this thread by sending a message below.</div>
+        </div>
+
+        <GroupMessageInput
+          onSend={onSend}
+          onEdit={onEdit}
+          disabled={!canSend}
+          disabledReason={disabledReason}
+          replyingTo={replyingTo}
+          onCancelReply={onCancelReply}
+          editingMessage={editingMessage}
+          onCancelEdit={onCancelEdit}
+        />
+      </div>
+    );
+  }
 
   if (!threadId) {
     return <div className="thread-view thread-empty">Select a thread to view its messages.</div>;
@@ -176,9 +242,9 @@ const ThreadView: React.FC<ThreadViewProps> = ({
               currentNode={currentNode}
               onOpenThread={undefined}
               onStartThread={undefined}
-              onJumpToParent={handleJumpToParent}
               onReact={onReact}
               isActiveThread={false}
+              allMessages={messages}
             />
           </div>
         )}
@@ -198,14 +264,13 @@ const ThreadView: React.FC<ThreadViewProps> = ({
                   ? (parentId, rootMsgId) => onStartThread(parentId, rootMsgId)
                   : undefined
               }
-              onJumpToParent={handleJumpToParent}
               onReply={onReply}
-              onEdit={onEdit}
+              onSetEditingMessage={onSetEditingMessage}
               onDelete={onDelete}
-              onForward={onForward}
               onReact={onReact}
               isActiveThread={false}
               childThread={messageToChildThread.get(msg.id) || null}
+              allMessages={messages}
             />
           ))
         )}
@@ -214,10 +279,13 @@ const ThreadView: React.FC<ThreadViewProps> = ({
 
       <GroupMessageInput
         onSend={onSend}
+        onEdit={onEdit}
         disabled={!canSend}
         disabledReason={disabledReason}
         replyingTo={replyingTo}
         onCancelReply={onCancelReply}
+        editingMessage={editingMessage}
+        onCancelEdit={onCancelEdit}
       />
     </div>
   );

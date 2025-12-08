@@ -19,6 +19,7 @@ interface ChatStore {
   error: string | null;
   isLoading: boolean;
   replyingTo: any | null; // Message being replied to
+  editingMessage: { id: string; content: string } | null; // Message being edited
   tempIdToRealId: { [tempId: string]: string }; // Map temp IDs to real message IDs
   pendingMessageHashes: { [hash: string]: string }; // Map content hashes to temp IDs for deduplication
   
@@ -50,6 +51,7 @@ interface ChatStore {
   setError: (error: string | null) => void;
   clearError: () => void;
   setReplyingTo: (message: any | null) => void;
+  setEditingMessage: (message: { id: string; content: string } | null) => void;
 }
 
 // Track if already initialized to prevent double initialization
@@ -87,6 +89,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   error: null,
   isLoading: false,
   replyingTo: null,
+  editingMessage: null,
   tempIdToRealId: {},
   pendingMessageHashes: {},
 
@@ -1059,4 +1062,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   
   // Reply functionality
   setReplyingTo: (message: any | null) => set({ replyingTo: message }),
+
+  // Edit functionality
+  setEditingMessage: (message: { id: string; content: string } | null) => set({ editingMessage: message }),
 }));

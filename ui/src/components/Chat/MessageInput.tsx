@@ -13,12 +13,12 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
   const [message, setMessage] = useState('');
   const [showFileUpload, setShowFileUpload] = useState(false);
   const [showVoiceNote, setShowVoiceNote] = useState(false);
-  const { sendMessage, replyingTo, setReplyingTo } = useChatStore();
+  const { sendMessage, replyingTo, setReplyingTo, editingMessage, setEditingMessage, editMessage } = useChatStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  
+
   // Detect if user is on mobile device (avoid touch-enabled laptops)
   const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-  
+
   // Focus input when replying
   useEffect(() => {
     if (replyingTo) {
@@ -26,20 +26,42 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
     }
   }, [replyingTo]);
 
+  // Focus input and populate when editing
+  useEffect(() => {
+    if (editingMessage) {
+      setMessage(editingMessage.content);
+      inputRef.current?.focus();
+    }
+  }, [editingMessage]);
+
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const messageText = message.trim();
     if (messageText) {
       // Clear input immediately to prevent double send
       setMessage('');
-      const replyToId = replyingTo?.id;
-      setReplyingTo(null); // Clear reply immediately
-      
-      // Send message asynchronously
-      await sendMessage(chatId, messageText, replyToId);
+
+      if (editingMessage) {
+        // Handle edit
+        const editId = editingMessage.id;
+        setEditingMessage(null);
+        if (messageText !== editingMessage.content) {
+          await editMessage(editId, messageText);
+        }
+      } else {
+        // Handle send
+        const replyToId = replyingTo?.id;
+        setReplyingTo(null);
+        await sendMessage(chatId, messageText, replyToId);
+        onSendMessage?.();
+      }
       inputRef.current?.focus();
-      onSendMessage?.(); // Call callback when message is sent
     }
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessage(null);
+    setMessage('');
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -53,11 +75,26 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
 
   return (
     <div className="message-input-wrapper">
-      {replyingTo && (
+      {editingMessage && (
+        <div className="edit-preview">
+          <div className="edit-info">
+            <span className="edit-label">Editing message</span>
+            <button
+              className="cancel-edit"
+              onClick={handleCancelEdit}
+              aria-label="Cancel edit"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="edit-content">{editingMessage.content}</div>
+        </div>
+      )}
+      {replyingTo && !editingMessage && (
         <div className="reply-preview">
           <div className="reply-info">
             <span className="reply-label">Replying to {replyingTo.sender}</span>
-            <button 
+            <button
               className="cancel-reply"
               onClick={() => setReplyingTo(null)}
               aria-label="Cancel reply"
@@ -68,44 +105,46 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
           <div className="reply-content">{replyingTo.content}</div>
         </div>
       )}
-      
-      <div className="message-input-container">
-        <button 
+
+      <div className={`message-input-container ${editingMessage ? 'editing' : ''}`}>
+        <button
           className="attachment-button"
           onClick={() => setShowFileUpload(!showFileUpload)}
           aria-label="Attach file"
+          disabled={!!editingMessage}
         >
           +
         </button>
-      
-      <textarea
-        ref={inputRef}
-        className="message-input"
-        placeholder="Type a message..."
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        onKeyDown={handleKeyDown}
-        rows={1}
-      />
-      
-      {message.trim() ? (
-        <button 
-          className="send-button"
-          onClick={() => handleSubmit()}
-          aria-label="Send message"
-        >
-          ➤
-        </button>
-      ) : (
-        <button 
-          className="voice-button"
-          onClick={() => setShowVoiceNote(!showVoiceNote)}
-          aria-label="Record voice note"
-        >
-          🎤
-        </button>
-      )}
-      
+
+        <textarea
+          ref={inputRef}
+          className="message-input"
+          placeholder={editingMessage ? 'Edit your message...' : 'Type a message...'}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={handleKeyDown}
+          rows={1}
+        />
+
+        {message.trim() ? (
+          <button
+            className={`send-button ${editingMessage ? 'edit-mode' : ''}`}
+            onClick={() => handleSubmit()}
+            aria-label={editingMessage ? 'Save edit' : 'Send message'}
+          >
+            {editingMessage ? '✓' : '➤'}
+          </button>
+        ) : (
+          <button
+            className="voice-button"
+            onClick={() => setShowVoiceNote(!showVoiceNote)}
+            aria-label="Record voice note"
+            disabled={!!editingMessage}
+          >
+            🎤
+          </button>
+        )}
+
         {showFileUpload && <FileUpload onClose={() => setShowFileUpload(false)} />}
         {showVoiceNote && <VoiceNote onClose={() => setShowVoiceNote(false)} />}
       </div>

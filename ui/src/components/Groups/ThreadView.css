@@ -68,6 +68,11 @@
   color: var(--text-primary);
 }
 
+.crumb-draft {
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
 .thread-messages {
   flex: 1;
   overflow-y: auto;
