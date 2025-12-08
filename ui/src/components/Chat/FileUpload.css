@@ -86,3 +86,13 @@
   color: var(--text-secondary);
   text-align: right;
 }
+
+.upload-progress-item.has-error .upload-filename {
+  color: #ff4d4d;
+}
+
+.upload-error {
+  font-size: 12px;
+  color: #ff4d4d;
+  margin-top: 4px;
+}

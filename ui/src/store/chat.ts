@@ -18,7 +18,7 @@ interface ChatStore {
   connectionStatus: 'connected' | 'disconnected' | 'connecting';
   error: string | null;
   isLoading: boolean;
-  replyingTo: any | null; // Message being replied to
+  replyingTo: api.ChatMessage | null; // Message being replied to
   editingMessage: { id: string; content: string } | null; // Message being edited
   tempIdToRealId: { [tempId: string]: string }; // Map temp IDs to real message IDs
   pendingMessageHashes: { [hash: string]: string }; // Map content hashes to temp IDs for deduplication
@@ -50,12 +50,14 @@ interface ChatStore {
   revokeChatKey: (key: string) => Promise<void>;
   setError: (error: string | null) => void;
   clearError: () => void;
-  setReplyingTo: (message: any | null) => void;
+  setReplyingTo: (message: api.ChatMessage | null) => void;
   setEditingMessage: (message: { id: string; content: string } | null) => void;
 }
 
 // Track if already initialized to prevent double initialization
 let isInitialized = false;
+// Store timer handle for cleanup
+let cleanupTimerId: ReturnType<typeof setInterval> | null = null;
 
 // Helper function to generate a hash for message deduplication
 function generateMessageHash(content: string, sender: string, timestamp: number): string {
@@ -105,12 +107,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     isInitialized = true;
     
     // Set up periodic cleanup of temp ID mappings (every 2 minutes)
-    setInterval(() => {
+    // Clear any existing timer first
+    if (cleanupTimerId !== null) {
+      clearInterval(cleanupTimerId);
+    }
+    cleanupTimerId = setInterval(() => {
       const state = get();
       const fiveMinutesAgo = Date.now() / 1000 - 300;
       const cleanedMappings: typeof state.tempIdToRealId = {};
       let cleanedCount = 0;
-      
+
       for (const [tempId, realId] of Object.entries(state.tempIdToRealId)) {
         const match = tempId.match(/^temp-(\d+)-/);
         if (match) {
@@ -122,7 +128,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         }
       }
-      
+
       if (cleanedCount > 0) {
         console.log('[CLEANUP] Removed', cleanedCount, 'old temp ID mappings');
         set({ tempIdToRealId: cleanedMappings });
@@ -758,6 +764,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (ws) {
       ws.disconnect();
       set({ wsConnection: null, connectionStatus: 'disconnected' });
+    }
+    // Clear cleanup timer
+    if (cleanupTimerId !== null) {
+      clearInterval(cleanupTimerId);
+      cleanupTimerId = null;
     }
   },
 
