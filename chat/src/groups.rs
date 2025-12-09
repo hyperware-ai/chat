@@ -169,17 +169,6 @@ impl ChatState {
             }
 
             message.body = req.new_content.clone();
-            message.timestamp = now;
-
-            if let Some(meta) = group.metadata.as_mut() {
-                meta.updated_at = now;
-            }
-
-            if let Some(thread) = group.threads.get_mut(&message.thread_id) {
-                thread.summary.last_activity = now;
-                thread.summary.last_message_id = Some(message.message_id.clone());
-                thread.summary.last_sender = Some(message.sender.clone());
-            }
 
             message.clone()
         };

@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { GroupMessage } from '../../types/groups';
 import '../Chat/MessageMenu.css';
+import GroupDeleteMessageModal from './GroupDeleteMessageModal';
 
 interface ChildThreadInfo {
   id: string;
@@ -36,6 +37,7 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
   childThread,
 }) => {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
   const menuStyle = useMemo(() => {
     const menuHeight = 240;
     const menuWidth = 170;
@@ -80,9 +82,13 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
 
   const handleDelete = () => {
     if (onDelete) {
-      if (window.confirm('Are you sure you want to delete this message?')) {
-        onDelete(message.id);
-      }
+      setShowDeleteModal(true);
+    }
+  };
+
+  const handleConfirmDelete = () => {
+    if (onDelete) {
+      onDelete(message.id);
       onClose();
     }
   };
@@ -98,6 +104,14 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
   return (
     <>
       <div className="menu-overlay" onClick={onClose} />
+      <GroupDeleteMessageModal
+        isOpen={showDeleteModal}
+        onClose={() => {
+          setShowDeleteModal(false);
+          onClose();
+        }}
+        onDeleteForEveryone={handleConfirmDelete}
+      />
       {showEmojiPicker ? (
         <div
           className="emoji-tray"
@@ -136,16 +150,7 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
           <button onClick={handleReply} disabled={!onReply}>
             Reply
           </button>
-          {childThread && onOpenThread ? (
-            <button
-              onClick={() => {
-                onOpenThread(childThread.id);
-                onClose();
-              }}
-            >
-              Open thread
-            </button>
-          ) : onStartThread ? (
+          {!childThread && onStartThread ? (
             <button
               onClick={() => {
                 onStartThread(message.threadId, message.id);
@@ -159,12 +164,12 @@ const GroupMessageMenu: React.FC<GroupMessageMenuProps> = ({
           <button onClick={handleReact} disabled={!onReact}>
             React
           </button>
-          <button onClick={handleEdit} disabled={!onSetEditingMessage || !isMyMessage}>
-            Edit
-          </button>
-          <button onClick={handleDelete} disabled={!onDelete || !isMyMessage}>
-            Delete
-          </button>
+          {isMyMessage && onSetEditingMessage && !childThread && (
+            <button onClick={handleEdit}>Edit</button>
+          )}
+          {isMyMessage && onDelete && !childThread && (
+            <button onClick={handleDelete}>Delete</button>
+          )}
         </div>
       )}
     </>
