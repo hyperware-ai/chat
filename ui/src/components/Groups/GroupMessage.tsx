@@ -120,9 +120,7 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
                 }}
               >
                 <span className="thread-icon">↳</span>
-                <span className="thread-label">
-                  {childThread.title || 'Thread'}
-                </span>
+                <span className="thread-label">Thread</span>
               </button>
             )}
           </div>

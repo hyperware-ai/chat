@@ -29,7 +29,6 @@ const GroupView: React.FC = () => {
     refreshActiveGroup,
     subscriberEvents,
     replication,
-    isSyncing,
     fetchSubscriberEvents,
     whitelists,
     fetchWhitelist,
@@ -180,14 +179,6 @@ const GroupView: React.FC = () => {
                   }}
                 >
                   Threads
-                </button>
-                <button
-                  onClick={() => {
-                    setShowMenu(false);
-                    refreshActiveGroup();
-                  }}
-                >
-                  {isSyncing ? 'Syncing…' : 'Sync'}
                 </button>
                 <button
                   onClick={() => {

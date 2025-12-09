@@ -73,21 +73,6 @@
   background: rgba(0, 122, 255, 0.05);
 }
 
-.attachment-button {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: none;
-  border: none;
-  color: var(--primary-color);
-  font-size: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
 .message-input {
   flex: 1;
   min-height: 36px;
@@ -106,18 +91,23 @@
   border-color: var(--primary-color);
 }
 
-.send-button,
-.voice-button {
+.send-button {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: var(--primary-color);
+  background: linear-gradient(135deg, #007aff, #5ac8fa);
   color: white;
   border: none;
-  font-size: 20px;
+  font-size: 18px;
+  font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

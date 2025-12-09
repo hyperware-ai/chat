@@ -140,6 +140,11 @@
   white-space: nowrap;
 }
 
+.unified-thread-path {
+  color: var(--primary-color, #007aff);
+  font-weight: 600;
+}
+
 .unified-item-meta {
   display: inline-flex;
   align-items: center;

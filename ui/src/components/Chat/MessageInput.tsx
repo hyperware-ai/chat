@@ -1,7 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useChatStore } from '../../store/chat';
-import FileUpload from './FileUpload';
-import VoiceNote from './VoiceNote';
 import './MessageInput.css';
 
 interface MessageInputProps {
@@ -11,8 +9,6 @@ interface MessageInputProps {
 
 const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) => {
   const [message, setMessage] = useState('');
-  const [showFileUpload, setShowFileUpload] = useState(false);
-  const [showVoiceNote, setShowVoiceNote] = useState(false);
   const { sendMessage, replyingTo, setReplyingTo, editingMessage, setEditingMessage, editMessage } = useChatStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -107,46 +103,23 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
       )}
 
       <div className={`message-input-container ${editingMessage ? 'editing' : ''}`}>
-        <button
-          className="attachment-button"
-          onClick={() => setShowFileUpload(!showFileUpload)}
-          aria-label="Attach file"
-          disabled={!!editingMessage}
-        >
-          +
-        </button>
-
         <textarea
           ref={inputRef}
           className="message-input"
-          placeholder={editingMessage ? 'Edit your message...' : 'Type a message...'}
+          placeholder={editingMessage ? 'Edit your message…' : 'Type a message…'}
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
           rows={1}
         />
-
-        {message.trim() ? (
-          <button
-            className={`send-button ${editingMessage ? 'edit-mode' : ''}`}
-            onClick={() => handleSubmit()}
-            aria-label={editingMessage ? 'Save edit' : 'Send message'}
-          >
-            {editingMessage ? '✓' : '➤'}
-          </button>
-        ) : (
-          <button
-            className="voice-button"
-            onClick={() => setShowVoiceNote(!showVoiceNote)}
-            aria-label="Record voice note"
-            disabled={!!editingMessage}
-          >
-            🎤
-          </button>
-        )}
-
-        {showFileUpload && <FileUpload onClose={() => setShowFileUpload(false)} />}
-        {showVoiceNote && <VoiceNote onClose={() => setShowVoiceNote(false)} />}
+        <button
+          className={`send-button ${editingMessage ? 'edit-mode' : ''}`}
+          onClick={() => handleSubmit()}
+          disabled={!message.trim()}
+          aria-label={editingMessage ? 'Save edit' : 'Send message'}
+        >
+          {editingMessage ? '✓' : '➤'}
+        </button>
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ type BodyCache = Record<string, string>;
 type GroupPreview = {
   text: string;
   timestamp: number | null;
+  threadPath?: string | null; // e.g. "Main > Feature Discussion" if message is in a non-root thread
 };
 
 const BODY_CACHE_KEY = 'group-message-bodies';
@@ -126,7 +127,7 @@ function buildMessagePreview(
 function extractLatestMessagePreview(
   group: Chat.Group,
   bodyCache: BodyCache,
-): { text: string; timestamp: number | null; cache: BodyCache } {
+): { text: string; timestamp: number | null; threadPath: string | null; cache: BodyCache } {
   const messagesRaw = toFlexibleMap<Chat.MessageMeta>(
     group.messages as any,
     (m) => (m as any)?.message_id,
@@ -136,9 +137,36 @@ function extractLatestMessagePreview(
   );
   const latest = messages[messages.length - 1];
   const { text, timestamp, cache } = buildMessagePreview(latest, bodyCache);
+
+  // Build thread path if message is not in root thread
+  let threadPath: string | null = null;
+  if (latest?.thread_id) {
+    const threads = toFlexibleMap<Chat.Thread>(group.threads as any, (t) => (t as any)?.id);
+    const thread = threads.get(latest.thread_id);
+    if (thread && thread.depth > 0) {
+      // Build path from current thread up, excluding root (Main) thread
+      const path: string[] = [];
+      let current: Chat.Thread | undefined = thread;
+      while (current && current.depth > 0) {
+        const title = current.title || 'Thread';
+        path.unshift(title);
+        const parentRef = current.parent as any;
+        if (parentRef && 'Thread' in parentRef) {
+          current = threads.get(parentRef.Thread as string);
+        } else {
+          break;
+        }
+      }
+      if (path.length > 0) {
+        threadPath = path.join(' › ');
+      }
+    }
+  }
+
   return {
     text,
     timestamp: timestamp ?? group.metadata?.updated_at ?? null,
+    threadPath,
     cache,
   };
 }
@@ -398,12 +426,15 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
                 [lastMessage.id]: previewText,
               })
             : state.messageBodies;
+        // Preserve activeThreadId if set, only fall back to root if it's null
+        // This prevents race conditions when a thread was just created
+        // Also preserve null if we're in draft mode (draftThread exists)
+        const newActiveThreadId = state.draftThread
+          ? state.activeThreadId
+          : state.activeThreadId || normalized.rootThreadId;
         return {
           activeGroup: normalized,
-          activeThreadId:
-            state.activeThreadId && normalized.threads.has(state.activeThreadId)
-              ? state.activeThreadId
-              : normalized.rootThreadId,
+          activeThreadId: newActiveThreadId,
           messageBodies: updatedBodies,
           groupPreviews: {
             ...state.groupPreviews,
@@ -527,12 +558,54 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     const draftThread = get().draftThread;
     const sender = (window as any).our?.node || 'me';
 
-    // If we have a draft thread, create it first
+    // If we have a draft thread, handle thread creation
     if (draftThread && !threadId) {
-      console.log('[GROUPS] Creating thread from draft before sending message');
+      console.log('[GROUPS] Creating thread from draft');
+
+      const parentThreadId = draftThread.parentThreadId;
+
+      // If no root message exists (new thread from menu), the user's message becomes the root
+      if (!draftThread.rootMessageId && parentThreadId) {
+        try {
+          // Send the message to the parent thread - this becomes the root message
+          const rootMsgRes = await Chat.send_group_message({
+            group_id: groupId!,
+            thread_id: parentThreadId,
+            content,
+            message_type: Chat.MessageType.Text,
+            reply_to: replyTo,
+            attachments: [],
+          });
+          const rootMessageId = rootMsgRes.message.message_id;
+
+          // Use the message content as thread title
+          const threadTitle = content.length > 50 ? content.substring(0, 50).trim() + '…' : content.trim();
+
+          // Create thread with this message as root
+          const newThreadId = await get().createThread(
+            threadTitle,
+            parentThreadId,
+            rootMessageId,
+          );
+          if (!newThreadId) {
+            console.error('[GROUPS] Failed to create thread from draft');
+            return;
+          }
+
+          set({ draftThread: null, activeThreadId: newThreadId });
+          // Don't send another message - the root message IS the user's message
+          return;
+        } catch (error) {
+          console.error('[GROUPS] Failed to create thread from new message', error);
+          return;
+        }
+      }
+
+      // Starting thread from existing message - create thread and send first reply
+      const threadTitle = draftThread.title || (content.length > 50 ? content.substring(0, 50).trim() + '…' : content.trim());
       const newThreadId = await get().createThread(
-        draftThread.title,
-        draftThread.parentThreadId,
+        threadTitle,
+        parentThreadId,
         draftThread.rootMessageId,
       );
       if (!newThreadId) {
@@ -540,7 +613,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         return;
       }
       threadId = newThreadId;
-      set({ draftThread: null });
+      set({ draftThread: null, activeThreadId: newThreadId });
     }
 
     if (!groupId || !threadId) return;
@@ -804,12 +877,12 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       try {
         const res = await Chat.get_group({ group_id: groupId });
         if (!res.group) continue;
-        const { text, timestamp, cache: updatedCache } = extractLatestMessagePreview(
+        const { text, timestamp, threadPath, cache: updatedCache } = extractLatestMessagePreview(
           res.group,
           cache,
         );
         cache = updatedCache;
-        previews[groupId] = { text, timestamp };
+        previews[groupId] = { text, timestamp, threadPath };
       } catch (error) {
         console.error('[GROUPS] Failed to refresh preview for group', groupId, error);
       }

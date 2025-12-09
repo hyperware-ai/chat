@@ -385,6 +385,36 @@ impl ChatState {
         proposer: NodeId,
         target: NodeId,
     ) -> Result<MembershipDecision, crate::MembershipActionError> {
+        // If a member is leaving themselves, do it immediately without proposals/approvals.
+        if proposer == target {
+            let now = current_timestamp();
+            let group = self
+                .groups
+                .get_mut(group_id)
+                .ok_or_else(|| crate::MembershipActionError::GroupNotFound(group_id.clone()))?;
+
+            let member = group
+                .members
+                .get_mut(&target)
+                .ok_or_else(|| crate::MembershipActionError::MemberNotFound(target.clone()))?;
+            if member.status == MembershipStatus::Removed {
+                return Err(crate::MembershipActionError::MemberNotFound(target));
+            }
+
+            member.status = MembershipStatus::Removed;
+            member.last_activity = now;
+            if let Some(meta) = group.metadata.as_mut() {
+                meta.updated_at = now;
+            }
+            group
+                .membership_proposals
+                .remove(&membership_proposal_key(group_id, &target, MembershipActionKind::Remove));
+            sync_member_membership_sets(group, &target, now);
+            self.commit_group_crdt_or_log(group_id, "leave_group");
+            return Ok(MembershipDecision::approved());
+        }
+
+        // Removing someone else still requires MANAGE_ROLES permission.
         self.require_group_permission(group_id, &proposer, GroupPermissions::MANAGE_ROLES)
             .map_err(crate::MembershipActionError::PermissionDenied)?;
 

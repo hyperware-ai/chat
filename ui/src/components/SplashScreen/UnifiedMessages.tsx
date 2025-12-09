@@ -75,6 +75,7 @@ const UnifiedMessages: React.FC = () => {
         kind: 'dm' as const,
         title: chat.counterparty || 'Direct message',
         subtitle: preview,
+        threadPath: null as string | null,
         lastActivity,
         unread: chat.unread_count,
         meta: undefined,
@@ -87,11 +88,13 @@ const UnifiedMessages: React.FC = () => {
       const lastActivity =
         preview?.timestamp || group.metadata?.updated_at || Math.floor(Date.now() / 1000);
       const subtitle = preview?.text || 'No messages yet';
+      const threadPath = preview?.threadPath || null;
       return {
         id: `group-${group.group_id}`,
         kind: 'group' as const,
         title: group.metadata?.name || 'Untitled group',
         subtitle,
+        threadPath,
         lastActivity,
         onClick: () => openGroup(group.group_id),
         unread: 0,
@@ -210,7 +213,12 @@ const UnifiedMessages: React.FC = () => {
                       </div>
                     </div>
                     <div className="unified-item-row secondary">
-                      <div className="unified-item-subtitle">{item.subtitle}</div>
+                      <div className="unified-item-subtitle">
+                        {item.threadPath && (
+                          <span className="unified-thread-path">{item.threadPath}: </span>
+                        )}
+                        {item.subtitle}
+                      </div>
                       {'unread' in item && item.unread ? (
                         <span className="unified-unread">{item.unread}</span>
                       ) : null}
