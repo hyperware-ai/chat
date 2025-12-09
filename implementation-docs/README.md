@@ -80,9 +80,9 @@ hyperapp-skeleton/
 
 ## Key Concepts
 
-### 1. The Hyperprocess Macro
+### 1. The Hyperapp Macro
 
-The `#[hyperprocess]` macro is the core of the Hyperapp framework. It provides:
+The `#[hyperapp]` macro is the core of the Hyperapp framework. It provides:
 - Async/await support without tokio
 - Automatic WIT generation
 - State persistence
@@ -190,7 +190,7 @@ Change names throughout from `skeleton-app` (and variants) as appropriate if use
 
 ### Import Errors
 - Don't add `hyperware_process_lib` to Cargo.toml
-- Use imports from `hyperprocess_macro`
+- Use imports from `hyperapp_macro`
 
 ## Testing Your App
 

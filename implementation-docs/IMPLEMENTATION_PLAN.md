@@ -11,7 +11,7 @@ The app will use WebSockets for real-time communication, support both node-to-no
 
 ## Architecture Overview
 
-### Backend Architecture (Rust/Hyperprocess)
+### Backend Architecture (Rust/Hyperapp)
 
 #### Core Components
 

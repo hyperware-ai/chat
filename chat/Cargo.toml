@@ -12,9 +12,9 @@ wit-bindgen = "0.42.1"
 optional = true
 path = "../target/chat-caller-utils"
 
-[dependencies.hyperprocess_macro]
-git = "https://github.com/hyperware-ai/hyperprocess-macro"
-rev = "ac43744"
+[dependencies.hyperapp_macro]
+git = "https://github.com/hyperware-ai/hyperapp-macro"
+rev = "28f0a41"
 
 [dependencies.hyperware-crdt]
 path = "../../hyperware-crdt"
@@ -25,7 +25,7 @@ path = "../../hyperware-pubsub"
 [dependencies.hyperware_process_lib]
 features = ["hyperapp"]
 git = "https://github.com/hyperware-ai/process_lib"
-rev = "b9f1ead"
+rev = "067fab6"
 
 [dependencies.serde]
 features = [

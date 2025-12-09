@@ -110,8 +110,12 @@ const GroupView: React.FC = () => {
 
   let disabledReason: string | undefined;
   if (!member) disabledReason = 'You are not a member of this group.';
-  else if (member.status !== Chat.MembershipStatus.Active)
+  else if (member.status === Chat.MembershipStatus.Removed)
+    disabledReason = 'You have left this group.';
+  else if (member.status === Chat.MembershipStatus.Pending)
     disabledReason = 'Membership pending approval.';
+  else if (member.status !== Chat.MembershipStatus.Active)
+    disabledReason = 'Membership not active.';
   else if (!canSend)
     disabledReason = 'You do not have permission to post.';
 
