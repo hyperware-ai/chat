@@ -222,8 +222,9 @@ impl ChatState {
             if node_id == &our().node {
                 continue;
             }
-            // Skip members who are not active (e.g., removed or pending)
-            if member.status != MembershipStatus::Active {
+            // Skip members who are pending (not yet fully joined)
+            // But DO push to Removed members so they receive their removal notification
+            if member.status == MembershipStatus::Pending {
                 continue;
             }
             if let Some(role) = group.roles.get(&member.role_id) {
