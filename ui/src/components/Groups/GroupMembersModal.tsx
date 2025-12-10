@@ -41,7 +41,6 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     refreshActiveGroup,
     removeMember,
     leaveGroup,
-    clearActiveGroup,
   } = useGroupStore();
   const [candidate, setCandidate] = useState('');
   const [roleId, setRoleId] = useState<string | null>(null);
@@ -70,11 +69,13 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     '';
 
   const sortedMembers = useMemo(() => {
-    return Array.from(activeGroup.members.entries()).sort(([, a], [, b]) => {
-      const tsA = a.last_activity;
-      const tsB = b.last_activity;
-      return tsB - tsA;
-    });
+    return Array.from(activeGroup.members.entries())
+      .filter(([, member]) => member.status !== Chat.MembershipStatus.Removed)
+      .sort(([, a], [, b]) => {
+        const tsA = a.last_activity;
+        const tsB = b.last_activity;
+        return tsB - tsA;
+      });
   }, [activeGroup.members]);
 
   const pendingProposals = activeGroup.proposals;
@@ -127,7 +128,7 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
       return;
     }
     setLeaveBusy(false);
-    clearActiveGroup();
+    // leaveGroup already clears active group and removes from list
     onClose();
   };
 
@@ -144,7 +145,7 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
         <div className="modal-body members-body">
           <div className="members-section">
             <div className="members-section-header">
-              <h4>People ({activeGroup.members.size})</h4>
+              <h4>People ({sortedMembers.length})</h4>
             </div>
             <div className="members-list">
               {sortedMembers.map(([node, member]) => {

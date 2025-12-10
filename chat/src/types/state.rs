@@ -651,7 +651,6 @@ impl ChatState {
         let group = self.groups.get(group_id).ok_or_else(|| {
             CommitteeError::Observer(format!("missing group {} for CRDT commit", group_id))
         })?;
-        self.pubsub.rebuild_group(group_id, group);
         let snapshot: crate::GroupDocState = (group_id, group).into();
         let manager = self.ensure_group_doc_manager(group_id)?;
         manager.refresh_with_snapshot(snapshot)?;
@@ -663,8 +662,16 @@ impl ChatState {
         };
         manager.set_last_state_vector(state_vector.clone());
         self.update_local_hub_sync_state(group_id, &state_vector);
-        // enqueue per-peer fanout for hubs and subscribers
+        // Enqueue per-peer fanout BEFORE rebuilding whitelist, so that members
+        // who are being removed can still push their final update while they
+        // still have permissions in the old whitelist.
         self.enqueue_replication_pushes(group_id, state_vector.encode_v1());
+        // Rebuild whitelist AFTER enqueueing replication, so membership changes
+        // can propagate before the member loses publish permissions.
+        let group = self.groups.get(group_id).ok_or_else(|| {
+            CommitteeError::Observer(format!("missing group {} for whitelist rebuild", group_id))
+        })?;
+        self.pubsub.rebuild_group(group_id, group);
         // Notify browser clients so they can refresh group state without polling.
         self.broadcast_ws_message(&WsServerMessage::GroupUpdate {
             group_id: group_id.clone(),

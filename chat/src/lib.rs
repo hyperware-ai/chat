@@ -2595,25 +2595,36 @@ impl ChatState {
                     .map(|g| g.hubs.active.contains(&task.peer))
                     .unwrap_or(false);
 
-                if is_hub {
-                    if let Err(err) = self.require_hub_access(&task.group_id, &our().node) {
+                // Check if we're a removed member trying to push our final update.
+                // If so, skip the local ACL check - the remote will decide whether to accept.
+                let our_member_status = self
+                    .groups
+                    .get(&task.group_id)
+                    .and_then(|g| g.members.get(&our().node))
+                    .map(|m| m.status);
+                let is_self_removed = our_member_status == Some(MembershipStatus::Removed);
+
+                if !is_self_removed {
+                    if is_hub {
+                        if let Err(err) = self.require_hub_access(&task.group_id, &our().node) {
+                            println!(
+                                "[REPL][{}] skip push to {} (local hub publish denied): {}",
+                                task.group_id, task.peer, err
+                            );
+                            self.replication_metrics.acl_skips =
+                                self.replication_metrics.acl_skips.saturating_add(1);
+                            return;
+                        }
+                    } else if let Err(err) = self.require_subscriber_access(&task.group_id, &our().node)
+                    {
                         println!(
-                            "[REPL][{}] skip push to {} (local hub publish denied): {}",
+                            "[REPL][{}] skip push to subscriber {} (local publish denied): {}",
                             task.group_id, task.peer, err
                         );
                         self.replication_metrics.acl_skips =
                             self.replication_metrics.acl_skips.saturating_add(1);
                         return;
                     }
-                } else if let Err(err) = self.require_subscriber_access(&task.group_id, &our().node)
-                {
-                    println!(
-                        "[REPL][{}] skip push to subscriber {} (local publish denied): {}",
-                        task.group_id, task.peer, err
-                    );
-                    self.replication_metrics.acl_skips =
-                        self.replication_metrics.acl_skips.saturating_add(1);
-                    return;
                 }
 
                 let sv_hint = task
@@ -3183,6 +3194,11 @@ impl ChatState {
         self.update_local_hub_sync_state(group_id, &new_vector);
 
         group_state.apply_into(self);
+
+        // Notify browser clients so they can refresh group state after receiving remote updates.
+        self.broadcast_ws_message(&WsServerMessage::GroupUpdate {
+            group_id: group_id.clone(),
+        });
 
         // Consider bootstrap complete once the local node is an active member (or otherwise ACL-ready).
         let has_local_membership = self

@@ -963,6 +963,19 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     const groupId = get().activeGroupId;
     const me = (window as any).our?.node || null;
     if (!groupId || !me) return null;
-    return get().removeMember(me);
+
+    const decision = await get().removeMember(me);
+    if (decision) {
+      // Remove the group from the local state after successfully leaving
+      set((state) => ({
+        groups: state.groups.filter((g) => g.group_id !== groupId),
+        activeGroup: null,
+        activeGroupId: null,
+        activeThreadId: null,
+        draftThread: null,
+        replyingTo: null,
+      }));
+    }
+    return decision;
   },
 }));

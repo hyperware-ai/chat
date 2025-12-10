@@ -1,5 +1,8 @@
 use crate::{
-    crdt::{DeliveryCursor, Group, GroupId, GroupTier, HubSyncState, SubscriberSyncState},
+    crdt::{
+        DeliveryCursor, Group, GroupId, GroupTier, HubSyncState, MembershipStatus,
+        SubscriberSyncState,
+    },
     BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask, SubscriberDeliveryEvent,
 };
 use hyperware_crdt::yrs::{Decode, Encode, StateVector};
@@ -217,6 +220,10 @@ impl ChatState {
         // Subscribers
         for (node_id, member) in &group.members {
             if node_id == &our().node {
+                continue;
+            }
+            // Skip members who are not active (e.g., removed or pending)
+            if member.status != MembershipStatus::Active {
                 continue;
             }
             if let Some(role) = group.roles.get(&member.role_id) {
