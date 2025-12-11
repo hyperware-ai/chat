@@ -33,6 +33,39 @@ const formatLastSeen = (ts: number) => {
   return date.toLocaleDateString();
 };
 
+/**
+ * Extract required signers from membership rules.
+ * For dictator rule: returns the dictator
+ * For multi_dictator rule: returns all dictators
+ * For other rules: returns empty array (they use different approval mechanisms)
+ */
+const getRequiredSigners = (rules: Chat.MembershipRuleConfig[]): string[] => {
+  const signers: string[] = [];
+  for (const rule of rules) {
+    if (rule.rule_id === 'membership.rule.dictator') {
+      const params = rule.params as { dictator?: string };
+      if (params?.dictator) {
+        signers.push(params.dictator);
+      }
+    } else if (rule.rule_id === 'membership.rule.multi_dictator') {
+      const params = rule.params as { dictators?: string[] };
+      if (params?.dictators) {
+        signers.push(...params.dictators);
+      }
+    }
+  }
+  return signers;
+};
+
+/**
+ * Check if the group is currently in solo dictatorship mode.
+ * Returns true if there's exactly one dictator rule with a single dictator.
+ */
+const isSoloDictatorship = (rules: Chat.MembershipRuleConfig[]): boolean => {
+  if (rules.length !== 1) return false;
+  return rules[0].rule_id === 'membership.rule.dictator';
+};
+
 const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
   const {
     activeGroup,
@@ -79,6 +112,16 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
   }, [activeGroup.members]);
 
   const pendingProposals = activeGroup.proposals;
+  const requiredSigners = useMemo(
+    () => getRequiredSigners(activeGroup.membershipRules),
+    [activeGroup.membershipRules]
+  );
+  const canApprove = currentNode && requiredSigners.includes(currentNode);
+
+  // Check if selected role is Hub tier (Owner) and group is solo dictatorship
+  const selectedRole = roles.find((r) => r.id === defaultRoleId);
+  const isSelectingOwner = selectedRole?.tier === Chat.GroupTier.Hub;
+  const showOwnerWarning = isSelectingOwner && isSoloDictatorship(activeGroup.membershipRules);
 
   const handleInvite = async () => {
     if (!canInvite) {
@@ -194,42 +237,44 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
             </div>
           </div>
 
-          <div className="members-section">
-            <div className="members-section-header">
-              <h4>Invite</h4>
+          {canInvite && (
+            <div className="members-section">
+              <div className="members-section-header">
+                <h4>Invite</h4>
+              </div>
+              <div className="invite-form">
+                <input
+                  type="text"
+                  placeholder="Node ID (e.g., alice.node)"
+                  value={candidate}
+                  onChange={(e) => setCandidate(e.target.value)}
+                />
+                <select
+                  value={defaultRoleId}
+                  onChange={(e) => setRoleId(e.target.value)}
+                >
+                  {roles.map((role) => (
+                    <option key={role.id} value={role.id}>
+                      {role.label}
+                    </option>
+                  ))}
+                </select>
+                {showOwnerWarning && (
+                  <div className="owner-warning">
+                    Adding another Owner will convert this group to a multi-dictatorship. You will share full control of the group with them.
+                  </div>
+                )}
+                <button
+                  className="primary"
+                  onClick={handleInvite}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? 'Inviting…' : 'Send invite'}
+                </button>
+                {error && <div className="members-error">{error}</div>}
+              </div>
             </div>
-            <div className="invite-form">
-              <input
-                type="text"
-                placeholder="Node ID (e.g., alice.node)"
-                value={candidate}
-                onChange={(e) => setCandidate(e.target.value)}
-              />
-              <select
-                value={defaultRoleId}
-                onChange={(e) => setRoleId(e.target.value)}
-              >
-                {roles.map((role) => (
-                  <option key={role.id} value={role.id}>
-                    {role.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="primary"
-                onClick={handleInvite}
-                disabled={!canInvite || isSubmitting}
-              >
-                {isSubmitting ? 'Inviting…' : 'Send invite'}
-              </button>
-              {error && <div className="members-error">{error}</div>}
-              {!canInvite && (
-                <div className="members-hint">
-                  You need invite permissions to add people.
-                </div>
-              )}
-            </div>
-          </div>
+          )}
 
           {pendingProposals.length > 0 && (
             <div className="members-section">
@@ -239,21 +284,40 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
               <div className="pending-list">
                 {pendingProposals.map((proposal) => {
                   const role = activeGroup.roles.get(proposal.requested_role);
+                  // Filter out signers who have already approved
+                  const pendingSigners = requiredSigners.filter(
+                    (s) => !proposal.approvals?.includes(s)
+                  );
+                  const isRemoval = proposal.action === Chat.MembershipActionKind.Remove;
+                  const actionLabel = isRemoval ? 'Remove' : 'Add';
+                  const actionDescription = isRemoval
+                    ? `removing ${proposal.candidate}`
+                    : `adding ${proposal.candidate}`;
                   return (
                     <div key={proposal.proposal_id} className="pending-row">
                       <div className="pending-main">
-                        <div className="pending-node">{proposal.candidate}</div>
+                        <div className="pending-node">
+                          {actionLabel}: {proposal.candidate}
+                        </div>
                         <div className="pending-sub">
-                          Requested: {role?.label || proposal.requested_role}
+                          {isRemoval
+                            ? `Proposed by ${proposal.proposer}`
+                            : `Role: ${role?.label || proposal.requested_role}`}
                         </div>
                       </div>
-                      <button
-                        className="secondary"
-                        onClick={() => handleApprove(proposal.proposal_id)}
-                        disabled={!canInvite}
-                      >
-                        Approve
-                      </button>
+                      {canApprove ? (
+                        <button
+                          className={isRemoval ? 'secondary danger' : 'secondary'}
+                          onClick={() => handleApprove(proposal.proposal_id)}
+                          disabled={!canInvite}
+                        >
+                          Approve {actionLabel}
+                        </button>
+                      ) : (
+                        <div className="pending-status">
+                          Awaiting approval from {pendingSigners.join(', ') || 'authorized members'} for {actionDescription}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

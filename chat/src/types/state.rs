@@ -807,9 +807,18 @@ impl ChatState {
     }
 
     pub fn list_groups_state(&self) -> ListGroupsRes {
+        let caller = our().node;
         let groups = self
             .groups
             .iter()
+            .filter(|(_group_id, group)| {
+                // Only include groups where the caller is an active member
+                group
+                    .members
+                    .get(&caller)
+                    .map(|m| m.status == MembershipStatus::Active)
+                    .unwrap_or(false)
+            })
             .map(|(group_id, group)| GroupSummary {
                 group_id: group_id.clone(),
                 metadata: group.metadata.clone(),

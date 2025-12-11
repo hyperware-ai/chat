@@ -673,6 +673,22 @@ impl ChatState {
     #[remote]
     #[http]
     async fn get_group(&self, req: GetGroupReq) -> Result<GetGroupRes, String> {
+        // Check if caller is an active member of the group
+        let group = self
+            .groups
+            .get(&req.group_id)
+            .ok_or_else(|| "group not found".to_string())?;
+        let caller = our().node;
+        let member = group
+            .members
+            .get(&caller)
+            .ok_or_else(|| format!("{} is not a member of group {}", caller, req.group_id))?;
+        if member.status != crate::crdt::MembershipStatus::Active {
+            return Err(format!(
+                "member {} is not active in group {} (status: {:?})",
+                caller, req.group_id, member.status
+            ));
+        }
         Ok(self.get_group_state(req))
     }
 

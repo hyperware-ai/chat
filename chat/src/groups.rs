@@ -1,8 +1,8 @@
 use crate::crdt::{
-    compile_membership_rules, Group, GroupId, GroupMember, GroupPermissions, MembershipActionKind,
-    MembershipDecision, MembershipDecisionStatus, MembershipProposal, MembershipRuleBox,
-    MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId, MessageMeta, NodeId,
-    SubscriberSyncState, ThreadId, MessageReactionMeta,
+    compile_membership_rules, Group, GroupId, GroupMember, GroupPermissions, GroupTier,
+    MembershipActionKind, MembershipDecision, MembershipDecisionStatus, MembershipProposal,
+    MembershipRuleBox, MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId,
+    MessageMeta, NodeId, SubscriberSyncState, ThreadId, MessageReactionMeta,
 };
 use crate::types::{
     active_member_count, aggregate_rule_decisions, current_timestamp, group_root_thread_id,
@@ -10,7 +10,36 @@ use crate::types::{
 };
 use crate::ChatState;
 use hyperware_process_lib::our;
+use serde_json::json;
 use std::collections::HashSet;
+
+/// Check if the membership rules are a solo dictatorship (single dictator).
+/// Returns Some(dictator_node_id) if so, None otherwise.
+fn get_solo_dictator(rules: &[MembershipRuleConfig]) -> Option<String> {
+    if rules.len() != 1 {
+        return None;
+    }
+    let rule = &rules[0];
+    if rule.rule_id != "membership.rule.dictator" {
+        return None;
+    }
+    rule.params
+        .get("dictator")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Create multi-dictatorship rule config with the given dictators.
+fn make_multi_dictator_rule(dictators: HashSet<String>) -> MembershipRuleConfig {
+    let dictators_vec: Vec<String> = dictators.into_iter().collect();
+    MembershipRuleConfig::new(
+        "membership.rule.multi_dictator",
+        json!({
+            "dictators": dictators_vec,
+            "required": 1
+        }),
+    )
+}
 
 impl ChatState {
     pub fn group_rules(
@@ -458,6 +487,9 @@ impl ChatState {
         decision: &MembershipDecision,
         now: u64,
     ) -> Result<(), crate::MembershipActionError> {
+        // Track if we need to upgrade to multi-dictatorship after adding an Owner
+        let mut upgrade_to_multi_dictator: Option<(String, String)> = None;
+
         let group = self
             .groups
             .get_mut(group_id)
@@ -470,6 +502,25 @@ impl ChatState {
         match proposal.action {
             MembershipActionKind::Invite => match decision.status {
                 MembershipDecisionStatus::Approved => {
+                    // Check if the new member's role is Hub tier (Owner)
+                    let is_hub_role = group
+                        .roles
+                        .get(&proposal.requested_role)
+                        .map(|role| role.tier == GroupTier::Hub)
+                        .unwrap_or(false);
+
+                    // If adding a Hub member and current rules are solo dictatorship,
+                    // we need to upgrade to multi-dictatorship
+                    if is_hub_role {
+                        if let Some(current_dictator) = get_solo_dictator(&group.membership_rules) {
+                            // Only upgrade if the new member is different from the current dictator
+                            if current_dictator != proposal.candidate {
+                                upgrade_to_multi_dictator =
+                                    Some((current_dictator, proposal.candidate.clone()));
+                            }
+                        }
+                    }
+
                     let entry = group
                         .members
                         .entry(proposal.candidate.clone())
@@ -531,6 +582,21 @@ impl ChatState {
                     group.membership_proposals.remove(&proposal.proposal_id);
                 }
             },
+        }
+
+        // If we need to upgrade to multi-dictatorship, do it now
+        if let Some((old_dictator, new_owner)) = upgrade_to_multi_dictator {
+            let mut dictators = HashSet::new();
+            dictators.insert(old_dictator);
+            dictators.insert(new_owner);
+            let new_rule = make_multi_dictator_rule(dictators);
+
+            // Update the group's membership rules
+            if let Some(group) = self.groups.get_mut(group_id) {
+                group.membership_rules = vec![new_rule];
+            }
+            // Invalidate the rule cache so it gets recompiled
+            self.invalidate_group_rules(group_id);
         }
 
         Ok(())

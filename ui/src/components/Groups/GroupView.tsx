@@ -108,10 +108,12 @@ const GroupView: React.FC = () => {
     hasGroupPermission(role.permissions as unknown as number, 'INVITE_MEMBERS');
   const whitelist = whitelists[activeGroup.id];
 
+  const isRemoved = member?.status === Chat.MembershipStatus.Removed;
+
   let disabledReason: string | undefined;
   if (!member) disabledReason = 'You are not a member of this group.';
-  else if (member.status === Chat.MembershipStatus.Removed)
-    disabledReason = 'You have left this group.';
+  else if (isRemoved)
+    disabledReason = 'You are no longer a member of this group.';
   else if (member.status === Chat.MembershipStatus.Pending)
     disabledReason = 'Membership pending approval.';
   else if (member.status !== Chat.MembershipStatus.Active)
@@ -216,6 +218,12 @@ const GroupView: React.FC = () => {
           )}
         </div>
       </header>
+
+      {isRemoved && (
+        <div className="group-removed-banner">
+          You are no longer a member of this group.
+        </div>
+      )}
 
       <GroupReplicationPanel
         replication={replicationState}

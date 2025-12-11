@@ -23,4 +23,5 @@ export interface NormalizedGroup {
   messages: GroupMessage[];
   rootThreadId: string | null;
   proposals: Chat.MembershipProposal[];
+  membershipRules: Chat.MembershipRuleConfig[];
 }

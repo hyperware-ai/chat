@@ -225,6 +225,8 @@ function normalizeGroup(
     (threads.size > 0 ? Array.from(threads.keys())[0] : null);
   const proposals = Array.from(proposalsRaw.values());
 
+  const membershipRules = (group.membership_rules as Chat.MembershipRuleConfig[]) || [];
+
   return {
     id: groupId,
     metadata,
@@ -234,6 +236,7 @@ function normalizeGroup(
     messages,
     rootThreadId,
     proposals,
+    membershipRules,
   };
 }
 
@@ -389,7 +392,23 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       get().fetchSubscriberEvents();
     } catch (error) {
       console.error('[GROUPS] Failed to open group', error);
-      set({ error: 'Failed to load group', activeGroup: null, activeThreadId: null });
+      // If access denied (e.g., kicked from group), clear active state
+      const errMsg = String(error);
+      if (
+        errMsg.includes('lacks subscribe access') ||
+        errMsg.includes('cannot get group') ||
+        errMsg.includes('not a member')
+      ) {
+        console.log('[GROUPS] Access denied to group, clearing state');
+        set({
+          error: 'You no longer have access to this group',
+          activeGroup: null,
+          activeGroupId: null,
+          activeThreadId: null,
+        });
+      } else {
+        set({ error: 'Failed to load group', activeGroup: null, activeThreadId: null });
+      }
     } finally {
       set({ isLoading: false });
     }
@@ -445,7 +464,18 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       get().fetchReplicationState(groupId);
     } catch (error) {
       console.error('[GROUPS] Failed to refresh group', error);
-      set({ error: 'Failed to refresh group' });
+      // If we lost access (e.g., kicked from group), clear the active group
+      const errMsg = String(error);
+      if (
+        errMsg.includes('lacks subscribe access') ||
+        errMsg.includes('cannot get group') ||
+        errMsg.includes('not a member')
+      ) {
+        console.log('[GROUPS] Access denied, clearing active group');
+        get().clearActiveGroup();
+      } else {
+        set({ error: 'Failed to refresh group' });
+      }
     } finally {
       set({ isSyncing: false });
     }

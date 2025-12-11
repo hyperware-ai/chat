@@ -79,6 +79,16 @@ fn build_whitelist(group: &Group, routing: &GroupRoutingConfig) -> Whitelist {
     }
 
     for node_id in group.subscribers.entries.keys() {
+        // Only grant subscriber access if the node is an active member
+        let is_active_member = group
+            .members
+            .get(node_id)
+            .map(|m| m.status == MembershipStatus::Active)
+            .unwrap_or(false);
+        if !is_active_member {
+            continue;
+        }
+
         let mut access = NodeAccess {
             publish: Vec::new(),
             subscribe: Vec::new(),
@@ -240,6 +250,42 @@ mod tests {
         group.subscribers.entries.remove("member.node");
         registry.rebuild_group(&group_id, &group);
 
+        assert!(registry
+            .whitelist(&group_id)
+            .expect("whitelist exists after rebuild")
+            .subscribe_scope(&member_node, &subscriber_topic, SystemTime::now())
+            .is_none());
+    }
+
+    /// Tests that even if subscribers.entries is NOT cleaned up (race condition),
+    /// a removed member still loses access because we check membership status.
+    #[test]
+    fn removed_member_loses_access_even_with_stale_subscriber_entry() {
+        let group_id = "group:test".to_string();
+        let mut group = sample_group(&group_id);
+        let mut registry = PubSubRegistry::new();
+
+        registry.rebuild_group(&group_id, &group);
+        let subscriber_topic = BrokerTopicId::new(group.routing.subscriber_topic.clone());
+        let member_node = BrokerNodeId::new("member.node".to_string());
+
+        // Initially, member has access
+        assert!(registry
+            .whitelist(&group_id)
+            .expect("whitelist exists")
+            .subscribe_scope(&member_node, &subscriber_topic, SystemTime::now())
+            .is_some());
+
+        // Mark member as Removed, but DON'T clean up subscribers.entries
+        // This simulates a race condition or bug where subscriber entry isn't cleaned
+        if let Some(member) = group.members.get_mut("member.node") {
+            member.status = MembershipStatus::Removed;
+        }
+        // Note: we deliberately do NOT call group.subscribers.entries.remove()
+
+        registry.rebuild_group(&group_id, &group);
+
+        // Member should still lose access because we check membership status
         assert!(registry
             .whitelist(&group_id)
             .expect("whitelist exists after rebuild")
