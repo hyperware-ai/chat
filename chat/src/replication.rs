@@ -217,7 +217,8 @@ impl ChatState {
             self.enqueue_replication_task(task);
         }
 
-        // Subscribers (and removed Hub members who need to receive their removal notification)
+        // Subscribers - send to active members, plus removed members who haven't received
+        // their removal notification yet (need one final push so they know they were removed)
         for (node_id, member) in &group.members {
             if node_id == &our().node {
                 continue;
@@ -226,8 +227,22 @@ impl ChatState {
             if member.status == MembershipStatus::Pending {
                 continue;
             }
+            // For removed members, only send if they haven't been notified yet
+            // Check if we've already sent them an update after their removal
+            if member.status == MembershipStatus::Removed {
+                let last_cursor_update = group
+                    .delivery
+                    .subscriber_cursors
+                    .get(node_id)
+                    .map(|c| c.updated_at)
+                    .unwrap_or(0);
+                // If we've sent them an update after they were removed, skip them
+                // (member.last_activity is set to the removal timestamp)
+                if last_cursor_update >= member.last_activity {
+                    continue;
+                }
+            }
             // For active Hub members, skip (they're handled in the Hubs loop above)
-            // But for Removed Hub members, we MUST include them so they receive their removal
             let is_hub = group
                 .roles
                 .get(&member.role_id)

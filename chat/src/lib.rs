@@ -12,7 +12,7 @@ use hyperware_crdt::yrs::{Decode, Encode, StateVector};
 use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::WsMessageType,
-    hyperapp::{send, sleep, spawn, AppSendError, SaveOptions},
+    hyperapp::{send, sleep, source, spawn, AppSendError, SaveOptions},
     our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use std::cmp::Ordering;
@@ -694,7 +694,8 @@ impl ChatState {
     #[remote]
     #[http]
     async fn get_group(&self, req: GetGroupReq) -> Result<GetGroupRes, String> {
-        // Check if caller is an active member of the group
+        // Check if caller is a member of the group (Active or Removed)
+        // Removed members can still view the group to see their removal status
         let group = self
             .groups
             .get(&req.group_id)
@@ -704,10 +705,12 @@ impl ChatState {
             .members
             .get(&caller)
             .ok_or_else(|| format!("{} is not a member of group {}", caller, req.group_id))?;
-        if member.status != crate::crdt::MembershipStatus::Active {
+        // Allow Active and Removed members to view the group
+        // Only reject Pending members (they haven't been approved yet)
+        if member.status == crate::crdt::MembershipStatus::Pending {
             return Err(format!(
-                "member {} is not active in group {} (status: {:?})",
-                caller, req.group_id, member.status
+                "member {} is pending in group {} and cannot view it yet",
+                caller, req.group_id
             ));
         }
         Ok(self.get_group_state(req))
@@ -2025,6 +2028,16 @@ impl ChatState {
             ));
         }
 
+        // V2.2: Validate sender is an active member for remote requests
+        // Only check if the group exists - if group doesn't exist, let it fail naturally later
+        let sender_addr = source();
+        let sender_node = sender_addr.node.clone();
+        if sender_node != our().node && self.groups.contains_key(&req.group_id) {
+            // Remote request - validate sender is an active member
+            self.require_subscriber_access(&req.group_id, &sender_node)
+                .map_err(|e| format!("CRDT update denied: sender {} not authorized: {}", sender_node, e))?;
+        }
+
         self.require_hub_access(&req.group_id, &our().node)
             .map_err(|err| format!("hub access denied: {}", err))?;
 
@@ -2098,6 +2111,17 @@ impl ChatState {
         req: CrdtGroupApplyReq,
     ) -> Result<CrdtApplyRes, String> {
         let group_id = req.group_id.clone();
+
+        // V2.2: Validate sender is an active member for remote requests
+        // Only check if the group exists - if group doesn't exist, let it fail naturally later
+        let sender_addr = source();
+        let sender_node = sender_addr.node.clone();
+        if sender_node != our().node && self.groups.contains_key(&group_id) {
+            // Remote request - validate sender is an active member
+            self.require_subscriber_access(&group_id, &sender_node)
+                .map_err(|e| format!("CRDT apply denied: sender {} not authorized: {}", sender_node, e))?;
+        }
+
         self.apply_group_update_payload(
             &group_id,
             &req.update_payload,
@@ -2120,6 +2144,16 @@ impl ChatState {
                 "Group {} is pending bootstrap and cannot serve CRDT requests",
                 req.group_id
             ));
+        }
+
+        // V2.2: Validate sender is an active member for remote requests
+        // Only check if the group exists - if group doesn't exist, let it fail naturally later
+        let sender_addr = source();
+        let sender_node = sender_addr.node.clone();
+        if sender_node != our().node && self.groups.contains_key(&req.group_id) {
+            // Remote request - validate sender is an active member
+            self.require_subscriber_access(&req.group_id, &sender_node)
+                .map_err(|e| format!("CRDT snapshot denied: sender {} not authorized: {}", sender_node, e))?;
         }
 
         self.require_hub_access(&req.group_id, &our().node)
