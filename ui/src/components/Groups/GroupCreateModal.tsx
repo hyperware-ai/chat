@@ -63,6 +63,7 @@ const GroupCreateModal: React.FC<GroupCreateModalProps> = ({ onClose }) => {
               rows={3}
             />
           </label>
+          {/* Visibility selector hidden for now - keeping wiring for future public chats
           <label>
             <span>Visibility</span>
             <select
@@ -76,6 +77,7 @@ const GroupCreateModal: React.FC<GroupCreateModalProps> = ({ onClose }) => {
               <option value={Chat.GroupVisibility.Public}>Public</option>
             </select>
           </label>
+          */}
           {error && <div className="group-create-error">{error}</div>}
           <div className="group-create-actions">
             <button className="secondary" onClick={onClose}>
