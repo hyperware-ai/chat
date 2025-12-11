@@ -49,7 +49,7 @@ pub mod test_exports {
     pub use crate::types::{BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask};
 }
 
-use crate::crdt::{GroupId, MembershipStatus};
+use crate::crdt::{GroupId, MembershipDecisionStatus, MembershipStatus};
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
 // Replication RPC timeout to keep admin/test calls responsive.
@@ -130,6 +130,27 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
 /// replication handler, which runs with a ~12s budget to drain queues.
 async fn trigger_replication(target: Address) {
     let _ = chat_caller_utils::chat::replication_work_local_rpc(&target).await;
+}
+
+/// Push a snapshot immediately to a new member (bypassing the debounced queue).
+/// This is called when a member is invited and approved, so they can bootstrap
+/// without waiting for the replication scheduler's 250ms debounce.
+fn spawn_immediate_snapshot_push(group_id: GroupId, peer: String) {
+    spawn(async move {
+        let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "PushSnapshotToPeer": {
+                "group_id": group_id,
+                "peer": peer,
+            }
+        }))
+        .unwrap_or_default();
+        let req = Request::new()
+            .target(self_addr)
+            .body(body)
+            .expects_response(5);
+        let _ = send::<serde_json::Value>(req).await;
+    });
 }
 
 /// Spawn the event + timer replication scheduler. It listens for wake signals
@@ -753,6 +774,8 @@ impl ChatState {
         &mut self,
         req: InviteGroupMemberReq,
     ) -> Result<MembershipDecisionRes, String> {
+        let candidate = req.candidate.clone();
+        let group_id = req.group_id.clone();
         let decision = self
             .invite_member(
                 &req.group_id,
@@ -761,6 +784,13 @@ impl ChatState {
                 req.role_id,
             )
             .map_err(|err| err.to_string())?;
+
+        // If the invite was approved, immediately push a snapshot to the new member
+        // so they can bootstrap without waiting for the replication scheduler's debounce
+        if decision.status == MembershipDecisionStatus::Approved {
+            spawn_immediate_snapshot_push(group_id, candidate);
+        }
+
         Ok(MembershipDecisionRes { decision })
     }
 
@@ -2138,6 +2168,30 @@ impl ChatState {
         self.run_replication_work_guarded().await
     }
 
+    /// Immediately push a snapshot to a peer (bypassing the debounced queue).
+    /// This is called when a member is invited to get them bootstrapped immediately.
+    #[local]
+    #[http]
+    async fn push_snapshot_to_peer(
+        &mut self,
+        req: PushSnapshotToPeerReq,
+    ) -> Result<(), String> {
+        println!(
+            "[REPL][{}] push_snapshot_to_peer invoked peer={}",
+            req.group_id, req.peer
+        );
+        let task = ReplicationTask {
+            group_id: req.group_id,
+            peer: req.peer,
+            kind: ReplicationKind::PushSnapshot,
+            since: None,
+            attempt: 0,
+            not_before: ChatState::now_secs(),
+        };
+        self.process_replication_task(task).await;
+        Ok(())
+    }
+
     #[remote]
     #[local]
     #[http]
@@ -3217,23 +3271,30 @@ impl ChatState {
         });
 
         // Consider bootstrap complete once the local node is an active member (or otherwise ACL-ready).
-        let has_local_membership = self
+        // Also mark complete if the local member has been removed - no point bootstrapping a group
+        // we've been kicked from.
+        let local_member = self
             .groups
             .get(group_id)
-            .and_then(|g| g.members.get(&our().node))
+            .and_then(|g| g.members.get(&our().node));
+        let has_local_membership = local_member
             .map(|m| m.status == MembershipStatus::Active)
+            .unwrap_or(false);
+        let is_removed = local_member
+            .map(|m| m.status == MembershipStatus::Removed)
             .unwrap_or(false);
 
         let acl_ready = self.local_group_acl_ready(group_id);
         println!(
-            "[CRDT][{}] context={} post-apply has_local_membership={} acl_ready={} pending_bootstrap={}",
+            "[CRDT][{}] context={} post-apply has_local_membership={} is_removed={} acl_ready={} pending_bootstrap={}",
             group_id,
             context,
             has_local_membership,
+            is_removed,
             acl_ready,
             self.group_needs_bootstrap(group_id)
         );
-        if acl_ready || has_local_membership {
+        if acl_ready || has_local_membership || is_removed {
             self.mark_group_bootstrapped(group_id);
         }
         Ok(())

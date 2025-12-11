@@ -334,6 +334,16 @@ impl ChatState {
         self.group_doc_managers.clear();
         self.groups_pending_bootstrap.clear();
         for (group_id, group) in &self.groups {
+            // Skip groups where we've been removed - no need to bootstrap those
+            let is_removed = group
+                .members
+                .get(&our().node)
+                .map(|m| m.status == MembershipStatus::Removed)
+                .unwrap_or(false);
+            if is_removed {
+                continue;
+            }
+
             if self.should_seed_group_doc(group) {
                 let manager = GroupCrdtManager::from_group(group_id, group)?;
                 self.group_doc_managers.insert(group_id.clone(), manager);

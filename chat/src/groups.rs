@@ -41,6 +41,36 @@ fn make_multi_dictator_rule(dictators: HashSet<String>) -> MembershipRuleConfig 
     )
 }
 
+/// Create solo dictatorship rule config with a single dictator.
+fn make_solo_dictator_rule(dictator: String) -> MembershipRuleConfig {
+    MembershipRuleConfig::new(
+        "membership.rule.dictator",
+        json!({
+            "dictator": dictator
+        }),
+    )
+}
+
+/// Get the set of dictators from a multi-dictatorship rule.
+/// Returns None if rules are not a multi-dictatorship.
+fn get_multi_dictators(rules: &[MembershipRuleConfig]) -> Option<HashSet<String>> {
+    if rules.len() != 1 {
+        return None;
+    }
+    let rule = &rules[0];
+    if rule.rule_id != "membership.rule.multi_dictator" {
+        return None;
+    }
+    rule.params
+        .get("dictators")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+}
+
 impl ChatState {
     pub fn group_rules(
         &mut self,
@@ -489,6 +519,8 @@ impl ChatState {
     ) -> Result<(), crate::MembershipActionError> {
         // Track if we need to upgrade to multi-dictatorship after adding an Owner
         let mut upgrade_to_multi_dictator: Option<(String, String)> = None;
+        // Track if we need to downgrade from multi-dictatorship after removing an Owner
+        let mut downgrade_dictators: Option<HashSet<String>> = None;
 
         let group = self
             .groups
@@ -566,6 +598,24 @@ impl ChatState {
             },
             MembershipActionKind::Remove => match decision.status {
                 MembershipDecisionStatus::Approved => {
+                    // Check if the removed member was a Hub tier (Owner) in a multi-dictatorship
+                    let is_hub_role = group
+                        .members
+                        .get(&proposal.candidate)
+                        .and_then(|m| group.roles.get(&m.role_id))
+                        .map(|role| role.tier == GroupTier::Hub)
+                        .unwrap_or(false);
+
+                    if is_hub_role {
+                        // If this is a multi-dictatorship, remove this owner from dictators
+                        if let Some(mut dictators) = get_multi_dictators(&group.membership_rules) {
+                            dictators.remove(&proposal.candidate);
+                            if !dictators.is_empty() {
+                                downgrade_dictators = Some(dictators);
+                            }
+                        }
+                    }
+
                     if let Some(member) = group.members.get_mut(&proposal.candidate) {
                         member.status = MembershipStatus::Removed;
                         member.last_activity = now;
@@ -590,6 +640,25 @@ impl ChatState {
             dictators.insert(old_dictator);
             dictators.insert(new_owner);
             let new_rule = make_multi_dictator_rule(dictators);
+
+            // Update the group's membership rules
+            if let Some(group) = self.groups.get_mut(group_id) {
+                group.membership_rules = vec![new_rule];
+            }
+            // Invalidate the rule cache so it gets recompiled
+            self.invalidate_group_rules(group_id);
+        }
+
+        // If we need to downgrade from multi-dictatorship after removing an Owner, do it now
+        if let Some(remaining_dictators) = downgrade_dictators {
+            let new_rule = if remaining_dictators.len() == 1 {
+                // Only one dictator left - revert to solo dictatorship
+                let dictator = remaining_dictators.into_iter().next().unwrap();
+                make_solo_dictator_rule(dictator)
+            } else {
+                // Multiple dictators still remain - update multi-dictatorship
+                make_multi_dictator_rule(remaining_dictators)
+            };
 
             // Update the group's membership rules
             if let Some(group) = self.groups.get_mut(group_id) {

@@ -359,6 +359,14 @@ pub struct AdminWhitelistRes {
     pub entries: Vec<WhitelistEntryDebug>,
 }
 
+/// Request to immediately push a snapshot to a specific peer (bypassing the debounced queue).
+/// Used when a member is invited to get them bootstrapped immediately.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PushSnapshotToPeerReq {
+    pub group_id: GroupId,
+    pub peer: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SubscriberEventsReq {
     #[serde(default)]

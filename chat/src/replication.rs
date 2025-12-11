@@ -217,20 +217,24 @@ impl ChatState {
             self.enqueue_replication_task(task);
         }
 
-        // Subscribers
+        // Subscribers (and removed Hub members who need to receive their removal notification)
         for (node_id, member) in &group.members {
             if node_id == &our().node {
                 continue;
             }
             // Skip members who are pending (not yet fully joined)
-            // But DO push to Removed members so they receive their removal notification
             if member.status == MembershipStatus::Pending {
                 continue;
             }
-            if let Some(role) = group.roles.get(&member.role_id) {
-                if role.tier == GroupTier::Hub {
-                    continue;
-                }
+            // For active Hub members, skip (they're handled in the Hubs loop above)
+            // But for Removed Hub members, we MUST include them so they receive their removal
+            let is_hub = group
+                .roles
+                .get(&member.role_id)
+                .map(|role| role.tier == GroupTier::Hub)
+                .unwrap_or(false);
+            if is_hub && member.status == MembershipStatus::Active {
+                continue;
             }
             let since = self
                 .peer_state_vector(group_id, node_id)
