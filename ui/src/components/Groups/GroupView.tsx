@@ -194,6 +194,7 @@ const GroupView: React.FC = () => {
                 >
                   Members
                 </button>
+{/* Settings option hidden for now - keeping wiring for future use
                 <button
                   onClick={() => {
                     setShowMenu(false);
@@ -202,6 +203,7 @@ const GroupView: React.FC = () => {
                 >
                   Settings
                 </button>
+*/}
               </div>
             </>
           )}
