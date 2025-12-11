@@ -39,6 +39,12 @@
   border-bottom: 2px solid var(--primary-color);
 }
 
+.settings-tab.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .settings-content {
   flex: 1;
   overflow-y: auto;
