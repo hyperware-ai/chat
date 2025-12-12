@@ -1030,6 +1030,7 @@ dependencies = [
  "hyperware_process_lib 3.0.0 (git+https://github.com/hyperware-ai/process_lib?rev=067fab6)",
  "process_macros",
  "rand 0.8.5",
+ "rmp-serde",
  "serde",
  "serde_json",
  "wit-bindgen 0.42.1",

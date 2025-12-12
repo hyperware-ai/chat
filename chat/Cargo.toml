@@ -34,6 +34,9 @@ features = [
 ]
 version = "1.0"
 
+[dev-dependencies]
+rmp-serde = "1"
+
 [features]
 caller-utils = ["chat_caller_utils"]
 default = ["caller-utils"]

@@ -94,6 +94,125 @@ mod tests {
         assert!(restored.active_connections.is_empty());
         assert!(restored.node_profiles.is_empty());
     }
+
+    #[test]
+    fn legacy_master_state_deserializes() {
+        use serde::{Deserialize, Serialize};
+        use std::collections::{HashMap, HashSet};
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+        struct LegacyChatMessage {
+            id: String,
+            sender: String,
+            content: String,
+            timestamp: u64,
+            status: MessageStatus,
+            reply_to: Option<String>,
+            reactions: Vec<MessageReaction>,
+            message_type: MessageType,
+            file_info: Option<FileInfo>,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+        struct LegacyChat {
+            id: String,
+            counterparty: String,
+            messages: Vec<LegacyChatMessage>,
+            last_activity: u64,
+            unread_count: u32,
+            is_blocked: bool,
+            notify: bool,
+            #[serde(default)]
+            counterparty_profile: Option<UserProfile>,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+        struct LegacyChatState {
+            profile: UserProfile,
+            chats: HashMap<String, LegacyChat>,
+            chat_keys: HashMap<String, ChatKey>,
+            settings: Settings,
+            delivery_queue: HashMap<String, Vec<LegacyChatMessage>>,
+            online_nodes: HashSet<String>,
+            ws_connections: HashMap<u32, String>,
+            browser_connections: HashMap<String, u32>,
+            last_heartbeat: HashMap<u32, u64>,
+            #[serde(default)]
+            active_connections: HashSet<u32>,
+            #[serde(default)]
+            node_profiles: HashMap<String, UserProfile>,
+        }
+
+        let message = LegacyChatMessage {
+            id: "123:1".to_string(),
+            sender: "bob.node".to_string(),
+            content: "hi".to_string(),
+            timestamp: 123,
+            status: MessageStatus::Delivered,
+            reply_to: None,
+            reactions: Vec::new(),
+            message_type: MessageType::Text,
+            file_info: None,
+        };
+        let chat = LegacyChat {
+            id: "alice.node:bob.node".to_string(),
+            counterparty: "bob.node".to_string(),
+            messages: vec![message.clone()],
+            last_activity: 123,
+            unread_count: 0,
+            is_blocked: false,
+            notify: true,
+            counterparty_profile: Some(UserProfile {
+                name: "bob".to_string(),
+                profile_pic: None,
+            }),
+        };
+        let legacy = LegacyChatState {
+            profile: UserProfile {
+                name: "alice".to_string(),
+                profile_pic: None,
+            },
+            chats: HashMap::from([(chat.id.clone(), chat)]),
+            chat_keys: HashMap::new(),
+            settings: Settings::default(),
+            delivery_queue: HashMap::new(),
+            online_nodes: HashSet::new(),
+            ws_connections: HashMap::new(),
+            browser_connections: HashMap::new(),
+            last_heartbeat: HashMap::new(),
+            active_connections: HashSet::new(),
+            node_profiles: HashMap::from([(
+                "bob.node".to_string(),
+                UserProfile {
+                    name: "bob".to_string(),
+                    profile_pic: None,
+                },
+            )]),
+        };
+
+        let bytes = rmp_serde::to_vec(&legacy).expect("serialize legacy state via rmp");
+        let restored: ChatState = rmp_serde::from_slice(&bytes).expect("deserialize into new state");
+
+        assert_eq!(restored.profile.name, "alice");
+        assert_eq!(restored.chats.len(), 1);
+        let restored_chat = restored
+            .chats
+            .get("alice.node:bob.node")
+            .expect("chat should deserialize");
+        assert_eq!(restored_chat.messages.len(), 1);
+        let restored_message = restored_chat.messages.first().unwrap();
+        assert_eq!(restored_message.id, message.id);
+        assert_eq!(restored_message.sender, message.sender);
+        assert_eq!(restored_message.content, message.content);
+        assert_eq!(restored_message.timestamp, message.timestamp);
+        assert_eq!(restored_message.sequence, None);
+        assert_eq!(restored_message.status, message.status);
+        assert!(restored.groups.is_empty());
+        assert_eq!(
+            restored.node_profiles.get("bob.node").map(|p| p.name.as_str()),
+            Some("bob")
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -226,7 +345,7 @@ impl<'de> Deserialize<'de> for ChatState {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct ChatStateSerde {
+        struct ChatStateSerdeV2 {
             profile: UserProfile,
             chats: HashMap<String, Chat>,
             chat_keys: HashMap<String, ChatKey>,
@@ -235,19 +354,70 @@ impl<'de> Deserialize<'de> for ChatState {
             message_sequence_counters: HashMap<String, u64>,
             #[serde(default)]
             groups: HashMap<GroupId, Group>,
+            #[serde(default)]
+            node_profiles: HashMap<String, UserProfile>,
         }
 
-        let data = ChatStateSerde::deserialize(deserializer)?;
+        #[derive(Deserialize)]
+        struct ChatStateSerdeV1 {
+            profile: UserProfile,
+            chats: HashMap<String, Chat>,
+            chat_keys: HashMap<String, ChatKey>,
+            settings: Settings,
+            #[serde(default)]
+            delivery_queue: HashMap<String, Vec<ChatMessage>>,
+            #[serde(default)]
+            online_nodes: HashSet<String>,
+            #[serde(default)]
+            ws_connections: HashMap<u32, String>,
+            #[serde(default)]
+            browser_connections: HashMap<String, u32>,
+            #[serde(default)]
+            last_heartbeat: HashMap<u32, u64>,
+            #[serde(default)]
+            active_connections: HashSet<u32>,
+            #[serde(default)]
+            node_profiles: HashMap<String, UserProfile>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ChatStateCompat {
+            V2(ChatStateSerdeV2),
+            V1(ChatStateSerdeV1),
+        }
+
+        let (profile, chats, chat_keys, settings, message_sequence_counters, groups, node_profiles) =
+            match ChatStateCompat::deserialize(deserializer)? {
+                ChatStateCompat::V2(data) => (
+                    data.profile,
+                    data.chats,
+                    data.chat_keys,
+                    data.settings,
+                    data.message_sequence_counters,
+                    data.groups,
+                    data.node_profiles,
+                ),
+                ChatStateCompat::V1(data) => (
+                    data.profile,
+                    data.chats,
+                    data.chat_keys,
+                    data.settings,
+                    HashMap::new(),
+                    HashMap::new(),
+                    data.node_profiles,
+                ),
+            };
         let (delivery_tx, delivery_rx) = DeliveryTx::new();
         let (replication_tx, replication_rx) = ReplicationTx::new();
         let (replication_wake_tx, replication_wake_rx) = ReplicationWakeTx::new();
 
         let mut state = ChatState {
-            profile: data.profile,
-            chats: data.chats,
-            chat_keys: data.chat_keys,
-            settings: data.settings,
-            message_sequence_counters: data.message_sequence_counters,
+            profile,
+            chats,
+            chat_keys,
+            settings,
+            message_sequence_counters,
             delivery_tx,
             delivery_rx: Some(delivery_rx),
             replication_tx,
@@ -267,8 +437,8 @@ impl<'de> Deserialize<'de> for ChatState {
             browser_connections: HashMap::new(),
             last_heartbeat: HashMap::new(),
             active_connections: HashSet::new(),
-            node_profiles: HashMap::new(),
-            groups: data.groups,
+            node_profiles,
+            groups,
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),

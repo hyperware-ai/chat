@@ -3655,7 +3655,10 @@ impl ChatState {
             let counterparty = chat.counterparty.clone();
             for message in chat.messages.iter() {
                 if message.sender == our().node
-                    && matches!(message.status, MessageStatus::Sent | MessageStatus::Sending)
+                    && matches!(
+                        message.status,
+                        MessageStatus::Sent | MessageStatus::Sending | MessageStatus::Failed
+                    )
                 {
                     self.enqueue_delivery_message(&counterparty, message.clone());
                 }

@@ -178,7 +178,7 @@ pub enum NotificationsResponse {
     Err(String),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct ChatMessage {
     pub id: String,
     pub sender: String,
@@ -191,6 +191,75 @@ pub struct ChatMessage {
     pub reactions: Vec<MessageReaction>,
     pub message_type: MessageType,
     pub file_info: Option<FileInfo>,
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ChatMessageV2 {
+            id: String,
+            sender: String,
+            content: String,
+            timestamp: u64,
+            #[serde(default)]
+            sequence: Option<u64>,
+            status: MessageStatus,
+            reply_to: Option<String>,
+            reactions: Vec<MessageReaction>,
+            message_type: MessageType,
+            file_info: Option<FileInfo>,
+        }
+
+        #[derive(Deserialize)]
+        struct ChatMessageV1 {
+            id: String,
+            sender: String,
+            content: String,
+            timestamp: u64,
+            status: MessageStatus,
+            reply_to: Option<String>,
+            reactions: Vec<MessageReaction>,
+            message_type: MessageType,
+            file_info: Option<FileInfo>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ChatMessageCompat {
+            V2(ChatMessageV2),
+            V1(ChatMessageV1),
+        }
+
+        match ChatMessageCompat::deserialize(deserializer)? {
+            ChatMessageCompat::V2(msg) => Ok(ChatMessage {
+                id: msg.id,
+                sender: msg.sender,
+                content: msg.content,
+                timestamp: msg.timestamp,
+                sequence: msg.sequence,
+                status: msg.status,
+                reply_to: msg.reply_to,
+                reactions: msg.reactions,
+                message_type: msg.message_type,
+                file_info: msg.file_info,
+            }),
+            ChatMessageCompat::V1(msg) => Ok(ChatMessage {
+                id: msg.id,
+                sender: msg.sender,
+                content: msg.content,
+                timestamp: msg.timestamp,
+                sequence: None,
+                status: msg.status,
+                reply_to: msg.reply_to,
+                reactions: msg.reactions,
+                message_type: msg.message_type,
+                file_info: msg.file_info,
+            }),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
