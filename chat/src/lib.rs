@@ -2,7 +2,6 @@
 // A mobile-first chat application for the Hyperware platform
 // Supporting 1:1 DMs, Group chats (TODO), and Voice calls (TODO)
 
-
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -447,7 +446,7 @@ impl ChatState {
     // CHAT MANAGEMENT ENDPOINTS
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn create_chat(&mut self, req: CreateChatReq) -> Result<Chat, String> {
@@ -499,7 +498,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn get_chats(&self) -> Result<Vec<Chat>, String> {
@@ -514,7 +513,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn get_chat(&self, req: GetChatReq) -> Result<Chat, String> {
@@ -525,7 +524,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
@@ -582,7 +581,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn get_sync_hash(&self, req: GetSyncHashReq) -> Result<SyncHashInfo, String> {
         let chat = self
@@ -623,7 +622,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn get_all_sync_hashes(&self) -> Result<Vec<SyncHashInfo>, String> {
         let mut sync_hashes = Vec::new();
@@ -664,7 +663,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
         self.chats
@@ -677,21 +676,21 @@ impl ChatState {
     // GROUP OPERATIONS
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn create_group(&mut self, req: CreateGroupReq) -> Result<CreateGroupRes, String> {
         self.create_group_state(req)
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn list_groups(&self) -> Result<ListGroupsRes, String> {
         Ok(self.list_groups_state())
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn get_group(&self, req: GetGroupReq) -> Result<GetGroupRes, String> {
         // Check if caller is a member of the group (Active or Removed)
@@ -717,7 +716,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn create_group_thread(
         &mut self,
@@ -727,7 +726,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn send_group_message(
         &mut self,
@@ -737,7 +736,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn edit_group_message(
         &mut self,
@@ -747,31 +746,31 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
-    async fn delete_group_message(
-        &mut self,
-        req: DeleteGroupMessageReq,
-    ) -> Result<String, String> {
+    async fn delete_group_message(&mut self, req: DeleteGroupMessageReq) -> Result<String, String> {
         self.delete_group_message_state(req)
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn add_group_reaction(&mut self, req: AddGroupReactionReq) -> Result<String, String> {
         self.add_group_reaction_state(req)
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
-    async fn remove_group_reaction(&mut self, req: RemoveGroupReactionReq) -> Result<String, String> {
+    async fn remove_group_reaction(
+        &mut self,
+        req: RemoveGroupReactionReq,
+    ) -> Result<String, String> {
         self.remove_group_reaction_state(req)
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn invite_group_member(
         &mut self,
@@ -798,7 +797,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn approve_group_membership(
         &mut self,
@@ -811,7 +810,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn remove_group_member(
         &mut self,
@@ -824,7 +823,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
@@ -832,7 +831,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
         let mut broadcast_update: Option<WsServerMessage> = None;
@@ -884,7 +883,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn delete_message(&mut self, req: DeleteMessageReq) -> Result<String, String> {
         let mut chat_update: Option<WsServerMessage> = None;
@@ -922,7 +921,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn add_reaction(&mut self, req: AddReactionReq) -> Result<String, String> {
         let timestamp = std::time::SystemTime::now()
@@ -984,7 +983,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn forward_message(&mut self, req: ForwardMessageReq) -> Result<ChatMessage, String> {
         // Find the message to forward from the specified chat
@@ -1070,7 +1069,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn remove_reaction(&mut self, req: RemoveReactionReq) -> Result<String, String> {
         let user = our().node.clone();
@@ -1124,7 +1123,7 @@ impl ChatState {
     // BROWSER CHAT MANAGEMENT
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn create_chat_link(&mut self, req: CreateChatLinkReq) -> Result<String, String> {
         let key = format!("{:x}", rand::random::<u128>());
@@ -1148,7 +1147,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn get_chat_keys(&self) -> Result<Vec<ChatKey>, String> {
         Ok(self
@@ -1160,7 +1159,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn revoke_chat_key(&mut self, req: RevokeChatKeyReq) -> Result<String, String> {
         if let Some(key) = self.chat_keys.get_mut(&req.key) {
@@ -1174,14 +1173,14 @@ impl ChatState {
     // SETTINGS
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn get_settings(&self) -> Result<Settings, String> {
         Ok(self.settings.clone())
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn update_settings(&mut self, settings: Settings) -> Result<String, String> {
         self.settings = settings;
@@ -1189,7 +1188,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn update_profile(&mut self, profile: UserProfile) -> Result<String, String> {
         self.profile = profile.clone();
@@ -1227,7 +1226,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn upload_profile_picture(
         &mut self,
@@ -1280,7 +1279,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn get_profile(&self) -> Result<UserProfile, String> {
         Ok(self.profile.clone())
@@ -1289,7 +1288,7 @@ impl ChatState {
     // FILE AND VOICE NOTE OPERATIONS
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn upload_file(&mut self, req: UploadFileReq) -> Result<ChatMessage, String> {
         // Decode base64 data
@@ -1393,7 +1392,7 @@ impl ChatState {
         Ok(stored_message)
     }
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn send_voice_note(&mut self, req: SendVoiceNoteReq) -> Result<ChatMessage, String> {
         let timestamp = std::time::SystemTime::now()
@@ -1428,8 +1427,7 @@ impl ChatState {
             file_info: Some(file_info),
         };
 
-        let (counterparty, stored_message) =
-            self.stage_outgoing_message(&chat_id, message, None);
+        let (counterparty, stored_message) = self.stage_outgoing_message(&chat_id, message, None);
         self.dispatch_outgoing_message(counterparty, stored_message.clone());
         Ok(stored_message)
     }
@@ -1437,7 +1435,19 @@ impl ChatState {
     // P2P MESSAGE RECEIVING
 
     #[remote]
-    async fn receive_chat_creation(&mut self, counterparty: String) -> Result<(), String> {
+    async fn receive_chat_creation(&mut self, mut counterparty: String) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if counterparty != caller_node {
+                println!(
+                    "[SEC] receive_chat_creation rejected spoofed counterparty={} source={}",
+                    counterparty, caller_node
+                );
+                return Err("receive_chat_creation rejected spoofed counterparty".to_string());
+            }
+            counterparty = caller_node;
+        }
         println!("receive_chat_creation: Got request from {}", counterparty);
 
         // Normalize chat ID to always be alphabetically sorted
@@ -1506,7 +1516,19 @@ impl ChatState {
     }
 
     #[remote]
-    async fn receive_message(&mut self, message: ChatMessage) -> Result<(), String> {
+    async fn receive_message(&mut self, mut message: ChatMessage) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if message.sender != caller_node {
+                println!(
+                    "[SEC] receive_message rejected spoofed sender={} source={}",
+                    message.sender, caller_node
+                );
+                return Err("receive_message rejected spoofed sender".to_string());
+            }
+            message.sender = caller_node;
+        }
         // Find or create chat for this message - normalize the ID
         let chat_id = Self::normalize_chat_id(&message.sender, &our().node);
         let is_new_chat = !self.chats.contains_key(&chat_id);
@@ -1710,8 +1732,20 @@ impl ChatState {
         &mut self,
         message_id: String,
         emoji: String,
-        user: String,
+        mut user: String,
     ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if user != caller_node {
+                println!(
+                    "[SEC] receive_reaction rejected spoofed user={} source={}",
+                    user, caller_node
+                );
+                return Err("receive_reaction rejected spoofed user".to_string());
+            }
+            user = caller_node.clone();
+        }
         println!(
             "Received reaction {} from {} for message {}",
             emoji, user, message_id
@@ -1730,18 +1764,35 @@ impl ChatState {
 
         let mut update: Option<WsServerMessage> = None;
 
-        // Find the message and add the reaction
-        for chat in self.chats.values_mut() {
-            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                if !message
-                    .reactions
-                    .iter()
-                    .any(|r| r.user == reaction.user && r.emoji == reaction.emoji)
-                {
-                    message.reactions.push(reaction.clone());
-                    update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+        if is_local_call {
+            // Local calls are used for tests/debug tooling; keep broad search semantics.
+            for chat in self.chats.values_mut() {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if !message
+                        .reactions
+                        .iter()
+                        .any(|r| r.user == reaction.user && r.emoji == reaction.emoji)
+                    {
+                        message.reactions.push(reaction.clone());
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                    }
+                    break;
                 }
-                break;
+            }
+        } else {
+            // Remote callers may only mutate chats that involve them.
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if let Some(chat) = self.chats.get_mut(&expected_chat_id) {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if !message
+                        .reactions
+                        .iter()
+                        .any(|r| r.user == reaction.user && r.emoji == reaction.emoji)
+                    {
+                        message.reactions.push(reaction.clone());
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                    }
+                }
             }
         }
 
@@ -1759,25 +1810,53 @@ impl ChatState {
         &mut self,
         message_id: String,
         emoji: String,
-        user: String,
+        mut user: String,
     ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if user != caller_node {
+                println!(
+                    "[SEC] receive_reaction_remove rejected spoofed user={} source={}",
+                    user, caller_node
+                );
+                return Err("receive_reaction_remove rejected spoofed user".to_string());
+            }
+            user = caller_node.clone();
+        }
         println!(
             "Received reaction removal {} from {} for message {}",
             emoji, user, message_id
         );
 
         let mut update: Option<WsServerMessage> = None;
-        for chat in self.chats.values_mut() {
-            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                if let Some(pos) = message
-                    .reactions
-                    .iter()
-                    .position(|r| r.user == user && r.emoji == emoji)
-                {
-                    message.reactions.remove(pos);
-                    update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+        if is_local_call {
+            for chat in self.chats.values_mut() {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if let Some(pos) = message
+                        .reactions
+                        .iter()
+                        .position(|r| r.user == user && r.emoji == emoji)
+                    {
+                        message.reactions.remove(pos);
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                    }
+                    break;
                 }
-                break;
+            }
+        } else {
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if let Some(chat) = self.chats.get_mut(&expected_chat_id) {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if let Some(pos) = message
+                        .reactions
+                        .iter()
+                        .position(|r| r.user == user && r.emoji == emoji)
+                    {
+                        message.reactions.remove(pos);
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                    }
+                }
             }
         }
 
@@ -1795,10 +1874,29 @@ impl ChatState {
         message_id: String,
         new_content: String,
     ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if chat_id != expected_chat_id {
+                println!(
+                    "[SEC] receive_message_edit rejected spoofed chat_id={} expected={} source={}",
+                    chat_id, expected_chat_id, caller_node
+                );
+                return Err("receive_message_edit rejected spoofed chat_id".to_string());
+            }
+        }
         let mut chat_update: Option<WsServerMessage> = None;
 
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                if !is_local_call && message.sender != caller_node {
+                    println!(
+                        "[SEC] receive_message_edit rejected edit from {} for message sent by {}",
+                        caller_node, message.sender
+                    );
+                    return Err("receive_message_edit rejected unauthorized edit".to_string());
+                }
                 message.content = new_content;
                 chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
             }
@@ -1819,6 +1917,8 @@ impl ChatState {
     // Remote handler for receiving message acknowledgments
     #[remote]
     async fn receive_message_ack(&mut self, message_id: String) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
         println!("Received ACK for message {}", message_id);
         // This ACK is from the remote node confirming they received our message
         // We need to find OUR sent message and update its status to Delivered
@@ -1826,6 +1926,9 @@ impl ChatState {
         let mut update_payload: Option<(String, WsServerMessage)> = None;
 
         for chat in self.chats.values_mut() {
+            if !is_local_call && chat.counterparty != caller_node {
+                continue;
+            }
             if let Some(message) = chat
                 .messages
                 .iter_mut()
@@ -1866,6 +1969,18 @@ impl ChatState {
         message_id: String,
         chat_id: String,
     ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if chat_id != expected_chat_id {
+                println!(
+                    "[SEC] receive_message_deletion rejected spoofed chat_id={} expected={} source={}",
+                    chat_id, expected_chat_id, caller_node
+                );
+                return Err("receive_message_deletion rejected spoofed chat_id".to_string());
+            }
+        }
         println!(
             "Received deletion request for message {} in chat {}",
             message_id, chat_id
@@ -1875,6 +1990,13 @@ impl ChatState {
 
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == message_id) {
+                if !is_local_call && chat.messages[pos].sender != caller_node {
+                    println!(
+                        "[SEC] receive_message_deletion rejected delete from {} for message sent by {}",
+                        caller_node, chat.messages[pos].sender
+                    );
+                    return Err("receive_message_deletion rejected unauthorized delete".to_string());
+                }
                 chat.messages.remove(pos);
                 println!("Deleted message {} from chat {}", message_id, chat_id);
                 chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
@@ -1891,9 +2013,21 @@ impl ChatState {
     #[remote]
     async fn receive_profile_update(
         &mut self,
-        node: String,
+        mut node: String,
         profile: UserProfile,
     ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if node != caller_node {
+                println!(
+                    "[SEC] receive_profile_update rejected spoofed node={} source={}",
+                    node, caller_node
+                );
+                return Err("receive_profile_update rejected spoofed node".to_string());
+            }
+            node = caller_node;
+        }
         println!("Received profile update from {}: {:?}", node, profile);
 
         // Store the profile
@@ -1958,7 +2092,7 @@ impl ChatState {
     // SEARCH
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[http]
     async fn search_chats(&self, req: SearchChatsReq) -> Result<Vec<Chat>, String> {
         let query = req.query.to_lowercase();
@@ -1979,7 +2113,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn crdt_group_state_vector(
@@ -2013,7 +2147,6 @@ impl ChatState {
         })
     }
 
-    // uncomment #[remote] for tests
     #[remote]
     #[local]
     #[http]
@@ -2035,7 +2168,12 @@ impl ChatState {
         if sender_node != our().node && self.groups.contains_key(&req.group_id) {
             // Remote request - validate sender is an active member
             self.require_subscriber_access(&req.group_id, &sender_node)
-                .map_err(|e| format!("CRDT update denied: sender {} not authorized: {}", sender_node, e))?;
+                .map_err(|e| {
+                    format!(
+                        "CRDT update denied: sender {} not authorized: {}",
+                        sender_node, e
+                    )
+                })?;
         }
 
         self.require_hub_access(&req.group_id, &our().node)
@@ -2119,7 +2257,12 @@ impl ChatState {
         if sender_node != our().node && self.groups.contains_key(&group_id) {
             // Remote request - validate sender is an active member
             self.require_subscriber_access(&group_id, &sender_node)
-                .map_err(|e| format!("CRDT apply denied: sender {} not authorized: {}", sender_node, e))?;
+                .map_err(|e| {
+                    format!(
+                        "CRDT apply denied: sender {} not authorized: {}",
+                        sender_node, e
+                    )
+                })?;
         }
 
         self.apply_group_update_payload(
@@ -2153,7 +2296,12 @@ impl ChatState {
         if sender_node != our().node && self.groups.contains_key(&req.group_id) {
             // Remote request - validate sender is an active member
             self.require_subscriber_access(&req.group_id, &sender_node)
-                .map_err(|e| format!("CRDT snapshot denied: sender {} not authorized: {}", sender_node, e))?;
+                .map_err(|e| {
+                    format!(
+                        "CRDT snapshot denied: sender {} not authorized: {}",
+                        sender_node, e
+                    )
+                })?;
         }
 
         self.require_hub_access(&req.group_id, &our().node)
@@ -2195,7 +2343,7 @@ impl ChatState {
     }
 
     // uncomment #[remote] for tests
-    #[remote]
+    // #[remote]
     #[local]
     #[http]
     async fn replication_work(&mut self) -> Result<(), String> {
@@ -2206,10 +2354,7 @@ impl ChatState {
     /// This is called when a member is invited to get them bootstrapped immediately.
     #[local]
     #[http]
-    async fn push_snapshot_to_peer(
-        &mut self,
-        req: PushSnapshotToPeerReq,
-    ) -> Result<(), String> {
+    async fn push_snapshot_to_peer(&mut self, req: PushSnapshotToPeerReq) -> Result<(), String> {
         println!(
             "[REPL][{}] push_snapshot_to_peer invoked peer={}",
             req.group_id, req.peer
@@ -2226,7 +2371,8 @@ impl ChatState {
         Ok(())
     }
 
-    #[remote]
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn admin_replication_state(
@@ -2287,7 +2433,8 @@ impl ChatState {
         })
     }
 
-    #[remote]
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn admin_whitelist(&self, req: AdminWhitelistReq) -> Result<AdminWhitelistRes, String> {
@@ -2336,7 +2483,8 @@ impl ChatState {
         })
     }
 
-    #[remote]
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn admin_subscriber_events(
@@ -2731,7 +2879,8 @@ impl ChatState {
                                 self.replication_metrics.acl_skips.saturating_add(1);
                             return;
                         }
-                    } else if let Err(err) = self.require_subscriber_access(&task.group_id, &our().node)
+                    } else if let Err(err) =
+                        self.require_subscriber_access(&task.group_id, &our().node)
                     {
                         println!(
                             "[REPL][{}] skip push to subscriber {} (local publish denied): {}",

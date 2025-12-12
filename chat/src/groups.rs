@@ -2,7 +2,7 @@ use crate::crdt::{
     compile_membership_rules, Group, GroupId, GroupMember, GroupPermissions, GroupTier,
     MembershipActionKind, MembershipDecision, MembershipDecisionStatus, MembershipProposal,
     MembershipRuleBox, MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId,
-    MessageMeta, NodeId, SubscriberSyncState, ThreadId, MessageReactionMeta,
+    MessageMeta, MessageReactionMeta, NodeId, SubscriberSyncState, ThreadId,
 };
 use crate::types::{
     active_member_count, aggregate_rule_decisions, current_timestamp, group_root_thread_id,
@@ -310,7 +310,9 @@ impl ChatState {
             });
             println!(
                 "[REACTION] Added reaction: msg_id={} emoji={} reactions_count={}",
-                req.message_id, req.emoji, message.reactions.len()
+                req.message_id,
+                req.emoji,
+                message.reactions.len()
             );
 
             if let Some(meta) = group.metadata.as_mut() {
@@ -454,9 +456,11 @@ impl ChatState {
             if let Some(meta) = group.metadata.as_mut() {
                 meta.updated_at = now;
             }
-            group
-                .membership_proposals
-                .remove(&membership_proposal_key(group_id, &target, MembershipActionKind::Remove));
+            group.membership_proposals.remove(&membership_proposal_key(
+                group_id,
+                &target,
+                MembershipActionKind::Remove,
+            ));
             sync_member_membership_sets(group, &target, now);
             self.commit_group_crdt_or_log(group_id, "leave_group");
             return Ok(MembershipDecision::approved());

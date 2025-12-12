@@ -12,22 +12,22 @@ use crate::crdt::{
     ThreadId, ThreadParentRef,
 };
 use crate::pubsub::PubSubRegistry;
-use hyperware_crdt::CommitteeError;
 use hyperware_crdt::yrs::Encode;
+use hyperware_crdt::CommitteeError;
 use hyperware_process_lib::our;
 use hyperware_pubsub_core::{whitelist::NodeId as BrokerNodeId, TopicId as BrokerTopicId};
 
 use super::api::*;
+use super::model::*;
 use super::model::{
     active_member_count, aggregate_rule_decisions, current_timestamp, ensure_membership_rules,
     generate_group_id, group_root_thread_id, membership_proposal_key, sync_member_membership_sets,
 };
-use super::model::*;
-use crate::WsServerMessage;
 use super::replication::{
     BrokerEnvelope, ReplicationKind, ReplicationMetrics, ReplicationTask, ReplicationTx,
     ReplicationWakeRx, ReplicationWakeTx, SubscriberDeliveryEvent,
 };
+use crate::WsServerMessage;
 
 #[derive(Clone, Debug)]
 pub enum DeliveryEvent {
