@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useEffect } from 'react';
+import React, { useMemo, useRef, useEffect, useCallback } from 'react';
 import { Chat } from '#caller-utils';
 import GroupMessage from './GroupMessage';
 import GroupMessageInput from './GroupMessageInput';
@@ -70,7 +70,10 @@ const ThreadView: React.FC<ThreadViewProps> = ({
   onReact,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
+  const prevMessageCountRef = useRef<number>(0);
+  const isNearBottomRef = useRef<boolean>(true);
 
   const threadMeta = useMemo(() => threads.find((t) => t.id === threadId), [threads, threadId]);
   const threadMap = useMemo(() => {
@@ -123,9 +126,35 @@ const ThreadView: React.FC<ThreadViewProps> = ({
     return map;
   }, [threads, threadId]);
 
+  // Track scroll position to know if user is near bottom
+  const handleScroll = useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    // Consider "near bottom" if within 100px of the bottom
+    isNearBottomRef.current = scrollHeight - scrollTop - clientHeight < 100;
+  }, []);
+
+  // Only auto-scroll when new messages are added AND user is near bottom
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [filtered.length, threadId]);
+    const newCount = filtered.length;
+    const prevCount = prevMessageCountRef.current;
+
+    // Only scroll if messages were added (not on refresh with same count)
+    // and user is near the bottom
+    if (newCount > prevCount && isNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    prevMessageCountRef.current = newCount;
+  }, [filtered.length]);
+
+  // Reset scroll state and scroll to bottom when switching threads
+  useEffect(() => {
+    isNearBottomRef.current = true;
+    prevMessageCountRef.current = filtered.length;
+    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+  }, [threadId]);
 
   const registerMessageRef = (id: string, el: HTMLDivElement | null) => {
     if (!el) {
@@ -232,7 +261,7 @@ const ThreadView: React.FC<ThreadViewProps> = ({
         </div>
       </div>
 
-      <div className="thread-messages">
+      <div className="thread-messages" ref={messagesContainerRef} onScroll={handleScroll}>
         {/* Show root message at the top if it exists and is from a different thread */}
         {rootMessage && rootMessage.threadId !== threadId && (
           <div className="thread-root-message">
