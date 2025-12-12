@@ -308,7 +308,7 @@ impl ChatState {
                 emoji: req.emoji.clone(),
                 timestamp: current_timestamp(),
             });
-            println!(
+            crate::log_debug!(
                 "[REACTION] Added reaction: msg_id={} emoji={} reactions_count={}",
                 req.message_id,
                 req.emoji,

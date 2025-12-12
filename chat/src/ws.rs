@@ -19,7 +19,7 @@ impl ChatState {
                 if let Err(err) =
                     self.send_message_internal(&chat_id, content, reply_to, Some(channel_id))
                 {
-                    println!("Failed to send message via WS: {}", err);
+                    crate::log_debug!("Failed to send message via WS: {}", err);
                 }
             }
             WsClientMessage::Ack { message_id } => {
@@ -175,7 +175,7 @@ impl ChatState {
                     bytes,
                 },
             ),
-            Err(err) => println!("Failed to serialize WS message: {:?}", err),
+            Err(err) => crate::log_debug!("Failed to serialize WS message: {:?}", err),
         }
     }
 

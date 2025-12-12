@@ -303,7 +303,7 @@ impl ChatState {
         entry.push_back(env);
         self.broker_offsets
             .insert(topic.to_string(), next.saturating_add(1));
-        println!(
+        crate::log_debug!(
             "[BROKER] topic={} enqueued offset={} len={}",
             topic,
             next,
@@ -349,7 +349,7 @@ impl ChatState {
 
             for env in envelopes {
                 if let Err(err) = self.apply_broker_envelope(&topic, &env, now) {
-                    println!(
+                    crate::log_debug!(
                         "[BROKER] topic={} offset={} apply error: {}",
                         topic, env.offset, err
                     );
@@ -422,7 +422,7 @@ impl ChatState {
                 });
                 self.replication_metrics.stale_replays =
                     self.replication_metrics.stale_replays.saturating_add(1);
-                println!(
+                crate::log_debug!(
                     "[REPL][{}] queued {} replay to subscriber {} (age={}s)",
                     group_id,
                     match kind_for_log {
@@ -477,7 +477,7 @@ impl ChatState {
         let created_at = if env.ts == 0 { now } else { env.ts };
         let age = now.saturating_sub(created_at);
         if age > SUBSCRIBER_ACK_DEADLINE_SECS {
-            println!(
+            crate::log_debug!(
                 "[BROKER][{}] delivery lag {}s topic={} offset={}",
                 group_id, age, topic, env.offset
             );
@@ -486,7 +486,7 @@ impl ChatState {
             self.replication_metrics.last_subscriber_lag_secs = age;
             if age > SUBSCRIBER_LANE_TTL_SECS {
                 self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
-                println!(
+                crate::log_debug!(
                     "[BROKER][{}] drop stale subscriber envelope topic={} offset={} age={}s",
                     group_id, topic, env.offset, age
                 );
@@ -494,7 +494,7 @@ impl ChatState {
             }
             if self.register_delivery_fingerprint(topic, &env.payload, now) {
                 self.replication_metrics.drops = self.replication_metrics.drops.saturating_add(1);
-                println!(
+                crate::log_debug!(
                     "[BROKER][{}] drop duplicate subscriber envelope topic={} offset={}",
                     group_id, topic, env.offset
                 );
@@ -509,7 +509,7 @@ impl ChatState {
             if let Some(wl) = self.pubsub.whitelist(&group_id) {
                 let local = wl.version();
                 if local != in_acl {
-                    println!(
+                    crate::log_debug!(
                         "[BROKER][{}] ACL drift topic {} incoming={} local={}",
                         group_id, topic, in_acl, local
                     );

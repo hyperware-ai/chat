@@ -276,7 +276,7 @@ impl<'de> Deserialize<'de> for ChatState {
         };
 
         if let Err(err) = state.rebuild_group_doc_managers() {
-            println!(
+            crate::log_debug!(
                 "Failed to rebuild group CRDT managers from snapshot: {:?}",
                 err
             );
@@ -500,7 +500,7 @@ impl ChatState {
     pub fn publish_group_delta(&mut self, group_id: &GroupId, update_payload: &str) {
         let local_node = our().node.clone();
         if let Err(err) = self.require_hub_access(group_id, &local_node) {
-            println!(
+            crate::log_debug!(
                 "[CRDT][{}] skip publish: node {} lacks hub access ({})",
                 group_id, local_node, err
             );
@@ -578,7 +578,7 @@ impl ChatState {
         let needs =
             self.groups_pending_bootstrap.contains(group_id) || !self.groups.contains_key(group_id);
         if needs {
-            println!(
+            crate::log_debug!(
                 "[BOOT] group_needs_bootstrap group_id={} pending_set_contains={} has_group={}",
                 group_id,
                 self.groups_pending_bootstrap.contains(group_id),
@@ -605,7 +605,7 @@ impl ChatState {
             .cloned()
             .collect();
         for gid in ready {
-            println!(
+            crate::log_debug!(
                 "[BOOT] clearing pending_bootstrap for {} (acl_ready={} local_member_active={})",
                 gid,
                 self.local_group_acl_ready(&gid),
@@ -620,7 +620,7 @@ impl ChatState {
     }
 
     pub fn mark_group_bootstrapped(&mut self, group_id: &GroupId) {
-        println!(
+        crate::log_debug!(
             "[BOOT] mark_group_bootstrapped group_id={} pending_before={}",
             group_id,
             self.groups_pending_bootstrap.contains(group_id)
@@ -691,7 +691,7 @@ impl ChatState {
 
     pub fn commit_group_crdt_or_log(&mut self, group_id: &GroupId, context: &str) {
         if let Err(err) = self.commit_group_crdt(group_id) {
-            println!(
+            crate::log_debug!(
                 "Failed to commit group CRDT state (group={} context={}): {:?}",
                 group_id, context, err
             );
@@ -844,7 +844,7 @@ impl ChatState {
         if let Some(ref g) = group {
             for msg in g.messages.values() {
                 if !msg.reactions.is_empty() {
-                    println!(
+                    crate::log_debug!(
                         "[GET_GROUP] msg_id={} has {} reactions: {:?}",
                         msg.message_id,
                         msg.reactions.len(),
