@@ -2627,6 +2627,18 @@ impl ChatState {
         let res = self.replication_work_inner().await;
         self.replication_work_inflight
             .store(false, AtomicOrdering::SeqCst);
+        // If work was enqueued while we were inflight, the wake may have been
+        // dropped by the guard above. Re-wake only when there is ready work to
+        // avoid tight loops on backoff/future tasks.
+        let now = ChatState::now_secs();
+        if self
+            .replication_queue
+            .iter()
+            .any(|task| task.not_before <= now)
+        {
+            println!("[REPL] ready replication tasks remain, re-waking worker");
+            self.wake_replication_worker();
+        }
         res
     }
 
