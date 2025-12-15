@@ -777,10 +777,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     if (message.GroupUpdate) {
       const { group_id } = message.GroupUpdate;
-      const { activeGroupId, refreshActiveGroup } = useGroupStore.getState();
+      const { activeGroupId, refreshActiveGroup, refreshGroupPreviews } = useGroupStore.getState();
       if (activeGroupId === group_id) {
         refreshActiveGroup();
       }
+      // Always update the chat list preview for this group
+      refreshGroupPreviews([group_id]);
       return;
     }
     
