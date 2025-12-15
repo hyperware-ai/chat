@@ -1,0 +1,113 @@
+.group-message-input {
+  border-top: 1px solid var(--border-color);
+  padding: 10px 12px calc(12px + var(--safe-area-bottom, 0px));
+  background: var(--background);
+}
+
+.group-reply-preview,
+.group-edit-preview {
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border-radius: 8px;
+  border-left: 3px solid var(--primary-color, #007aff);
+}
+
+.group-reply-info,
+.group-edit-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.group-reply-label,
+.group-edit-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.group-edit-label {
+  color: var(--primary-color, #007aff);
+}
+
+.group-cancel-reply,
+.group-cancel-edit {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 14px;
+  border-radius: 4px;
+}
+
+.group-cancel-reply:hover,
+.group-cancel-edit:hover {
+  background: var(--border-color);
+  color: var(--text-primary);
+}
+
+.group-reply-content,
+.group-edit-content {
+  font-size: 13px;
+  color: var(--text-primary);
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.group-input-warning {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 204, 0, 0.12);
+  border: 1px solid rgba(255, 204, 0, 0.3);
+  color: #b57700;
+  font-size: 13px;
+}
+
+.group-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 8px 10px;
+}
+
+.group-input-row textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 15px;
+  min-height: 32px;
+}
+
+.group-input-row textarea:focus {
+  outline: none;
+}
+
+.group-send {
+  background: linear-gradient(135deg, #007aff, #5ac8fa);
+  border: none;
+  color: white;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-weight: 700;
+}
+
+.group-input-row.disabled {
+  opacity: 0.6;
+}
+
+.group-input-row.editing {
+  background: rgba(0, 122, 255, 0.05);
+  border-color: var(--primary-color, #007aff);
+}

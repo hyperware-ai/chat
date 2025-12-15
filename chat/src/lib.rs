@@ -2,438 +2,58 @@
 // A mobile-first chat application for the Hyperware platform
 // Supporting 1:1 DMs, Group chats (TODO), and Voice calls (TODO)
 
-use hyperprocess_macro::*;
-use hyperware_process_lib::{
-    our,
-    println,
-    homepage::add_to_homepage,
-    http::server::{send_ws_push, WsMessageType},
-    vfs,
-    LazyLoadBlob,
-    Address,
-    ProcessId,
-    Request,
-    hyperapp::{SaveOptions, send, sleep, spawn},
-};
-use serde::{Deserialize, Serialize, Deserializer, Serializer};
-use serde_json;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use flate2::write::GzEncoder;
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use flate2::Compression;
-use std::io::{Write, Read};
-use std::collections::hash_map::DefaultHasher;
+use futures::{channel::mpsc::UnboundedReceiver, pin_mut, select, FutureExt, StreamExt};
+use hyperapp_macro::*;
+use hyperware_crdt::yrs::{Decode, Encode, StateVector};
+use hyperware_process_lib::{
+    homepage::add_to_homepage,
+    http::server::WsMessageType,
+    hyperapp::{send, sleep, source, spawn, AppSendError, SaveOptions},
+    our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
+};
+use std::cmp::Ordering;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
+use std::io::{Read, Write};
+use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // Import generated RPC functions from caller-utils
 use chat_caller_utils::chat::{
-    receive_chat_creation_remote_rpc,
-    receive_message_remote_rpc,
-    receive_message_ack_remote_rpc,
-    receive_message_deletion_remote_rpc,
-    receive_reaction_remote_rpc,
-    receive_profile_update_remote_rpc,
+    receive_chat_creation_remote_rpc, receive_message_ack_remote_rpc,
+    receive_message_deletion_remote_rpc, receive_message_edit_remote_rpc,
+    receive_message_remote_rpc, receive_profile_update_remote_rpc, receive_reaction_remote_rpc,
+    receive_reaction_remove_remote_rpc,
 };
 use chat_caller_utils::ChatMessage as CUChatMessage;
 use chat_caller_utils::UserProfile as CUUserProfile;
 
+mod crdt;
+mod groups;
+pub mod logging;
+mod pubsub;
+mod replication;
+mod types;
+mod ws;
 
-// Notification structures matching the notifications server API
-#[derive(Serialize, Deserialize, Debug)]
-enum NotificationsAction {
-    SendNotification {
-        title: String,
-        body: String,
-        icon: Option<String>,
-        data: Option<serde_json::Value>,
-    },
-    GetPublicKey,
-    InitializeKeys,
-    AddSubscription {
-        subscription: PushSubscription,
-    },
-    RemoveSubscription {
-        endpoint: String,
-    },
-    ClearSubscriptions,
+pub use crdt::GroupDocState;
+pub use types::*;
+
+#[cfg(feature = "test-helpers")]
+pub mod test_exports {
+    pub use crate::crdt::{DeliveryCursor, Group, GroupRoutingConfig, SubscriberSyncState};
+    pub use crate::types::{BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask};
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct PushSubscription {
-    endpoint: String,
-    keys: SubscriptionKeys,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct SubscriptionKeys {
-    p256dh: String,
-    auth: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-enum NotificationsResponse {
-    NotificationSent,
-    PublicKey(String),
-    KeysInitialized,
-    SubscriptionAdded,
-    SubscriptionRemoved,
-    SubscriptionsCleared,
-    Err(String),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct ChatMessage {
-    pub id: String,
-    pub sender: String,
-    pub content: String,
-    pub timestamp: u64,
-    pub status: MessageStatus,
-    pub reply_to: Option<String>,
-    pub reactions: Vec<MessageReaction>,
-    pub message_type: MessageType,
-    pub file_info: Option<FileInfo>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct MessageReaction {
-    pub emoji: String,
-    pub user: String,
-    pub timestamp: u64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub enum MessageType {
-    Text,
-    Image,
-    File,
-    VoiceNote,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct FileInfo {
-    pub filename: String,
-    pub mime_type: String,
-    pub size: u64,
-    pub url: String, // VFS path or data URL
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub enum MessageStatus {
-    Sending,
-    Sent,
-    Delivered,
-    Failed,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Chat {
-    pub id: String,
-    pub counterparty: String,
-    pub messages: Vec<ChatMessage>,
-    pub last_activity: u64,
-    pub unread_count: u32,
-    pub is_blocked: bool,
-    pub notify: bool,
-    #[serde(default)]
-    pub counterparty_profile: Option<UserProfile>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct ChatKey {
-    pub key: String,
-    pub user_name: String,
-    pub created_at: u64,
-    pub is_revoked: bool,
-    pub chat_id: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct UserProfile {
-    pub name: String,
-    pub profile_pic: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Settings {
-    pub show_images: bool,
-    pub show_profile_pics: bool,
-    pub combine_chats_groups: bool,
-    pub notify_chats: bool,
-    pub notify_groups: bool,
-    pub notify_calls: bool,
-    pub allow_browser_chats: bool,
-    pub stt_enabled: bool,
-    pub stt_api_key: Option<String>,
-    pub max_file_size_mb: u64,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Settings {
-            show_images: true,
-            show_profile_pics: true,
-            combine_chats_groups: false,
-            notify_chats: true,
-            notify_groups: true,
-            notify_calls: true,
-            allow_browser_chats: true,
-            stt_enabled: false,
-            stt_api_key: None,
-            max_file_size_mb: 10, // Default 10MB limit
-        }
-    }
-}
-
-// WEBSOCKET MESSAGE TYPES
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum WsClientMessage {
-    // Node-to-node messages
-    SendMessage {
-        chat_id: String,
-        content: String,
-        reply_to: Option<String>
-    },
-    Ack {
-        message_id: String
-    },
-    MarkRead {
-        chat_id: String
-    },
-    UpdateStatus {
-        status: String
-    },
-
-    // Browser chat messages
-    AuthWithKey {
-        chat_key: String
-    },
-    BrowserMessage {
-        content: String
-    },
-
-    // Common
-    Heartbeat,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum WsServerMessage {
-    // Node-to-node messages
-    NewMessage(ChatMessage),
-    MessageAck {
-        message_id: String
-    },
-    StatusUpdate {
-        node: String,
-        status: String
-    },
-    ChatUpdate(Chat),
-    ProfileUpdate {
-        node: String,
-        profile: UserProfile,
-    },
-
-    // Browser chat messages
-    AuthSuccess {
-        chat_id: String,
-        history: Vec<ChatMessage>
-    },
-    AuthFailed {
-        reason: String
-    },
-
-    // Common
-    Heartbeat,
-    Error {
-        message: String
-    },
-}
-
-// REQUEST TYPES FOR HTTP ENDPOINTS
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct CreateChatReq {
-    pub counterparty: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct GetChatReq {
-    pub chat_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct GetMessagesReq {
-    pub chat_id: String,
-    pub before_timestamp: Option<u64>,
-    pub limit: Option<u64>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct GetSyncHashReq {
-    pub chat_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SyncHashInfo {
-    pub chat_id: String,
-    pub message_count: u32,
-    pub last_message_id: Option<String>,
-    pub last_message_timestamp: Option<u64>,
-    pub hash: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct DeleteChatReq {
-    pub chat_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SendMessageReq {
-    pub chat_id: String,
-    pub content: String,
-    pub reply_to: Option<String>,
-    pub file_info: Option<FileInfo>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct EditMessageReq {
-    pub chat_id: String,
-    pub message_id: String,
-    pub new_content: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct DeleteMessageReq {
-    pub chat_id: String,
-    pub message_id: String,
-    pub delete_for_both: Option<bool>, // true = delete for both, false/None = delete locally only
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AddReactionReq {
-    pub chat_id: String,
-    pub message_id: String,
-    pub emoji: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RemoveReactionReq {
-    pub chat_id: String,
-    pub message_id: String,
-    pub emoji: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ForwardMessageReq {
-    pub from_chat_id: String,
-    pub message_id: String,
-    pub to_chat_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct CreateChatLinkReq {
-    pub chat_id: String,
-    pub single_use: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RevokeChatKeyReq {
-    pub key: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct UploadFileReq {
-    pub chat_id: String,
-    pub filename: String,
-    pub mime_type: String,
-    pub data: String, // base64 encoded
-    pub reply_to: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct UploadProfilePictureReq {
-    pub mime_type: String,
-    pub data: String, // base64 encoded
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SendVoiceNoteReq {
-    pub chat_id: String,
-    pub audio_data: String, // base64 encoded
-    pub duration: u32, // in seconds
-    pub reply_to: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SearchChatsReq {
-    pub query: String,
-}
-
-// just the ones we care about
-#[derive(Serialize, Deserialize, Clone, Debug, process_macros::SerdeJsonInto)]
-enum HomepageRequest {
-    GetPushSubscription
-}
-
-// just the ones we care about
-#[derive(Serialize, Deserialize, Clone, Debug, process_macros::SerdeJsonInto)]
-enum HomepageResponse {
-    PushSubscription(Option<String>)
-}
-
-// APP STATE
-
-#[derive(Serialize, Deserialize)]
-pub struct ChatState {
-    pub profile: UserProfile,
-    pub chats: HashMap<String, Chat>,
-    pub chat_keys: HashMap<String, ChatKey>,
-    pub settings: Settings,
-    #[serde(with = "arc_mutex_serde")]
-    pub delivery_queue: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
-    pub online_nodes: HashSet<String>,
-    pub ws_connections: HashMap<u32, String>, // channel_id -> node/browser_id
-    pub browser_connections: HashMap<String, u32>, // chat_key -> channel_id
-    pub last_heartbeat: HashMap<u32, u64>, // channel_id -> timestamp
-    #[serde(default)]
-    pub active_connections: HashSet<u32>, // channel_ids that are actively viewing the app
-    #[serde(default)]
-    pub node_profiles: HashMap<String, UserProfile>, // Store profiles of other nodes
-}
-
-fn default_delivery_queue() -> Arc<Mutex<HashMap<String, Vec<ChatMessage>>>> {
-    Arc::new(Mutex::new(HashMap::new()))
-}
-
-impl Default for ChatState {
-    fn default() -> Self {
-        ChatState {
-            profile: UserProfile::default(),
-            chats: HashMap::new(),
-            chat_keys: HashMap::new(),
-            settings: Settings::default(),
-            delivery_queue: default_delivery_queue(),
-            online_nodes: HashSet::new(),
-            ws_connections: HashMap::new(),
-            browser_connections: HashMap::new(),
-            last_heartbeat: HashMap::new(),
-            active_connections: HashSet::new(),
-            node_profiles: HashMap::new(),
-        }
-    }
-}
-
-impl Default for UserProfile {
-    fn default() -> Self {
-        UserProfile {
-            name: "User".to_string(),
-            profile_pic: None,
-        }
-    }
-}
+use crate::crdt::{GroupId, MembershipDecisionStatus, MembershipStatus};
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
+// Replication RPC timeout to keep admin/test calls responsive.
+const REPL_RPC_TIMEOUT_SECS: u64 = 2;
 const ICON: &str = include_str!("./icon");
 
 // Helper function to enforce one-way status transitions
@@ -450,19 +70,28 @@ fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> Me
 
         // From Delivered, cannot change (terminal state)
         (Delivered, _) => {
-            println!("WARNING: Attempted invalid status transition from Delivered to {:?}", new);
+            log_debug!(
+                "WARNING: Attempted invalid status transition from Delivered to {:?}",
+                new
+            );
             current.clone()
         }
 
         // From Failed, cannot change (terminal state)
         (Failed, _) => {
-            println!("WARNING: Attempted invalid status transition from Failed to {:?}", new);
+            log_debug!(
+                "WARNING: Attempted invalid status transition from Failed to {:?}",
+                new
+            );
             current.clone()
         }
 
         // Any backwards transition is invalid
         _ => {
-            println!("WARNING: Attempted invalid status transition from {:?} to {:?}", current, new);
+            log_debug!(
+                "WARNING: Attempted invalid status transition from {:?} to {:?}",
+                current, new
+            );
             current.clone()
         }
     }
@@ -471,14 +100,20 @@ fn safe_update_message_status(current: &MessageStatus, new: MessageStatus) -> Me
 // Helper functions for compression
 fn compress_data(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data).map_err(|e| format!("Compression error: {}", e))?;
-    encoder.finish().map_err(|e| format!("Compression finish error: {}", e))
+    encoder
+        .write_all(data)
+        .map_err(|e| format!("Compression error: {}", e))?;
+    encoder
+        .finish()
+        .map_err(|e| format!("Compression finish error: {}", e))
 }
 
 fn decompress_data(compressed: &[u8]) -> Result<Vec<u8>, String> {
     let mut decoder = GzDecoder::new(compressed);
     let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed).map_err(|e| format!("Decompression error: {}", e))?;
+    decoder
+        .read_to_end(&mut decompressed)
+        .map_err(|e| format!("Decompression error: {}", e))?;
     Ok(decompressed)
 }
 
@@ -491,16 +126,109 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
     ::base64::decode(input)
 }
 
-// Helper function to send push notification for a message
-async fn send_push_notification_for_message(
-    sender: &str,
-    content: &str,
-    chat_id: &str
+/// Send the WIT `ReplicationWork` unit variant to ourselves. This wakes the
+/// replication handler, which runs with a ~12s budget to drain queues.
+async fn trigger_replication(target: Address) {
+    let _ = chat_caller_utils::chat::replication_work_local_rpc(&target).await;
+}
+
+/// Push a snapshot immediately to a new member (bypassing the debounced queue).
+/// This is called when a member is invited and approved, so they can bootstrap
+/// without waiting for the replication scheduler's 250ms debounce.
+fn spawn_immediate_snapshot_push(group_id: GroupId, peer: String) {
+    spawn(async move {
+        let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "PushSnapshotToPeer": {
+                "group_id": group_id,
+                "peer": peer,
+            }
+        }))
+        .unwrap_or_default();
+        let req = Request::new()
+            .target(self_addr)
+            .body(body)
+            .expects_response(5);
+        let _ = send::<serde_json::Value>(req).await;
+    });
+}
+
+/// Spawn the event + timer replication scheduler. It listens for wake signals
+/// (new work enqueued) and also ticks every 5s as a safety net, sending the WIT
+/// `ReplicationWork` variant to our own address. The receiver side (`replication_work`)
+/// enforces the 12s budget for draining tasks.
+fn start_replication_scheduler(wake_rx: ReplicationWakeRx) {
+    let mut wake_rx = wake_rx.into_stream();
+    let self_addr = Address::from((our().node.as_str(), OUR_PROCESS_ID));
+    spawn(async move {
+        let debounce = Duration::from_millis(250);
+        let mut last_wake: Option<Instant> = None;
+        loop {
+            let wake = wake_rx.next().fuse();
+            let tick = sleep(5000).fuse();
+            pin_mut!(wake, tick);
+            select! {
+                _ = wake => {
+                    let now = Instant::now();
+                    let should_fire = last_wake
+                        .map(|ts| now.duration_since(ts) >= debounce)
+                        .unwrap_or(true);
+                    if should_fire {
+                        last_wake = Some(now);
+                        trigger_replication(self_addr.clone()).await;
+                    }
+                }
+                _ = tick => {
+                    last_wake = None;
+                    trigger_replication(self_addr.clone()).await;
+                }
+            }
+        }
+    });
+}
+
+pub(crate) fn log_crdt_event(
+    doc_id: &str,
+    context: &str,
+    state_vector: &StateVector,
+    update_len: Option<usize>,
 ) {
+    let sv_len = state_vector.len();
+    match update_len {
+        Some(len) => log_debug!(
+            "[CRDT][{}] context={} state_vector_len={} update_bytes={}",
+            doc_id, context, sv_len, len
+        ),
+        None => log_debug!(
+            "[CRDT][{}] context={} state_vector_len={}",
+            doc_id, context, sv_len
+        ),
+    }
+}
+
+fn log_group_state_summary(doc_id: &str, context: &str, state: &GroupDocState) {
+    let member_count = state.group.members.len();
+    let hubs_count = state.group.hubs.active.len();
+    let subs_count = state.group.subscribers.entries.len();
+    let roles_count = state.group.roles.len();
+    let sample_members: Vec<String> = state.group.members.keys().take(3).cloned().collect();
+    log_debug!(
+        "[CRDT][{}] context={} state_summary members={} hubs={} subs={} roles={} sample_members={:?}",
+        doc_id, context, member_count, hubs_count, subs_count, roles_count, sample_members
+    );
+}
+
+// Helper function to send push notification for a message
+async fn send_push_notification_for_message(sender: &str, content: &str, chat_id: &str) {
+    if cfg!(feature = "disable-notifications") {
+        log_debug!("[NOTIFY] skipping push notification (disable-notifications feature enabled)");
+        return;
+    }
+    let notify_started = Instant::now();
     // Send notification to notifications server (it will send to all registered devices)
     let notifications_address = Address::new(
         &our().node,
-        ProcessId::new(Some("notifications"), "distro", "sys")
+        ProcessId::new(Some("notifications"), "distro", "sys"),
     );
 
     // Truncate message for notification
@@ -524,20 +252,28 @@ async fn send_push_notification_for_message(
     };
 
     // Send the notification request
-    println!("Sending notification to notifications:distro:sys");
+    log_debug!("Sending notification to notifications:distro:sys");
     let request = Request::to(notifications_address.clone())
         .body(serde_json::to_vec(&notification_action).unwrap())
         .expects_response(5);
+    if let Ok(body_str) = serde_json::to_string(&notification_action) {
+        log_debug!(
+            "[NOTIFY] sending to {} body_len={} body={}",
+            notifications_address,
+            body_str.len(),
+            body_str
+        );
+    }
 
     match send::<NotificationsResponse>(request).await {
         Ok(resp) => {
-            println!("Push notification response: {:?}", resp);
+            log_debug!("Push notification response: {:?}", resp);
             match resp {
                 NotificationsResponse::NotificationSent => {
-                    println!("Push notification sent successfully");
+                    log_debug!("Push notification sent successfully");
                 }
                 NotificationsResponse::Err(e) => {
-                    println!("Notification server error: {}", e);
+                    log_debug!("Notification server error: {}", e);
                     // Check if the error contains "EndpointNotValid"
                     if e.contains("EndpointNotValid") {
                         // Extract the endpoint URL from the error message
@@ -545,28 +281,35 @@ async fn send_push_notification_for_message(
                         if let Some(start) = e.find("https://") {
                             if let Some(end) = e[start..].find(':') {
                                 let endpoint = &e[start..start + end];
-                                println!("Removing invalid endpoint: {}", endpoint);
+                                log_debug!("Removing invalid endpoint: {}", endpoint);
 
                                 // Send request to remove the invalid subscription
                                 let remove_action = NotificationsAction::RemoveSubscription {
                                     endpoint: endpoint.to_string(),
                                 };
 
-                                let remove_request = Request::to(notifications_address)
+                                let remove_request = Request::to(notifications_address.clone())
                                     .body(serde_json::to_vec(&remove_action).unwrap())
                                     .expects_response(5);
+                                log_debug!(
+                                    "[NOTIFY] removing invalid endpoint {} via {}",
+                                    endpoint, notifications_address
+                                );
 
                                 // Fire and forget the removal request
                                 spawn(async move {
                                     match send::<NotificationsResponse>(remove_request).await {
                                         Ok(NotificationsResponse::SubscriptionRemoved) => {
-                                            println!("Successfully removed invalid endpoint");
+                                            log_debug!("Successfully removed invalid endpoint");
                                         }
                                         Ok(resp) => {
-                                            println!("Unexpected response removing endpoint: {:?}", resp);
+                                            log_debug!(
+                                                "Unexpected response removing endpoint: {:?}",
+                                                resp
+                                            );
                                         }
                                         Err(e) => {
-                                            println!("Error removing invalid endpoint: {:?}", e);
+                                            log_debug!("Error removing invalid endpoint: {:?}", e);
                                         }
                                     }
                                 });
@@ -575,19 +318,27 @@ async fn send_push_notification_for_message(
                     }
                 }
                 _ => {
-                    println!("Unexpected notification response");
+                    log_debug!("Unexpected notification response");
                 }
             }
+            log_debug!(
+                "[NOTIFY_DIAG] send_push_notification ok elapsed_ms={}",
+                notify_started.elapsed().as_millis()
+            );
         }
         Err(e) => {
-            println!("Error sending notification request: {:?}", e);
+            log_debug!("Error sending notification request: {:?}", e);
+            log_debug!(
+                "[NOTIFY_DIAG] send_push_notification err elapsed_ms={}",
+                notify_started.elapsed().as_millis()
+            );
         }
     }
 }
 
-// HYPERPROCESS IMPLEMENTATION
+// HYPERAPP IMPLEMENTATION
 
-#[hyperprocess(
+#[hyperapp(
     name = "Chat",
     ui = Some(HttpBindingConfig::default()),
     endpoints = vec![
@@ -626,10 +377,10 @@ impl ChatState {
         let package_id = our().package_id();
         match vfs::create_drive(package_id, "files", Some(5)) {
             Ok(drive_path) => {
-                println!("Created files drive at: {}", drive_path);
+                log_debug!("Created files drive at: {}", drive_path);
             }
             Err(e) => {
-                println!("Failed to create files drive (may already exist): {:?}", e);
+                log_debug!("Failed to create files drive (may already exist): {:?}", e);
             }
         }
 
@@ -648,6 +399,7 @@ impl ChatState {
                     sender: "System".to_string(),
                     content: "Welcome to Hyperware Chat! You can create new chats by clicking the + button.".to_string(),
                     timestamp,
+                    sequence: Some(0),
                     status: MessageStatus::Delivered,
                     reply_to: None,
                     reactions: Vec::new(),
@@ -661,64 +413,44 @@ impl ChatState {
                 counterparty_profile: None,
             };
 
-            self.chats.insert("system:welcome".to_string(), welcome_chat);
+            self.chats
+                .insert("system:welcome".to_string(), welcome_chat);
         }
 
-        // Clone the delivery queue Arc for the spawn task
-        let delivery_queue = self.delivery_queue.clone();
+        let existing_chat_ids: Vec<String> = self.chats.keys().cloned().collect();
+        for chat_id in existing_chat_ids {
+            self.ensure_sequence_state(&chat_id);
+        }
 
-        // Spawn a task to periodically process the delivery queue
-        spawn(async move {
-            loop {
-                // Wait 30 seconds between delivery attempts
-                let _ = sleep(30000).await;
+        if let Some(delivery_rx) = self.delivery_rx.take() {
+            let delivery_tx = self.delivery_tx.clone();
+            let pending_deliveries = self.pending_deliveries.clone();
+            spawn(async move {
+                ChatState::run_delivery_worker(delivery_rx, delivery_tx, pending_deliveries).await;
+            });
+        }
 
-                // Process the delivery queue
-                let queue_snapshot = {
-                    let queue = delivery_queue.lock().unwrap();
-                    queue.clone()
-                };
+        self.bootstrap_pending_deliveries();
 
-                for (node, messages) in queue_snapshot {
-                    if let Some(msg) = messages.first() {
-                        let target = Address::from((node.as_str(), OUR_PROCESS_ID));
+        // Kick off replication worker loop (event-driven with periodic safety net)
+        if let Some(wake_rx) = self.replication_wake_rx.take() {
+            start_replication_scheduler(wake_rx);
+        }
 
-                        // Try to send using generated RPC method
-                        let msg_json = serde_json::to_value(&msg).unwrap();
-                        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-
-                        match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
-                            Ok(_) => {
-                                println!("Successfully delivered queued message {} to {}", msg.id, node);
-                                // Remove from queue if successful
-                                let mut queue = delivery_queue.lock().unwrap();
-                                if let Some(node_queue) = queue.get_mut(&node) {
-                                    node_queue.retain(|m| m.id != msg.id);
-                                    if node_queue.is_empty() {
-                                        queue.remove(&node);
-                                    }
-                                }
-                                // Note: Status update will happen when the ACK is received
-                            }
-                            Err(e) => {
-                                // Don't attempt more messages to this node if we get Offline or Timeout
-                                println!("Failed to deliver queued message to {}: {:?}", node, e);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        println!("Chat app initialized on node: {} with {} chats", our().node, self.chats.len());
+        log_debug!(
+            "Chat app initialized on node: {} with {} chats",
+            our().node,
+            self.chats.len()
+        );
     }
 
     // CHAT MANAGEMENT ENDPOINTS
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn create_chat(&mut self, req: CreateChatReq) -> Result<Chat, String> {
-
         // Normalize chat ID to always be alphabetically sorted
         let chat_id = Self::normalize_chat_id(&our().node, &req.counterparty);
         let timestamp = std::time::SystemTime::now()
@@ -751,65 +483,96 @@ impl ChatState {
         spawn(async move {
             // First notify about chat creation
             match receive_chat_creation_remote_rpc(&target, our_node.clone()).await {
-                Ok(_) => println!("Successfully notified counterparty about chat creation"),
-                Err(e) => println!("Failed to notify counterparty about chat creation: {:?}", e),
+                Ok(_) => log_debug!("Successfully notified counterparty about chat creation"),
+                Err(e) => log_debug!("Failed to notify counterparty about chat creation: {:?}", e),
             }
 
             // Then share our profile
             let cu_profile = ChatState::to_cu_user_profile(&our_profile);
             match receive_profile_update_remote_rpc(&target, our_node, cu_profile).await {
-                Ok(_) => println!("Successfully shared profile with counterparty"),
-                Err(e) => println!("Failed to share profile with counterparty: {:?}", e),
+                Ok(_) => log_debug!("Successfully shared profile with counterparty"),
+                Err(e) => log_debug!("Failed to share profile with counterparty: {:?}", e),
             }
         });
 
         Ok(chat)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn get_chats(&self) -> Result<Vec<Chat>, String> {
         let mut chats: Vec<Chat> = self.chats.values().cloned().collect();
-        println!("get_chats: Returning {} chats", chats.len());
+        log_debug!("get_chats: Returning {} chats", chats.len());
         for chat in &chats {
-            println!("  Chat: {} with {}", chat.id, chat.counterparty);
+            log_debug!("  Chat: {} with {}", chat.id, chat.counterparty);
         }
         chats.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
 
         Ok(chats)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn get_chat(&self, req: GetChatReq) -> Result<Chat, String> {
-
-        self.chats.get(&req.chat_id)
+        self.chats
+            .get(&req.chat_id)
             .cloned()
             .ok_or_else(|| "Chat not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn get_messages(&self, req: GetMessagesReq) -> Result<Vec<ChatMessage>, String> {
         // Get the chat
-        let chat = self.chats.get(&req.chat_id)
+        let chat = self
+            .chats
+            .get(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
 
-        // Filter messages based on timestamp if provided
-        let mut messages: Vec<ChatMessage> = if let Some(before_ts) = req.before_timestamp {
-            chat.messages.iter()
-                .filter(|msg| msg.timestamp < before_ts)
-                .cloned()
-                .collect()
-        } else {
-            chat.messages.clone()
-        };
+        // Sort by timestamp descending (newest first) and break ties via sequence/id
+        let mut messages: Vec<ChatMessage> = chat.messages.clone();
+        messages.sort_by(|a, b| match b.timestamp.cmp(&a.timestamp) {
+            Ordering::Equal => match (
+                b.sequence.unwrap_or(0).cmp(&a.sequence.unwrap_or(0)),
+                b.id.cmp(&a.id),
+            ) {
+                (Ordering::Equal, id_cmp) => id_cmp,
+                (seq_cmp, _) => seq_cmp,
+            },
+            other => other,
+        });
 
-        // Sort by timestamp descending (newest first)
-        messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        let limit = req.limit.unwrap_or(50) as usize;
+        if let Some(before_ts) = req.before_timestamp {
+            let newer_count = messages
+                .iter()
+                .filter(|msg| msg.timestamp > before_ts)
+                .count();
+            let mut to_skip_at_ts = limit.saturating_sub(newer_count);
+            messages = messages
+                .into_iter()
+                .filter(|msg| {
+                    if msg.timestamp > before_ts {
+                        false
+                    } else if msg.timestamp < before_ts {
+                        true
+                    } else if to_skip_at_ts > 0 {
+                        to_skip_at_ts -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+        }
 
         // Apply limit (convert u64 to usize for truncate)
-        let limit = req.limit.unwrap_or(50) as usize;
         messages.truncate(limit);
 
         // Return in ascending order (oldest first) for display
@@ -818,9 +581,13 @@ impl ChatState {
         Ok(messages)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn get_sync_hash(&self, req: GetSyncHashReq) -> Result<SyncHashInfo, String> {
-        let chat = self.chats.get(&req.chat_id)
+        let chat = self
+            .chats
+            .get(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
 
         // Calculate a hash of the message history
@@ -855,6 +622,8 @@ impl ChatState {
         })
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn get_all_sync_hashes(&self) -> Result<Vec<SyncHashInfo>, String> {
         let mut sync_hashes = Vec::new();
@@ -894,166 +663,268 @@ impl ChatState {
         Ok(sync_hashes)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn delete_chat(&mut self, req: DeleteChatReq) -> Result<String, String> {
-
-        self.chats.remove(&req.chat_id)
-            .ok_or_else(|| "Chat not found".to_string())
-            .map(|_| "Chat deleted".to_string())
+        self.chats
+            .remove(&req.chat_id)
+            .ok_or_else(|| "Chat not found".to_string())?;
+        self.message_sequence_counters.remove(&req.chat_id);
+        Ok("Chat deleted".to_string())
     }
 
-    // MESSAGE OPERATIONS
+    // GROUP OPERATIONS
 
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn create_group(&mut self, req: CreateGroupReq) -> Result<CreateGroupRes, String> {
+        self.create_group_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn list_groups(&self) -> Result<ListGroupsRes, String> {
+        Ok(self.list_groups_state())
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn get_group(&self, req: GetGroupReq) -> Result<GetGroupRes, String> {
+        // Check if caller is a member of the group (Active or Removed)
+        // Removed members can still view the group to see their removal status
+        let group = self
+            .groups
+            .get(&req.group_id)
+            .ok_or_else(|| "group not found".to_string())?;
+        let caller = our().node;
+        let member = group
+            .members
+            .get(&caller)
+            .ok_or_else(|| format!("{} is not a member of group {}", caller, req.group_id))?;
+        // Allow Active and Removed members to view the group
+        // Only reject Pending members (they haven't been approved yet)
+        if member.status == crate::crdt::MembershipStatus::Pending {
+            return Err(format!(
+                "member {} is pending in group {} and cannot view it yet",
+                caller, req.group_id
+            ));
+        }
+        Ok(self.get_group_state(req))
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn create_group_thread(
+        &mut self,
+        req: CreateGroupThreadReq,
+    ) -> Result<CreateGroupThreadRes, String> {
+        self.create_group_thread_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn send_group_message(
+        &mut self,
+        req: SendGroupMessageReq,
+    ) -> Result<SendGroupMessageRes, String> {
+        self.send_group_message_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn edit_group_message(
+        &mut self,
+        req: EditGroupMessageReq,
+    ) -> Result<SendGroupMessageRes, String> {
+        self.edit_group_message_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn delete_group_message(&mut self, req: DeleteGroupMessageReq) -> Result<String, String> {
+        self.delete_group_message_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn add_group_reaction(&mut self, req: AddGroupReactionReq) -> Result<String, String> {
+        self.add_group_reaction_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn remove_group_reaction(
+        &mut self,
+        req: RemoveGroupReactionReq,
+    ) -> Result<String, String> {
+        self.remove_group_reaction_state(req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn invite_group_member(
+        &mut self,
+        req: InviteGroupMemberReq,
+    ) -> Result<MembershipDecisionRes, String> {
+        let candidate = req.candidate.clone();
+        let group_id = req.group_id.clone();
+        let decision = self
+            .invite_member(
+                &req.group_id,
+                our().node.clone(),
+                req.candidate,
+                req.role_id,
+            )
+            .map_err(|err| err.to_string())?;
+
+        // If the invite was approved, immediately push a snapshot to the new member
+        // so they can bootstrap without waiting for the replication scheduler's debounce
+        if decision.status == MembershipDecisionStatus::Approved {
+            spawn_immediate_snapshot_push(group_id, candidate);
+        }
+
+        Ok(MembershipDecisionRes { decision })
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn approve_group_membership(
+        &mut self,
+        req: ApproveGroupMembershipReq,
+    ) -> Result<MembershipDecisionRes, String> {
+        let decision = self
+            .approve_membership(&req.group_id, &req.proposal_id, our().node.clone())
+            .map_err(|err| err.to_string())?;
+        Ok(MembershipDecisionRes { decision })
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn remove_group_member(
+        &mut self,
+        req: RemoveGroupMemberReq,
+    ) -> Result<MembershipDecisionRes, String> {
+        let decision = self
+            .remove_member(&req.group_id, our().node.clone(), req.member)
+            .map_err(|err| err.to_string())?;
+        Ok(MembershipDecisionRes { decision })
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
     #[local]
     #[http]
     async fn send_message(&mut self, req: SendMessageReq) -> Result<ChatMessage, String> {
+        self.send_message_internal(&req.chat_id, req.content, req.reply_to, None)
+    }
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
+        let mut broadcast_update: Option<WsServerMessage> = None;
+        let mut remote_edit: Option<(String, String, String, String)> = None;
 
-        let message_id = format!("{}:{}", timestamp, rand::random::<u32>());
-
-        let message = ChatMessage {
-            id: message_id,
-            sender: our().node.clone(),
-            content: req.content,
-            timestamp,
-            status: MessageStatus::Sending,
-            reply_to: req.reply_to,
-            reactions: Vec::new(),
-            message_type: MessageType::Text,
-            file_info: None,
-        };
-
-        // Add to chat if it exists, or create new chat
-        let chat = self.chats.entry(req.chat_id.clone()).or_insert_with(|| {
-            let counterparty = req.chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
-            Chat {
-                id: req.chat_id.clone(),
-                counterparty,
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: None,
+        if let Some(chat) = self.chats.get_mut(&req.chat_id) {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
+                if message.sender != our().node {
+                    return Ok("Ignoring edit for remote message".to_string());
+                }
+                message.content = req.new_content.clone();
+                broadcast_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                remote_edit = Some((
+                    chat.counterparty.clone(),
+                    req.chat_id.clone(),
+                    req.message_id.clone(),
+                    req.new_content.clone(),
+                ));
             }
-        });
-
-        chat.messages.push(message.clone());
-        chat.last_activity = timestamp;
-
-        // Immediately update status to Sent (backend has received the message)
-        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-            msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
         }
 
-        // Send ChatUpdate immediately to show Sent status
-        for &channel_id in self.ws_connections.keys() {
-            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
+        if let Some(update) = &broadcast_update {
+            self.broadcast_ws_message(update);
+        }
+
+        if let Some((counterparty, chat_id, message_id, new_content)) = remote_edit {
+            spawn(async move {
+                let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+                match receive_message_edit_remote_rpc(&target, chat_id, message_id, new_content)
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => log_debug!(
+                        "Counterparty {} rejected message edit: {}",
+                        counterparty, err
+                    ),
+                    Err(err) => {
+                        log_debug!("Failed to send message edit to {}: {:?}", counterparty, err)
+                    }
+                }
             });
         }
 
-        // Send to counterparty via P2P using generated RPC
-        let counterparty = chat.counterparty.clone();
-        let msg_to_send = message.clone();
-        let message_id_clone = message.id.clone();
-        let delivery_queue = self.delivery_queue.clone();
-
-        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-
-        // Spawn task to attempt delivery without blocking
-        spawn(async move {
-            // Try to send using generated RPC method and queue if it fails
-            let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-            let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-            match receive_message_remote_rpc(&target, msg_for_rpc).await {
-                Ok(_) => {
-                    println!("Message {} sent successfully to {}", message_id_clone, counterparty);
-                    // Message delivered successfully, counterparty will send ACK
-                }
-                Err(_) => {
-                    println!("Failed to send message {} to {}, adding to delivery queue", message_id_clone, counterparty);
-                    // Failed to send immediately, add to delivery queue
-                    let mut queue = delivery_queue.lock().unwrap();
-                    queue.entry(counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(msg_to_send);
-                }
-            }
-        });
-
-        // Return the message with updated status
-        if let Some(chat) = self.chats.get(&req.chat_id) {
-            if let Some(updated_msg) = chat.messages.iter().find(|m| m.id == message.id) {
-                return Ok(updated_msg.clone());
-            }
-        }
-
-        Ok(message)
-    }
-
-    #[http]
-    async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
-
-        // Find message in the specified chat
-        if let Some(chat) = self.chats.get_mut(&req.chat_id) {
-            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
-                message.content = req.new_content;
-                return Ok("Message edited".to_string());
-            }
+        if broadcast_update.is_some() {
+            return Ok("Message edited".to_string());
         }
 
         Err("Message not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn delete_message(&mut self, req: DeleteMessageReq) -> Result<String, String> {
+        let mut chat_update: Option<WsServerMessage> = None;
+        let mut deletion_notice: Option<(String, String, String, bool)> = None;
 
-        // Find and remove message from the specified chat
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == req.message_id) {
-                // Store counterparty before removing message
                 let counterparty = chat.counterparty.clone();
                 let message_id = req.message_id.clone();
                 let chat_id = req.chat_id.clone();
                 let delete_for_both = req.delete_for_both.unwrap_or(false);
 
-                // Remove the message
                 chat.messages.remove(pos);
 
-                // Notify all WebSocket connections about the updated chat
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                    });
-                }
-
-                // Only send deletion notification to counterparty if deleting for both
-                if delete_for_both {
-                    let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-                    spawn(async move {
-                        let _ = receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
-                    });
-                }
-
-                return Ok("Message deleted".to_string());
+                chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                deletion_notice = Some((counterparty, message_id, chat_id, delete_for_both));
             }
+        }
+
+        if let Some(update) = &chat_update {
+            self.broadcast_ws_message(update);
+        }
+
+        if let Some((counterparty, message_id, chat_id, delete_for_both)) = deletion_notice {
+            if delete_for_both {
+                let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+                spawn(async move {
+                    let _ = receive_message_deletion_remote_rpc(&target, message_id, chat_id).await;
+                });
+            }
+            return Ok("Message deleted".to_string());
         }
 
         Err("Message not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn add_reaction(&mut self, req: AddReactionReq) -> Result<String, String> {
-
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1065,59 +936,61 @@ impl ChatState {
             timestamp,
         };
 
+        let mut addition: Option<(WsServerMessage, String, String, String)> = None;
+
         // Find and add reaction to message in the specified chat
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
                 // Check if user already reacted with this emoji
-                if !message.reactions.iter().any(|r| r.user == reaction.user && r.emoji == reaction.emoji) {
+                if !message
+                    .reactions
+                    .iter()
+                    .any(|r| r.user == reaction.user && r.emoji == reaction.emoji)
+                {
                     message.reactions.push(reaction.clone());
 
-                    // Send reaction to counterparty
-                    // If it's their message, they need to see our reaction
-                    // If it's our message, they still need to see we reacted to our own message
                     let target_node = if message.sender != our().node {
                         message.sender.clone()
                     } else {
-                        // It's our message, send to the counterparty of the chat
                         chat.counterparty.clone()
                     };
 
-                    let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
-                    let msg_id = req.message_id.clone();
-                    let emoji = req.emoji.clone();
-                    let user = our().node.clone();
-
-                    spawn(async move {
-                        match receive_reaction_remote_rpc(&target, msg_id, emoji, user).await {
-                            Ok(_) => println!("Successfully sent reaction to counterparty"),
-                            Err(e) => println!("Failed to send reaction to counterparty: {:?}", e),
-                        }
-                    });
-
-                    // Notify WebSocket connections
-                    for &channel_id in self.ws_connections.keys() {
-                        let msg = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                        });
-                    }
-
-                    return Ok("Reaction added".to_string());
+                    addition = Some((
+                        WsServerMessage::ChatUpdate(chat.clone()),
+                        target_node,
+                        req.message_id.clone(),
+                        req.emoji.clone(),
+                    ));
                 } else {
                     return Ok("Already reacted".to_string());
                 }
             }
         }
 
+        if let Some((chat_update, target_node, msg_id, emoji)) = addition {
+            self.broadcast_ws_message(&chat_update);
+            let user = our().node.clone();
+            spawn(async move {
+                let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
+                match receive_reaction_remote_rpc(&target, msg_id, emoji, user).await {
+                    Ok(_) => log_debug!("Successfully sent reaction to counterparty"),
+                    Err(e) => log_debug!("Failed to send reaction to counterparty: {:?}", e),
+                }
+            });
+            return Ok("Reaction added".to_string());
+        }
+
         Err("Message not found".to_string())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn forward_message(&mut self, req: ForwardMessageReq) -> Result<ChatMessage, String> {
-
         // Find the message to forward from the specified chat
-        let message_to_forward = self.chats.get(&req.from_chat_id)
+        let message_to_forward = self
+            .chats
+            .get(&req.from_chat_id)
             .and_then(|chat| chat.messages.iter().find(|m| m.id == req.message_id))
             .cloned();
 
@@ -1128,11 +1001,14 @@ impl ChatState {
             .unwrap()
             .as_secs();
 
-        let forwarded_message = ChatMessage {
+        let chat_id = req.to_chat_id.clone();
+
+        let mut forwarded_message = ChatMessage {
             id: format!("{}:{}", timestamp, rand::random::<u32>()),
             sender: our().node.clone(),
             content: format!("Forwarded: {}", original_message.content),
             timestamp,
+            sequence: None,
             status: MessageStatus::Sending,
             reply_to: None,
             reactions: Vec::new(),
@@ -1140,27 +1016,17 @@ impl ChatState {
             file_info: original_message.file_info.clone(),
         };
 
-        // Add to destination chat
-        let chat = self.chats.entry(req.to_chat_id.clone()).or_insert_with(|| {
-            let counterparty = req.to_chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
-            Chat {
-                id: req.to_chat_id.clone(),
-                counterparty: counterparty.clone(),
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: self.node_profiles.get(&counterparty).cloned(),
-            }
-        });
+        self.assign_sequence_to_message(&chat_id, &mut forwarded_message);
 
-        chat.messages.push(forwarded_message.clone());
-        chat.last_activity = timestamp;
+        let (counterparty, chat_snapshot) = {
+            let chat = self.get_or_create_chat(&chat_id, timestamp, None, None);
+            chat.messages.push(forwarded_message.clone());
+            chat.last_activity = timestamp;
+            (chat.counterparty.clone(), chat.clone())
+        };
 
         // Send to counterparty if it's a node-to-node chat
-        if !req.to_chat_id.starts_with("browser:") {
-            let counterparty = chat.counterparty.clone();
+        if !chat_id.starts_with("browser:") {
             let msg_to_send = forwarded_message.clone();
 
             let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
@@ -1171,63 +1037,85 @@ impl ChatState {
             match receive_message_remote_rpc(&target, msg_for_rpc).await {
                 Ok(_) => {
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
-                        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == forwarded_message.id) {
-                            msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
+                        if let Some(msg) = chat
+                            .messages
+                            .iter_mut()
+                            .find(|m| m.id == forwarded_message.id)
+                        {
+                            msg.status =
+                                safe_update_message_status(&msg.status, MessageStatus::Sent);
                         }
 
                         // Send ChatUpdate with the updated message status
-                        for &channel_id in self.ws_connections.keys() {
-                            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                                mime: Some("application/json".to_string()),
-                                bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                            });
-                        }
+                        let chat_update = WsServerMessage::ChatUpdate(chat_snapshot.clone());
+                        self.broadcast_ws_message(&chat_update);
                     }
                 }
                 Err(_) => {
-                    {
-                        let mut queue = self.delivery_queue.lock().unwrap();
-                        queue.entry(counterparty.clone())
-                            .or_insert_with(Vec::new)
-                            .push(msg_to_send);
-                    }
-
+                    self.enqueue_delivery_message(&counterparty, msg_to_send);
                     if let Some(chat) = self.chats.get_mut(&req.to_chat_id) {
-                        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == forwarded_message.id) {
-                            msg.status = safe_update_message_status(&msg.status, MessageStatus::Failed);
+                        if let Some(msg) = chat
+                            .messages
+                            .iter_mut()
+                            .find(|m| m.id == forwarded_message.id)
+                        {
+                            msg.status =
+                                safe_update_message_status(&msg.status, MessageStatus::Failed);
                         }
                     }
                 }
             }
         }
-
         Ok(forwarded_message)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn remove_reaction(&mut self, req: RemoveReactionReq) -> Result<String, String> {
-
         let user = our().node.clone();
+        let mut removal: Option<(WsServerMessage, String, String, String)> = None;
 
-        // Find and remove reaction from message
+        // Find and remove reaction from message, and determine counterparty to notify
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
-                if let Some(pos) = message.reactions.iter().position(|r| r.user == user && r.emoji == req.emoji) {
+                if let Some(pos) = message
+                    .reactions
+                    .iter()
+                    .position(|r| r.user == user && r.emoji == req.emoji)
+                {
                     message.reactions.remove(pos);
 
-                    // Notify WebSocket connections
-                    for &channel_id in self.ws_connections.keys() {
-                        let msg = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                        });
-                    }
+                    let target_node = if message.sender != our().node {
+                        message.sender.clone()
+                    } else {
+                        chat.counterparty.clone()
+                    };
 
-                    return Ok("Reaction removed".to_string());
+                    removal = Some((
+                        WsServerMessage::ChatUpdate(chat.clone()),
+                        target_node,
+                        req.message_id.clone(),
+                        req.emoji.clone(),
+                    ));
                 }
             }
+        }
+
+        if let Some((chat_update, target_node, msg_id, emoji)) = removal {
+            // Update local subscribers
+            self.broadcast_ws_message(&chat_update);
+
+            // Notify counterparty to remove the reaction on their copy as well
+            spawn(async move {
+                let target = Address::new(&target_node, OUR_PROCESS_ID.clone());
+                match receive_reaction_remove_remote_rpc(&target, msg_id, emoji, user).await {
+                    Ok(_) => log_debug!("Successfully sent reaction removal to counterparty"),
+                    Err(e) => log_debug!("Failed to send reaction removal to counterparty: {:?}", e),
+                }
+            });
+
+            return Ok("Reaction removed".to_string());
         }
 
         Err("Reaction not found".to_string())
@@ -1235,9 +1123,10 @@ impl ChatState {
 
     // BROWSER CHAT MANAGEMENT
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn create_chat_link(&mut self, req: CreateChatLinkReq) -> Result<String, String> {
-
         let key = format!("{:x}", rand::random::<u128>());
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1258,45 +1147,58 @@ impl ChatState {
         Ok(link)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn get_chat_keys(&self) -> Result<Vec<ChatKey>, String> {
-        Ok(self.chat_keys.values()
+        Ok(self
+            .chat_keys
+            .values()
             .filter(|k| !k.is_revoked)
             .cloned()
             .collect())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn revoke_chat_key(&mut self, req: RevokeChatKeyReq) -> Result<String, String> {
-
-        self.chat_keys.get_mut(&req.key)
-            .ok_or_else(|| "Chat key not found".to_string())
-            .map(|key| {
-                key.is_revoked = true;
-                "Chat key revoked".to_string()
-            })
+        if let Some(key) = self.chat_keys.get_mut(&req.key) {
+            key.is_revoked = true;
+        } else {
+            return Err("Chat key not found".to_string());
+        }
+        Ok("Chat key revoked".to_string())
     }
 
     // SETTINGS
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn get_settings(&self) -> Result<Settings, String> {
         Ok(self.settings.clone())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn update_settings(&mut self, settings: Settings) -> Result<String, String> {
         self.settings = settings;
         Ok("Settings updated".to_string())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn update_profile(&mut self, profile: UserProfile) -> Result<String, String> {
         self.profile = profile.clone();
 
         // Notify all chat counterparties about the profile update
         let our_node = our().node.clone();
-        let counterparties: Vec<String> = self.chats.values()
+        let counterparties: Vec<String> = self
+            .chats
+            .values()
             .map(|chat| chat.counterparty.clone())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -1312,7 +1214,7 @@ impl ChatState {
                 match receive_profile_update_remote_rpc(&target, node, cu_profile).await {
                     Ok(_) => {
                         // Successfully notified counterparty
-                    },
+                    }
                     Err(_) => {
                         // Counterparty is likely offline, profile will be shared when they come online
                         // No need to print errors as this is expected behavior
@@ -1324,9 +1226,13 @@ impl ChatState {
         Ok("Profile updated".to_string())
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
-    async fn upload_profile_picture(&mut self, req: UploadProfilePictureReq) -> Result<String, String> {
-
+    async fn upload_profile_picture(
+        &mut self,
+        req: UploadProfilePictureReq,
+    ) -> Result<String, String> {
         // Validate mime type
         if !req.mime_type.starts_with("image/") {
             return Err("Invalid image type".to_string());
@@ -1337,20 +1243,17 @@ impl ChatState {
         self.profile.profile_pic = Some(data_url.clone());
 
         // Notify all WebSocket connections about profile update
-        for &channel_id in self.ws_connections.keys() {
-            let msg = WsServerMessage::ProfileUpdate {
-                node: our().node.clone(),
-                profile: self.profile.clone(),
-            };
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-            });
-        }
+        let profile_update = WsServerMessage::ProfileUpdate {
+            node: our().node.clone(),
+            profile: self.profile.clone(),
+        };
+        self.broadcast_ws_message(&profile_update);
 
         // Notify all chat counterparties about the profile update
         let our_node = our().node.clone();
-        let counterparties: Vec<String> = self.chats.values()
+        let counterparties: Vec<String> = self
+            .chats
+            .values()
             .map(|chat| chat.counterparty.clone())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -1364,8 +1267,11 @@ impl ChatState {
             spawn(async move {
                 let cu_profile = ChatState::to_cu_user_profile(&prof);
                 match receive_profile_update_remote_rpc(&target, node, cu_profile).await {
-                    Ok(_) => println!("Notified {} about profile pic update", counterparty),
-                    Err(e) => println!("Failed to notify {} about profile pic update: {:?}", counterparty, e),
+                    Ok(_) => log_debug!("Notified {} about profile pic update", counterparty),
+                    Err(e) => log_debug!(
+                        "Failed to notify {} about profile pic update: {:?}",
+                        counterparty, e
+                    ),
                 }
             });
         }
@@ -1373,6 +1279,8 @@ impl ChatState {
         Ok(data_url)
     }
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn get_profile(&self) -> Result<UserProfile, String> {
         Ok(self.profile.clone())
@@ -1380,17 +1288,21 @@ impl ChatState {
 
     // FILE AND VOICE NOTE OPERATIONS
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn upload_file(&mut self, req: UploadFileReq) -> Result<ChatMessage, String> {
-
         // Decode base64 data
-        let file_data = base64_decode(&req.data)
-            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+        let file_data =
+            base64_decode(&req.data).map_err(|e| format!("Failed to decode base64: {}", e))?;
 
         // Check file size limit
         let file_size_mb = (file_data.len() as u64) / (1024 * 1024);
         if file_size_mb > self.settings.max_file_size_mb {
-            return Err(format!("File size exceeds limit of {} MB", self.settings.max_file_size_mb));
+            return Err(format!(
+                "File size exceeds limit of {} MB",
+                self.settings.max_file_size_mb
+            ));
         }
 
         let timestamp = std::time::SystemTime::now()
@@ -1411,7 +1323,8 @@ impl ChatState {
         let package_id = our().package_id();
         let _safe_filename = req.filename.replace("/", "_").replace("..", "_");
         let file_id = format!("{}_{}", timestamp, rand::random::<u32>());
-        let vfs_path = format!("/{}/files/{}/{}",
+        let vfs_path = format!(
+            "/{}/files/{}/{}",
             package_id,
             req.chat_id.replace(":", "_"),
             file_id
@@ -1450,11 +1363,14 @@ impl ChatState {
             url: file_url.clone(),
         };
 
+        let chat_id = req.chat_id.clone();
+
         let message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
             content: req.filename,
             timestamp,
+            sequence: None,
             status: MessageStatus::Sending,
             reply_to: req.reply_to,
             reactions: Vec::new(),
@@ -1462,84 +1378,24 @@ impl ChatState {
             file_info: Some(file_info),
         };
 
-        // Add to chat
-        let chat = self.chats.entry(req.chat_id.clone()).or_insert_with(|| {
-            let counterparty = req.chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
-            Chat {
-                id: req.chat_id.clone(),
-                counterparty,
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: None,
-            }
-        });
+        let (counterparty, stored_message) = self.stage_outgoing_message(&chat_id, message, None);
 
-        chat.messages.push(message.clone());
-        chat.last_activity = timestamp;
-
-        // Send to counterparty using generated RPC
-        let counterparty = chat.counterparty.clone();
-        let mut msg_to_send = message.clone();
-
-        // For files (not images), replace URL with compressed data for transmission
+        let mut remote_message = stored_message.clone();
         if message_type == MessageType::File {
-            if let Some(compressed) = compressed_data {
-                if let Some(ref mut file_info) = msg_to_send.file_info {
-                    file_info.url = format!("compressed:{}", compressed);
+            if let Some(info) = remote_message.file_info.as_mut() {
+                if let Some(compressed) = compressed_data {
+                    info.url = format!("compressed:{}", compressed);
                 }
             }
         }
 
-        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-
-        // Send using generated RPC method
-        // Convert our local type to the generated type via JSON serialization
-        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-        match receive_message_remote_rpc(&target, msg_for_rpc).await {
-            Ok(_) => {
-                if let Some(chat) = self.chats.get_mut(&req.chat_id) {
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-                    }
-
-                    // Send ChatUpdate with the updated message status
-                    for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        });
-                    }
-                }
-            }
-            Err(_) => {
-                {
-                    let mut queue = self.delivery_queue.lock().unwrap();
-                    queue.entry(counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(msg_to_send);
-                }
-
-                // Still broadcast NewMessage for failed sends
-                for &channel_id in self.ws_connections.keys() {
-                    let msg = WsServerMessage::NewMessage(message.clone());
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                    });
-                }
-            }
-        }
-
-        Ok(message)
+        self.dispatch_outgoing_message(counterparty, remote_message);
+        Ok(stored_message)
     }
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn send_voice_note(&mut self, req: SendVoiceNoteReq) -> Result<ChatMessage, String> {
-
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1557,11 +1413,14 @@ impl ChatState {
             url: file_url,
         };
 
+        let chat_id = req.chat_id.clone();
+
         let message = ChatMessage {
             id: message_id,
             sender: our().node.clone(),
             content: format!("Voice note ({}s)", req.duration),
             timestamp,
+            sequence: None,
             status: MessageStatus::Sending,
             reply_to: req.reply_to,
             reactions: Vec::new(),
@@ -1569,78 +1428,28 @@ impl ChatState {
             file_info: Some(file_info),
         };
 
-        // Add to chat
-        let chat = self.chats.entry(req.chat_id.clone()).or_insert_with(|| {
-            let counterparty = req.chat_id.split(':').nth(1).unwrap_or("unknown").to_string();
-            Chat {
-                id: req.chat_id.clone(),
-                counterparty,
-                messages: Vec::new(),
-                last_activity: timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: None,
-            }
-        });
-
-        chat.messages.push(message.clone());
-        chat.last_activity = timestamp;
-
-        // Send to counterparty using generated RPC
-        let counterparty = chat.counterparty.clone();
-        let msg_to_send = message.clone();
-
-        let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-
-        // Send using generated RPC method
-        // Convert our local type to the generated type via JSON serialization
-        let msg_json = serde_json::to_value(&msg_to_send).unwrap();
-        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-        match receive_message_remote_rpc(&target, msg_for_rpc).await {
-            Ok(_) => {
-                if let Some(chat) = self.chats.get_mut(&req.chat_id) {
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-                    }
-
-                    // Send ChatUpdate with the updated message status
-                    for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        });
-                    }
-                }
-            }
-            Err(_) => {
-                {
-                    let mut queue = self.delivery_queue.lock().unwrap();
-                    queue.entry(counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(msg_to_send);
-                }
-
-                // Still broadcast NewMessage for failed sends
-                for &channel_id in self.ws_connections.keys() {
-                    let msg = WsServerMessage::NewMessage(message.clone());
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                    });
-                }
-            }
-        }
-
-        Ok(message)
+        let (counterparty, stored_message) = self.stage_outgoing_message(&chat_id, message, None);
+        self.dispatch_outgoing_message(counterparty, stored_message.clone());
+        Ok(stored_message)
     }
 
     // P2P MESSAGE RECEIVING
 
     #[remote]
-    async fn receive_chat_creation(&mut self, counterparty: String) -> Result<(), String> {
-        println!("receive_chat_creation: Got request from {}", counterparty);
+    async fn receive_chat_creation(&mut self, mut counterparty: String) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if counterparty != caller_node {
+                log_debug!(
+                    "[SEC] receive_chat_creation rejected spoofed counterparty={} source={}",
+                    counterparty, caller_node
+                );
+                return Err("receive_chat_creation rejected spoofed counterparty".to_string());
+            }
+            counterparty = caller_node;
+        }
+        log_debug!("receive_chat_creation: Got request from {}", counterparty);
 
         // Normalize chat ID to always be alphabetically sorted
         let chat_id = Self::normalize_chat_id(&counterparty, &our().node);
@@ -1651,6 +1460,7 @@ impl ChatState {
 
         // Check if chat already exists
         let chat_exists = self.chats.contains_key(&chat_id);
+        let mut created_chat = false;
         if !chat_exists {
             // Get counterparty profile if we have it
             let counterparty_profile = self.node_profiles.get(&counterparty).cloned();
@@ -1667,58 +1477,24 @@ impl ChatState {
             };
 
             self.chats.insert(chat_id.clone(), chat.clone());
-            println!("receive_chat_creation: Created chat {}", chat_id);
+            log_debug!("receive_chat_creation: Created chat {}", chat_id);
+            created_chat = true;
 
             // Notify WebSocket connections about the new chat
-            println!("receive_chat_creation: WebSocket connections: {}", self.ws_connections.len());
-            for &channel_id in self.ws_connections.keys() {
-                println!("receive_chat_creation: Sending ChatUpdate to channel {}", channel_id);
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                });
-            }
+            log_debug!(
+                "receive_chat_creation: WebSocket connections: {}",
+                self.ws_connections.len()
+            );
+            let chat_update = WsServerMessage::ChatUpdate(chat.clone());
+            self.broadcast_ws_message(&chat_update);
         } else {
-            println!("receive_chat_creation: Chat {} already exists", chat_id);
+            log_debug!("receive_chat_creation: Chat {} already exists", chat_id);
         }
 
-        // Check if we have queued messages for this counterparty
-        let queued_messages = {
-            let mut queue = self.delivery_queue.lock().unwrap();
-            queue.remove(&counterparty).unwrap_or_default()
-        };
+        if created_chat {}
 
-        if !queued_messages.is_empty() {
-            println!("receive_chat_creation: Found {} queued messages for {}", queued_messages.len(), counterparty);
-
-            // Try to deliver queued messages now that we know the counterparty is online
-            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
-            let delivery_queue = self.delivery_queue.clone();
-            let counterparty_clone = counterparty.clone();
-
-            spawn(async move {
-                for msg in queued_messages {
-                    let msg_json = serde_json::to_value(&msg).unwrap();
-                    let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
-
-                    match receive_message_remote_rpc(&target, msg_for_rpc).await {
-                        Ok(_) => {
-                            println!("Successfully delivered queued message {} to {}", msg.id, counterparty_clone);
-                        }
-                        Err(e) => {
-                            println!("Failed to deliver queued message {} to {}: {:?}", msg.id, counterparty_clone, e);
-                            // Re-add to queue if delivery fails
-                            let mut queue = delivery_queue.lock().unwrap();
-                            queue.entry(counterparty_clone.clone())
-                                .or_insert_with(Vec::new)
-                                .push(msg);
-                            break; // Stop trying to send more messages if one fails
-                        }
-                    }
-                }
-            });
-        }
+        // Signal the delivery worker (step 3) to flush anything pending to this node
+        self.enqueue_delivery_flush(&counterparty);
 
         // Share our profile with the counterparty
         let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
@@ -1730,7 +1506,7 @@ impl ChatState {
             match receive_profile_update_remote_rpc(&target, our_node, cu_profile).await {
                 Ok(_) => {
                     // Successfully shared profile
-                },
+                }
                 Err(_) => {
                     // Counterparty is likely offline, profile will be shared when they come online
                 }
@@ -1741,79 +1517,89 @@ impl ChatState {
     }
 
     #[remote]
-    async fn receive_message(&mut self, message: ChatMessage) -> Result<(), String> {
+    async fn receive_message(&mut self, mut message: ChatMessage) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if message.sender != caller_node {
+                log_debug!(
+                    "[SEC] receive_message rejected spoofed sender={} source={}",
+                    message.sender, caller_node
+                );
+                return Err("receive_message rejected spoofed sender".to_string());
+            }
+            message.sender = caller_node;
+        }
         // Find or create chat for this message - normalize the ID
         let chat_id = Self::normalize_chat_id(&message.sender, &our().node);
         let is_new_chat = !self.chats.contains_key(&chat_id);
+        let mut state_changed = false;
 
-        let chat = self.chats.entry(chat_id.clone()).or_insert_with(|| {
-            Chat {
-                id: chat_id.clone(),
-                counterparty: message.sender.clone(),
-                messages: Vec::new(),
-                last_activity: message.timestamp,
-                unread_count: 0,
-                is_blocked: false,
-                notify: true,
-                counterparty_profile: self.node_profiles.get(&message.sender).cloned(),
-            }
+        self.chats.entry(chat_id.clone()).or_insert_with(|| Chat {
+            id: chat_id.clone(),
+            counterparty: message.sender.clone(),
+            messages: Vec::new(),
+            last_activity: message.timestamp,
+            unread_count: 0,
+            is_blocked: false,
+            notify: true,
+            counterparty_profile: self.node_profiles.get(&message.sender).cloned(),
         });
+        if is_new_chat {
+            state_changed = true;
+        }
 
         // Update message status to Delivered
         let mut updated_message = message.clone();
-        updated_message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
+        updated_message.status =
+            safe_update_message_status(&message.status, MessageStatus::Delivered);
+        updated_message.sequence = None;
 
         // If message has a file, save it to our VFS
         if let Some(ref mut file_info) = updated_message.file_info {
             let is_image = updated_message.message_type == MessageType::Image;
             let original_url = file_info.url.clone();
 
-            let file_data = if file_info.url.starts_with("compressed:") {
-                // Handle compressed file data
-                let compressed_b64 = &file_info.url[11..]; // Skip "compressed:" prefix
-
-                // Decode base64
-                let compressed_data = match base64_decode(compressed_b64) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        println!("Failed to decode compressed file: {}", e);
-                        vec![]
-                    }
-                };
-
-                // Decompress
-                match decompress_data(&compressed_data) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        println!("Failed to decompress file: {}", e);
-                        vec![]
-                    }
-                }
-            } else if file_info.url.starts_with("data:") {
-                // Handle data URL (for images)
-                if let Some(comma_pos) = file_info.url.find(',') {
-                    let base64_data = &file_info.url[comma_pos + 1..];
-
-                    // Decode base64
-                    match base64_decode(base64_data) {
+            let file_data = match file_info.url_kind() {
+                crate::types::FileUrlKind::CompressedBase64(rest) => {
+                    let compressed_data = match base64_decode(rest) {
                         Ok(data) => data,
                         Err(e) => {
-                            println!("Failed to decode file data: {}", e);
+                            log_debug!("Failed to decode compressed file: {}", e);
+                            vec![]
+                        }
+                    };
+                    match decompress_data(&compressed_data) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            log_debug!("Failed to decompress file: {}", e);
                             vec![]
                         }
                     }
-                } else {
-                    vec![]
                 }
-            } else {
-                vec![]
+                crate::types::FileUrlKind::DataUrl(data_url) => {
+                    if let Some(comma_pos) = data_url.find(',') {
+                        let base64_data = &data_url[comma_pos + 1..];
+                        match base64_decode(base64_data) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                log_debug!("Failed to decode file data: {}", e);
+                                vec![]
+                            }
+                        }
+                    } else {
+                        vec![]
+                    }
+                }
+                _ => vec![],
             };
 
             if !file_data.is_empty() {
                 // Save to VFS
                 let package_id = our().package_id();
                 let file_id = format!("{}_{}", updated_message.timestamp, rand::random::<u32>());
-                let vfs_path = format!("/{}/files/{}/{}",
+                let vfs_path = format!(
+                    "/{}/files/{}/{}",
                     package_id,
                     chat_id.replace(":", "_"),
                     file_id
@@ -1826,7 +1612,10 @@ impl ChatState {
                 // Create and write file
                 if let Ok(file) = vfs::create_file(&vfs_path, Some(5)) {
                     let _ = file.write(&file_data);
-                    println!("Saved received file {} to VFS at {}", file_info.filename, vfs_path);
+                    log_debug!(
+                        "Saved received file {} to VFS at {}",
+                        file_info.filename, vfs_path
+                    );
 
                     // For images, keep the data URL for inline display
                     // For files, update to local VFS path
@@ -1841,42 +1630,91 @@ impl ChatState {
             }
         }
 
-        // Add message to chat
-        chat.messages.push(updated_message.clone());
-        chat.last_activity = updated_message.timestamp;
-        chat.unread_count += 1;
+        // Deduplicate by message ID so delivery retries don't create copies
+        let mut is_duplicate = false;
+        let mut should_insert = false;
+        let mut stored_message: Option<ChatMessage> = None;
+        {
+            let chat = self
+                .chats
+                .get_mut(&chat_id)
+                .expect("chat should exist after ensure");
+            if let Some(existing) = chat
+                .messages
+                .iter_mut()
+                .find(|m| m.id == updated_message.id)
+            {
+                is_duplicate = true;
+                existing.content = updated_message.content.clone();
+                existing.timestamp = updated_message.timestamp;
+                existing.reply_to = updated_message.reply_to.clone();
+                existing.reactions = updated_message.reactions.clone();
+                existing.message_type = updated_message.message_type.clone();
+                existing.file_info = updated_message.file_info.clone();
+                existing.sender = updated_message.sender.clone();
+                existing.status =
+                    safe_update_message_status(&existing.status, updated_message.status.clone());
+                state_changed = true;
+            } else {
+                should_insert = true;
+            }
+            let prev_last_activity = chat.last_activity;
+            chat.last_activity = chat.last_activity.max(updated_message.timestamp);
+            if chat.last_activity != prev_last_activity {
+                state_changed = true;
+            }
+        }
 
-        // Send to WebSocket connections if any
-        for &channel_id in self.ws_connections.keys() {
-            // If this is a new chat, send ChatUpdate first
+        if should_insert {
+            let mut message_to_store = updated_message.clone();
+            self.assign_sequence_to_message(&chat_id, &mut message_to_store);
+            if let Some(chat) = self.chats.get_mut(&chat_id) {
+                chat.messages.push(message_to_store.clone());
+                chat.unread_count += 1;
+                state_changed = true;
+            }
+            stored_message = Some(message_to_store);
+        }
+
+        if !is_duplicate {
+            let message_for_events = stored_message
+                .clone()
+                .expect("new messages should be stored before broadcasting");
+            let chat_snapshot = self.chats.get(&chat_id).cloned();
+            // Send to WebSocket connections if any
             if is_new_chat {
-                let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                });
+                if let Some(chat_update) = chat_snapshot.clone() {
+                    let msg = WsServerMessage::ChatUpdate(chat_update);
+                    self.broadcast_ws_message(&msg);
+                }
             }
 
-            // Then send the new message
-            let msg = WsServerMessage::NewMessage(updated_message.clone());
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-            });
+            let msg = WsServerMessage::NewMessage(message_for_events.clone());
+            self.broadcast_ws_message(&msg);
+
+            // Send push notification if user has notifications enabled AND no active connections
+            if self
+                .chats
+                .get(&chat_id)
+                .map(|chat| chat.notify)
+                .unwrap_or(true)
+                && self.settings.notify_chats
+                && self.active_connections.is_empty()
+            {
+                let chat_id_for_push = chat_id.clone();
+                let message_for_push = message_for_events.clone();
+                spawn(async move {
+                    send_push_notification_for_message(
+                        &message_for_push.sender,
+                        &message_for_push.content,
+                        &chat_id_for_push,
+                    )
+                    .await;
+                });
+            }
         }
 
-        // Send push notification if user has notifications enabled AND no active connections
-        // We only send notifications if the user is not actively viewing the app
-        if chat.notify && self.settings.notify_chats && self.active_connections.is_empty() {
-            // Try to send a push notification
-            spawn(async move {
-                send_push_notification_for_message(
-                    &updated_message.sender,
-                    &updated_message.content,
-                    &chat_id
-                ).await;
-            });
-        }
+        if state_changed {}
 
         // Send acknowledgment back to sender using generated RPC
         let sender = message.sender.clone();
@@ -1889,11 +1727,30 @@ impl ChatState {
 
         Ok(())
     }
-
     // Remote handler for receiving reactions
     #[remote]
-    async fn receive_reaction(&mut self, message_id: String, emoji: String, user: String) -> Result<(), String> {
-        println!("Received reaction {} from {} for message {}", emoji, user, message_id);
+    async fn receive_reaction(
+        &mut self,
+        message_id: String,
+        emoji: String,
+        mut user: String,
+    ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if user != caller_node {
+                log_debug!(
+                    "[SEC] receive_reaction rejected spoofed user={} source={}",
+                    user, caller_node
+                );
+                return Err("receive_reaction rejected spoofed user".to_string());
+            }
+            user = caller_node.clone();
+        }
+        log_debug!(
+            "Received reaction {} from {} for message {}",
+            emoji, user, message_id
+        );
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1906,108 +1763,287 @@ impl ChatState {
             timestamp,
         };
 
-        // Find the message and add the reaction
-        for chat in self.chats.values_mut() {
-            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                // Check if user already reacted with this emoji
-                if !message.reactions.iter().any(|r| r.user == reaction.user && r.emoji == reaction.emoji) {
-                    message.reactions.push(reaction);
+        let mut update: Option<WsServerMessage> = None;
 
-                    // Send ChatUpdate to WebSocket connections
-                    for &channel_id in self.ws_connections.keys() {
-                        let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                        });
+        if is_local_call {
+            // Local calls are used for tests/debug tooling; keep broad search semantics.
+            for chat in self.chats.values_mut() {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if !message
+                        .reactions
+                        .iter()
+                        .any(|r| r.user == reaction.user && r.emoji == reaction.emoji)
+                    {
+                        message.reactions.push(reaction.clone());
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
                     }
-                    return Ok(());
+                    break;
                 }
             }
+        } else {
+            // Remote callers may only mutate chats that involve them.
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if let Some(chat) = self.chats.get_mut(&expected_chat_id) {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if !message
+                        .reactions
+                        .iter()
+                        .any(|r| r.user == reaction.user && r.emoji == reaction.emoji)
+                    {
+                        message.reactions.push(reaction.clone());
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                    }
+                }
+            }
+        }
+
+        if let Some(chat_update) = update {
+            self.broadcast_ws_message(&chat_update);
         }
 
         // Not an error - might be a reaction for a message we don't have
         Ok(())
     }
 
+    // Remote handler for removing reactions
+    #[remote]
+    async fn receive_reaction_remove(
+        &mut self,
+        message_id: String,
+        emoji: String,
+        mut user: String,
+    ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if user != caller_node {
+                log_debug!(
+                    "[SEC] receive_reaction_remove rejected spoofed user={} source={}",
+                    user, caller_node
+                );
+                return Err("receive_reaction_remove rejected spoofed user".to_string());
+            }
+            user = caller_node.clone();
+        }
+        log_debug!(
+            "Received reaction removal {} from {} for message {}",
+            emoji, user, message_id
+        );
+
+        let mut update: Option<WsServerMessage> = None;
+        if is_local_call {
+            for chat in self.chats.values_mut() {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if let Some(pos) = message
+                        .reactions
+                        .iter()
+                        .position(|r| r.user == user && r.emoji == emoji)
+                    {
+                        message.reactions.remove(pos);
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                    }
+                    break;
+                }
+            }
+        } else {
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if let Some(chat) = self.chats.get_mut(&expected_chat_id) {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                    if let Some(pos) = message
+                        .reactions
+                        .iter()
+                        .position(|r| r.user == user && r.emoji == emoji)
+                    {
+                        message.reactions.remove(pos);
+                        update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+                    }
+                }
+            }
+        }
+
+        if let Some(chat_update) = update {
+            self.broadcast_ws_message(&chat_update);
+        }
+
+        Ok(())
+    }
+
+    #[remote]
+    async fn receive_message_edit(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        new_content: String,
+    ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if chat_id != expected_chat_id {
+                log_debug!(
+                    "[SEC] receive_message_edit rejected spoofed chat_id={} expected={} source={}",
+                    chat_id, expected_chat_id, caller_node
+                );
+                return Err("receive_message_edit rejected spoofed chat_id".to_string());
+            }
+        }
+        let mut chat_update: Option<WsServerMessage> = None;
+
+        if let Some(chat) = self.chats.get_mut(&chat_id) {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                if !is_local_call && message.sender != caller_node {
+                    log_debug!(
+                        "[SEC] receive_message_edit rejected edit from {} for message sent by {}",
+                        caller_node, message.sender
+                    );
+                    return Err("receive_message_edit rejected unauthorized edit".to_string());
+                }
+                message.content = new_content;
+                chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
+            }
+        }
+
+        if let Some(update) = chat_update {
+            self.broadcast_ws_message(&update);
+        } else {
+            log_debug!(
+                "receive_message_edit: message {} in chat {} not found; dropping edit",
+                message_id, chat_id
+            );
+        }
+
+        Ok(())
+    }
+
     // Remote handler for receiving message acknowledgments
     #[remote]
     async fn receive_message_ack(&mut self, message_id: String) -> Result<(), String> {
-        println!("Received ACK for message {}", message_id);
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        log_debug!("Received ACK for message {}", message_id);
         // This ACK is from the remote node confirming they received our message
         // We need to find OUR sent message and update its status to Delivered
 
-        // Look through all chats to find the message we sent
+        let mut update_payload: Option<(String, WsServerMessage)> = None;
+
         for chat in self.chats.values_mut() {
-            // Only look for messages where WE are the sender
-            if let Some(message) = chat.messages.iter_mut()
-                .find(|m| m.id == message_id && m.sender == our().node) {
-
-                println!("Updating sent message {} status to Delivered", message_id);
-                message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
-
-                // Send ChatUpdate with the delivered status
-                for &channel_id in self.ws_connections.keys() {
-                    println!("Sending ChatUpdate for delivered message to channel {}", channel_id);
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                    });
-                }
-                return Ok(());
+            if !is_local_call && chat.counterparty != caller_node {
+                continue;
+            }
+            if let Some(message) = chat
+                .messages
+                .iter_mut()
+                .find(|m| m.id == message_id && m.sender == our().node)
+            {
+                log_debug!("Updating sent message {} status to Delivered", message_id);
+                message.status =
+                    safe_update_message_status(&message.status, MessageStatus::Delivered);
+                update_payload = Some((
+                    chat.counterparty.clone(),
+                    WsServerMessage::ChatUpdate(chat.clone()),
+                ));
+                break;
             }
         }
-        println!("Sent message {} not found for ACK", message_id);
+
+        if let Some((counterparty, chat_update)) = update_payload {
+            self.enqueue_delivery_flush(&counterparty);
+
+            // Send ChatUpdate with the delivered status
+            for &channel_id in self.ws_connections.keys() {
+                log_debug!(
+                    "Sending ChatUpdate for delivered message to channel {}",
+                    channel_id
+                );
+                self.push_ws_message(channel_id, &chat_update);
+            }
+            return Ok(());
+        }
+        log_debug!("Sent message {} not found for ACK", message_id);
         // Not an error - might be an ACK for a message we don't have anymore
         Ok(())
     }
 
     #[remote]
-    async fn receive_message_deletion(&mut self, message_id: String, chat_id: String) -> Result<(), String> {
-        println!("Received deletion request for message {} in chat {}", message_id, chat_id);
+    async fn receive_message_deletion(
+        &mut self,
+        message_id: String,
+        chat_id: String,
+    ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            let expected_chat_id = Self::normalize_chat_id(&caller_node, &our().node);
+            if chat_id != expected_chat_id {
+                log_debug!(
+                    "[SEC] receive_message_deletion rejected spoofed chat_id={} expected={} source={}",
+                    chat_id, expected_chat_id, caller_node
+                );
+                return Err("receive_message_deletion rejected spoofed chat_id".to_string());
+            }
+        }
+        log_debug!(
+            "Received deletion request for message {} in chat {}",
+            message_id, chat_id
+        );
 
-        // Find the chat and delete the message
+        let mut chat_update: Option<WsServerMessage> = None;
+
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == message_id) {
-                chat.messages.remove(pos);
-                println!("Deleted message {} from chat {}", message_id, chat_id);
-
-                // Notify all WebSocket connections about the updated chat
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                    });
+                if !is_local_call && chat.messages[pos].sender != caller_node {
+                    log_debug!(
+                        "[SEC] receive_message_deletion rejected delete from {} for message sent by {}",
+                        caller_node, chat.messages[pos].sender
+                    );
+                    return Err("receive_message_deletion rejected unauthorized delete".to_string());
                 }
+                chat.messages.remove(pos);
+                log_debug!("Deleted message {} from chat {}", message_id, chat_id);
+                chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
             }
+        }
+
+        if let Some(update) = chat_update {
+            self.broadcast_ws_message(&update);
         }
 
         Ok(())
     }
 
     #[remote]
-    async fn receive_profile_update(&mut self, node: String, profile: UserProfile) -> Result<(), String> {
-        println!("Received profile update from {}: {:?}", node, profile);
+    async fn receive_profile_update(
+        &mut self,
+        mut node: String,
+        profile: UserProfile,
+    ) -> Result<(), String> {
+        let caller_node = source().node.clone();
+        let is_local_call = caller_node == our().node;
+        if !is_local_call {
+            if node != caller_node {
+                log_debug!(
+                    "[SEC] receive_profile_update rejected spoofed node={} source={}",
+                    node, caller_node
+                );
+                return Err("receive_profile_update rejected spoofed node".to_string());
+            }
+            node = caller_node;
+        }
+        log_debug!("Received profile update from {}: {:?}", node, profile);
 
         // Store the profile
         self.node_profiles.insert(node.clone(), profile.clone());
 
         // Update all chats with this counterparty
+        let mut updates = Vec::new();
         for chat in self.chats.values_mut() {
             if chat.counterparty == node {
                 chat.counterparty_profile = Some(profile.clone());
-
-                // Notify all WebSocket connections about the updated chat
-                for &channel_id in self.ws_connections.keys() {
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                    });
-                }
+                updates.push(WsServerMessage::ChatUpdate(chat.clone()));
             }
+        }
+        for update in updates {
+            self.broadcast_ws_message(&update);
         }
 
         Ok(())
@@ -2045,7 +2081,8 @@ impl ChatState {
         let file = vfs::open_file(&vfs_path, false, Some(5))
             .map_err(|e| format!("Failed to open file: {:?}", e))?;
 
-        let file_data = file.read()
+        let file_data = file
+            .read()
             .map_err(|e| format!("Failed to read file: {:?}", e))?;
 
         // Try to determine MIME type from file content or default to application/octet-stream
@@ -2055,19 +2092,423 @@ impl ChatState {
     }
     // SEARCH
 
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http]
     async fn search_chats(&self, req: SearchChatsReq) -> Result<Vec<Chat>, String> {
-
         let query = req.query.to_lowercase();
-        let results: Vec<Chat> = self.chats.values()
+        let results: Vec<Chat> = self
+            .chats
+            .values()
             .filter(|chat| {
-                chat.counterparty.to_lowercase().contains(&query) ||
-                chat.messages.iter().any(|m| m.content.to_lowercase().contains(&query))
+                chat.counterparty.to_lowercase().contains(&query)
+                    || chat
+                        .messages
+                        .iter()
+                        .any(|m| m.content.to_lowercase().contains(&query))
             })
             .cloned()
             .collect();
 
         Ok(results)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_state_vector(
+        &mut self,
+        req: CrdtGroupStateVectorReq,
+    ) -> Result<CrdtStateVectorRes, String> {
+        if self.group_needs_bootstrap(&req.group_id) {
+            return Err(format!(
+                "Group {} is pending bootstrap and cannot serve CRDT requests",
+                req.group_id
+            ));
+        }
+
+        self.require_hub_access(&req.group_id, &our().node)
+            .map_err(|err| format!("hub access denied: {}", err))?;
+
+        let manager = self
+            .ensure_group_doc_manager(&req.group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+
+        let (doc_id, state_vector) = {
+            let doc = manager.doc();
+            (doc.id().to_string(), doc.state_vector())
+        };
+        log_crdt_event(&doc_id, "crdt_group_state_vector", &state_vector, None);
+        let encoded = base64_encode(&state_vector.encode_v1());
+        manager.set_last_state_vector(state_vector);
+
+        Ok(CrdtStateVectorRes {
+            state_vector: encoded,
+        })
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_update(
+        &mut self,
+        req: CrdtGroupUpdateReq,
+    ) -> Result<CrdtUpdateRes, String> {
+        if self.group_needs_bootstrap(&req.group_id) {
+            return Err(format!(
+                "Group {} is pending bootstrap and cannot serve CRDT requests",
+                req.group_id
+            ));
+        }
+
+        // V2.2: Validate sender is an active member for remote requests
+        // Only check if the group exists - if group doesn't exist, let it fail naturally later
+        let sender_addr = source();
+        let sender_node = sender_addr.node.clone();
+        if sender_node != our().node && self.groups.contains_key(&req.group_id) {
+            // Remote request - validate sender is an active member
+            self.require_subscriber_access(&req.group_id, &sender_node)
+                .map_err(|e| {
+                    format!(
+                        "CRDT update denied: sender {} not authorized: {}",
+                        sender_node, e
+                    )
+                })?;
+        }
+
+        self.require_hub_access(&req.group_id, &our().node)
+            .map_err(|err| format!("hub access denied: {}", err))?;
+
+        let manager = self
+            .ensure_group_doc_manager(&req.group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+        log_debug!(
+            "[CRDT][{}] crdt_group_update: state_vector={:?} doc_id={} manager_ptr={:p}",
+            req.group_id,
+            req.state_vector,
+            manager.doc().id(),
+            manager.doc()
+        );
+
+        if let Ok(state) = manager.doc().read_state() {
+            log_group_state_summary(manager.doc().id(), "crdt_group_update:sender_state", &state);
+            log_debug!(
+                "[CRDT][{}] sender_state members={:?}",
+                manager.doc().id(),
+                state
+                    .group
+                    .members
+                    .iter()
+                    .map(|(k, v)| (k, (&v.role_id, v.status)))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        let state_vector =
+            if let Some(encoded_sv) = req.state_vector.as_ref().filter(|s| !s.trim().is_empty()) {
+                let trimmed = encoded_sv.trim();
+                let bytes = base64_decode(trimmed)
+                    .map_err(|e| format!("Invalid state vector payload: {e}"))?;
+                Some(
+                    StateVector::decode_v1(&bytes)
+                        .map_err(|e| format!("Invalid state vector bytes: {:?}", e))?,
+                )
+            } else {
+                None
+            };
+
+        let (doc_id, doc_vector, update_bytes) = {
+            let doc = manager.doc();
+            (
+                doc.id().to_string(),
+                doc.state_vector(),
+                doc.encode_update_since(state_vector.as_ref()),
+            )
+        };
+        log_crdt_event(
+            &doc_id,
+            "crdt_group_update",
+            &doc_vector,
+            Some(update_bytes.len()),
+        );
+
+        let update_payload = base64_encode(&update_bytes);
+        self.publish_group_delta(&req.group_id, &update_payload);
+
+        Ok(CrdtUpdateRes {
+            doc_id,
+            update_payload,
+        })
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_apply_update(
+        &mut self,
+        req: CrdtGroupApplyReq,
+    ) -> Result<CrdtApplyRes, String> {
+        let group_id = req.group_id.clone();
+
+        // V2.2: Validate sender is an active member for remote requests
+        // Only check if the group exists - if group doesn't exist, let it fail naturally later
+        let sender_addr = source();
+        let sender_node = sender_addr.node.clone();
+        if sender_node != our().node && self.groups.contains_key(&group_id) {
+            // Remote request - validate sender is an active member
+            self.require_subscriber_access(&group_id, &sender_node)
+                .map_err(|e| {
+                    format!(
+                        "CRDT apply denied: sender {} not authorized: {}",
+                        sender_node, e
+                    )
+                })?;
+        }
+
+        self.apply_group_update_payload(
+            &group_id,
+            &req.update_payload,
+            "crdt_group_apply_update",
+            req.acl_version,
+            false,
+        )?;
+        Ok(CrdtApplyRes { applied: true })
+    }
+
+    #[remote]
+    #[local]
+    #[http]
+    async fn crdt_group_snapshot(
+        &mut self,
+        req: CrdtGroupSnapshotReq,
+    ) -> Result<CrdtUpdateRes, String> {
+        if self.group_needs_bootstrap(&req.group_id) {
+            return Err(format!(
+                "Group {} is pending bootstrap and cannot serve CRDT requests",
+                req.group_id
+            ));
+        }
+
+        // V2.2: Validate sender is an active member for remote requests
+        // Only check if the group exists - if group doesn't exist, let it fail naturally later
+        let sender_addr = source();
+        let sender_node = sender_addr.node.clone();
+        if sender_node != our().node && self.groups.contains_key(&req.group_id) {
+            // Remote request - validate sender is an active member
+            self.require_subscriber_access(&req.group_id, &sender_node)
+                .map_err(|e| {
+                    format!(
+                        "CRDT snapshot denied: sender {} not authorized: {}",
+                        sender_node, e
+                    )
+                })?;
+        }
+
+        self.require_hub_access(&req.group_id, &our().node)
+            .map_err(|err| format!("hub access denied: {}", err))?;
+
+        let manager = self
+            .ensure_group_doc_manager(&req.group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+
+        if let Ok(state) = manager.doc().read_state() {
+            log_group_state_summary(
+                manager.doc().id(),
+                "crdt_group_snapshot:sender_state",
+                &state,
+            );
+        }
+
+        let (doc_id, state_vector, update_bytes) = {
+            let doc = manager.doc();
+            (
+                doc.id().to_string(),
+                doc.state_vector(),
+                doc.encode_update_since(None),
+            )
+        };
+
+        log_crdt_event(
+            &doc_id,
+            "crdt_group_snapshot",
+            &state_vector,
+            Some(update_bytes.len()),
+        );
+
+        let update_payload = base64_encode(&update_bytes);
+        Ok(CrdtUpdateRes {
+            doc_id,
+            update_payload,
+        })
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[local]
+    #[http]
+    async fn replication_work(&mut self) -> Result<(), String> {
+        self.run_replication_work_guarded().await
+    }
+
+    /// Immediately push a snapshot to a peer (bypassing the debounced queue).
+    /// This is called when a member is invited to get them bootstrapped immediately.
+    #[local]
+    #[http]
+    async fn push_snapshot_to_peer(&mut self, req: PushSnapshotToPeerReq) -> Result<(), String> {
+        log_debug!(
+            "[REPL][{}] push_snapshot_to_peer invoked peer={}",
+            req.group_id, req.peer
+        );
+        let task = ReplicationTask {
+            group_id: req.group_id,
+            peer: req.peer,
+            kind: ReplicationKind::PushSnapshot,
+            since: None,
+            attempt: 0,
+            not_before: ChatState::now_secs(),
+        };
+        self.process_replication_task(task).await;
+        Ok(())
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[local]
+    #[http]
+    async fn admin_replication_state(
+        &mut self,
+        req: AdminReplicationStateReq,
+    ) -> Result<AdminReplicationStateRes, String> {
+        self.refresh_bootstrap_flags();
+        log_debug!(
+            "[ADMIN] admin_replication_state invoked filter={:?} group_count={}",
+            req.group_id,
+            self.groups.len()
+        );
+        let filter = req.group_id;
+        let now = ChatState::now_secs();
+        let groups: Vec<GroupReplicationState> = self
+            .groups
+            .iter()
+            .filter(|(id, _)| filter.as_ref().map_or(true, |gid| gid == *id))
+            .map(|(group_id, group)| {
+                let local_member_status = group.members.get(&our().node).map(|m| m.status);
+                log_debug!(
+                    "[ADMIN][{}] pending_bootstrap={} local_member_status={:?} whitelist_version={:?} hub_topic={} sub_topic={}",
+                    group_id,
+                    self.group_needs_bootstrap(group_id),
+                    local_member_status,
+                    self.pubsub.whitelist(group_id).map(|w| w.version()),
+                    group.routing.hub_topic,
+                    group.routing.subscriber_topic,
+                );
+                let sub_lag = group
+                    .delivery
+                    .subscriber_cursors
+                    .get(&our().node)
+                    .map(|c| now.saturating_sub(c.updated_at));
+                let hub_lag = group
+                    .delivery
+                    .hub_cursors
+                    .get(&our().node)
+                    .map(|c| now.saturating_sub(c.updated_at));
+                GroupReplicationState {
+                    group_id: group_id.clone(),
+                    pending_bootstrap: self.group_needs_bootstrap(group_id),
+                    routing: group.routing.clone(),
+                    hubs: group.hubs.active.iter().cloned().collect(),
+                    subscribers: group.subscribers.entries.keys().cloned().collect(),
+                    hub_cursors: group.delivery.hub_cursors.clone(),
+                    subscriber_cursors: group.delivery.subscriber_cursors.clone(),
+                    whitelist_version: self.pubsub.whitelist(group_id).map(|w| w.version()),
+                    subscriber_lag_secs: sub_lag,
+                    hub_lag_secs: hub_lag,
+                }
+            })
+            .collect();
+
+        Ok(AdminReplicationStateRes {
+            metrics: self.replication_metrics.clone(),
+            groups,
+        })
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[local]
+    #[http]
+    async fn admin_whitelist(&self, req: AdminWhitelistReq) -> Result<AdminWhitelistRes, String> {
+        log_debug!(
+            "[ADMIN] admin_whitelist invoked group_id={} has_whitelist={}",
+            req.group_id,
+            self.pubsub.whitelist(&req.group_id).is_some()
+        );
+        let whitelist = self
+            .pubsub
+            .whitelist(&req.group_id)
+            .ok_or_else(|| "whitelist missing".to_string())?;
+
+        let fmt_pattern = |pattern: &hyperware_pubsub_core::whitelist::TopicPattern| match pattern {
+            hyperware_pubsub_core::whitelist::TopicPattern::Exact(p) => {
+                format!("exact:{p}")
+            }
+            hyperware_pubsub_core::whitelist::TopicPattern::Prefix(p) => {
+                format!("prefix:{p}")
+            }
+        };
+
+        let entries = whitelist
+            .entries()
+            .iter()
+            .map(|(node, access)| {
+                let expires_at = access
+                    .expires_at
+                    .and_then(|ts| ts.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                WhitelistEntryDebug {
+                    node: node.0.clone(),
+                    publish: access.publish.iter().map(fmt_pattern).collect(),
+                    subscribe: access.subscribe.iter().map(fmt_pattern).collect(),
+                    audiences: access.audiences.iter().cloned().collect(),
+                    features: access.features.iter().cloned().collect(),
+                    expires_at,
+                }
+            })
+            .collect();
+
+        Ok(AdminWhitelistRes {
+            group_id: req.group_id,
+            version: whitelist.version(),
+            entries,
+        })
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[local]
+    #[http]
+    async fn admin_subscriber_events(
+        &mut self,
+        req: SubscriberEventsReq,
+    ) -> Result<SubscriberEventsRes, String> {
+        log_debug!(
+            "[ADMIN] admin_subscriber_events invoked clear={} take={:?} buffered={}",
+            req.clear,
+            req.take,
+            self.subscriber_events.len()
+        );
+        let take = req.take.unwrap_or(50);
+        let events = if req.clear {
+            // Clearing should drop pending events and return an empty list to signal nothing remains.
+            self.subscriber_events.clear();
+            Vec::new()
+        } else {
+            let len = self.subscriber_events.len();
+            let start = len.saturating_sub(take);
+            self.subscriber_events.iter().skip(start).cloned().collect()
+        };
+        Ok(SubscriberEventsRes { events })
     }
 
     // WEBSOCKET HANDLERS
@@ -2077,16 +2518,15 @@ impl ChatState {
         // We'll differentiate between public and private connections via authentication
         match message_type {
             WsMessageType::Close => {
-                println!("WebSocket connection closed: {}", channel_id);
+                log_debug!("WebSocket connection closed: {}", channel_id);
                 // Clean up connection
                 if let Some(node) = self.ws_connections.remove(&channel_id) {
-                    self.online_nodes.remove(&node);
                     // Broadcast status update
                     let status_msg = WsServerMessage::StatusUpdate {
                         node: node.clone(),
                         status: "offline".to_string(),
                     };
-                    self.broadcast_to_all(serde_json::to_string(&status_msg).unwrap());
+                    self.broadcast_ws_message(&status_msg);
                 }
 
                 // Clean up browser connections
@@ -2098,29 +2538,51 @@ impl ChatState {
                 if let Ok(payload) = String::from_utf8(blob.bytes.clone()) {
                     match serde_json::from_str::<WsClientMessage>(&payload) {
                         Ok(msg) => {
-                            println!("WebSocket: Received message from channel {}: {:?}", channel_id, msg);
+                            log_debug!(
+                                "WebSocket: Received message from channel {}: {:?}",
+                                channel_id, msg
+                            );
                             // Initialize connection if not already present
-                            if !self.ws_connections.contains_key(&channel_id) && !self.browser_connections.values().any(|&ch| ch == channel_id) {
-                                println!("WebSocket: New connection from channel {}, initializing...", channel_id);
+                            if !self.ws_connections.contains_key(&channel_id)
+                                && !self
+                                    .browser_connections
+                                    .values()
+                                    .any(|&ch| ch == channel_id)
+                            {
+                                log_debug!(
+                                    "WebSocket: New connection from channel {}, initializing...",
+                                    channel_id
+                                );
                                 self.ws_connections.insert(channel_id, our().node.clone());
 
                                 // Send all existing chats to the new connection
-                                println!("WebSocket: Sending {} chats to new connection", self.chats.len());
+                                log_debug!(
+                                    "WebSocket: Sending {} chats to new connection",
+                                    self.chats.len()
+                                );
                                 for chat in self.chats.values() {
-                                    println!("WebSocket: Sending chat {} with {} messages", chat.id, chat.messages.len());
+                                    log_debug!(
+                                        "WebSocket: Sending chat {} with {} messages",
+                                        chat.id,
+                                        chat.messages.len()
+                                    );
                                     let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                                        mime: Some("application/json".to_string()),
-                                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                                    });
+                                    self.push_ws_message(channel_id, &chat_update);
                                 }
-                                println!("WebSocket: Initial chat sync complete for channel {}", channel_id);
+                                log_debug!(
+                                    "WebSocket: Initial chat sync complete for channel {}",
+                                    channel_id
+                                );
                             }
 
                             // Check if this is a browser chat authentication
                             if let WsClientMessage::AuthWithKey { .. } = &msg {
                                 self.handle_browser_message(channel_id, msg);
-                            } else if self.browser_connections.values().any(|&ch| ch == channel_id) {
+                            } else if self
+                                .browser_connections
+                                .values()
+                                .any(|&ch| ch == channel_id)
+                            {
                                 // If already authenticated as browser
                                 self.handle_browser_message(channel_id, msg);
                             } else {
@@ -2132,17 +2594,14 @@ impl ChatState {
                             let error = WsServerMessage::Error {
                                 message: format!("Invalid message format: {}", e),
                             };
-                            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                            mime: Some("application/json".to_string()),
-                            bytes: serde_json::to_string(&error).unwrap().into_bytes(),
-                        });
+                            self.push_ws_message(channel_id, &error);
                         }
                     }
                 }
             }
             WsMessageType::Binary => {
                 // Handle binary messages if needed (e.g., for voice calls later)
-                println!("Binary message received on channel {}", channel_id);
+                log_debug!("Binary message received on channel {}", channel_id);
             }
             WsMessageType::Ping | WsMessageType::Pong => {
                 // Ignore ping/pong messages
@@ -2151,8 +2610,910 @@ impl ChatState {
     }
 }
 
+// Helper methods (outside hyperapp impl)
+impl ChatState {
+    // MESSAGE OPERATIONS
+
+    /// MessageStatus lifecycle:
+    /// - New outbound messages start as `Sending`, are marked `Sent` once staged locally and
+    ///   broadcast to connected clients, and move to `Delivered` when an ack arrives.
+    /// - Counterparty delivery uses RPC with an offline queue; WebSocket delivery is used if the
+    ///   counterparty is connected locally.
+    /// - Failures in RPC enqueue a retry via the delivery worker; persistent failure can be marked
+    ///   as `Failed` by the delivery pipeline.
+    /// - Frontends may optimistically render temp IDs; the `MessageAck` emitted to the origin
+    ///   channel contains the canonical message_id for dedupe/update.
+    fn stage_outgoing_message(
+        &mut self,
+        chat_id: &str,
+        mut message: ChatMessage,
+        origin_channel: Option<u32>,
+    ) -> (String, ChatMessage) {
+        self.assign_sequence_to_message(chat_id, &mut message);
+
+        let chat_snapshot = {
+            let chat = self.get_or_create_chat(chat_id, message.timestamp, None, None);
+            chat.messages.push(message.clone());
+            chat.last_activity = message.timestamp;
+
+            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message.id) {
+                msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
+            }
+
+            chat.clone()
+        };
+
+        let counterparty = chat_snapshot.counterparty.clone();
+        let stored_message = chat_snapshot
+            .messages
+            .iter()
+            .find(|m| m.id == message.id)
+            .cloned()
+            .unwrap_or(message);
+
+        self.broadcast_ws_message(&WsServerMessage::ChatUpdate(chat_snapshot));
+
+        if let Some(ch_id) = origin_channel {
+            self.push_ws_message(
+                ch_id,
+                &WsServerMessage::MessageAck {
+                    message_id: stored_message.id.clone(),
+                },
+            );
+        }
+
+        (counterparty, stored_message)
+    }
+
+    fn dispatch_outgoing_message(&self, counterparty: String, message: ChatMessage) {
+        // Try fast-path WebSocket delivery if the counterparty is connected locally; otherwise
+        // fall back to RPC with offline queue retry.
+        if let Some((&ch_id, _)) = self
+            .ws_connections
+            .iter()
+            .find(|(_, node)| *node == &counterparty)
+        {
+            self.push_ws_message(ch_id, &WsServerMessage::NewMessage(message));
+        } else {
+            ChatState::spawn_delivery_attempt(
+                counterparty,
+                message,
+                self.delivery_tx.clone(),
+                self.pending_deliveries.clone(),
+            );
+        }
+    }
+
+    fn send_message_internal(
+        &mut self,
+        chat_id: &str,
+        content: String,
+        reply_to: Option<String>,
+        origin_channel: Option<u32>,
+    ) -> Result<ChatMessage, String> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let message_id = format!("{}:{}", timestamp, rand::random::<u32>());
+
+        let message = ChatMessage {
+            id: message_id.clone(),
+            sender: our().node.clone(),
+            content,
+            timestamp,
+            sequence: None,
+            status: MessageStatus::Sending,
+            reply_to,
+            reactions: Vec::new(),
+            message_type: MessageType::Text,
+            file_info: None,
+        };
+
+        let (counterparty, stored_message) =
+            self.stage_outgoing_message(chat_id, message, origin_channel);
+        self.dispatch_outgoing_message(counterparty, stored_message.clone());
+
+        // Return the latest stored version (with sequence/status) if available.
+        Ok(self
+            .chats
+            .get(chat_id)
+            .and_then(|chat| {
+                chat.messages
+                    .iter()
+                    .find(|m| m.id == stored_message.id)
+                    .cloned()
+            })
+            .unwrap_or(stored_message))
+    }
+
+    fn spawn_delivery_attempt(
+        counterparty: String,
+        msg_to_send: ChatMessage,
+        delivery_tx: DeliveryTx,
+        pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    ) {
+        let message_id_clone = msg_to_send.id.clone();
+        spawn(async move {
+            let target = Address::from((counterparty.as_str(), OUR_PROCESS_ID));
+            let msg_json = serde_json::to_value(&msg_to_send).unwrap();
+            let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
+            match receive_message_remote_rpc(&target, msg_for_rpc).await {
+                Ok(_) => {
+                    log_debug!(
+                        "Message {} sent successfully to {}",
+                        message_id_clone, counterparty
+                    );
+                    // Counterparty will send ACK on success.
+                }
+                Err(_) => {
+                    log_debug!(
+                        "Failed to send message {} to {}, adding to delivery queue",
+                        message_id_clone, counterparty
+                    );
+                    ChatState::enqueue_delivery_message_inner(
+                        &delivery_tx,
+                        &pending_deliveries,
+                        &counterparty,
+                        msg_to_send,
+                    );
+                }
+            }
+        });
+    }
+
+    // REPLICATION HELPERS
+
+    async fn run_replication_work_guarded(&mut self) -> Result<(), String> {
+        if self
+            .replication_work_inflight
+            .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
+            .is_err()
+        {
+            log_debug!("[REPL] replication_work already running, skipping wake");
+            return Ok(());
+        }
+        let res = self.replication_work_inner().await;
+        self.replication_work_inflight
+            .store(false, AtomicOrdering::SeqCst);
+        // If work was enqueued while we were inflight, the wake may have been
+        // dropped by the guard above. Re-wake only when there is ready work to
+        // avoid tight loops on backoff/future tasks.
+        let now = ChatState::now_secs();
+        if self
+            .replication_queue
+            .iter()
+            .any(|task| task.not_before <= now)
+        {
+            log_debug!("[REPL] ready replication tasks remain, re-waking worker");
+            self.wake_replication_worker();
+        }
+        res
+    }
+
+    async fn replication_work_inner(&mut self) -> Result<(), String> {
+        self.refresh_bootstrap_flags();
+        let started = Instant::now();
+        let time_budget = Duration::from_secs(12);
+        log_debug!(
+            "[REPL] replication_work invoked pending_bootstrap={:?} queue_len={} now={}",
+            self.groups_pending_bootstrap,
+            self.replication_queue.len(),
+            ChatState::now_secs()
+        );
+        let now = ChatState::now_secs();
+        let applied = self.consume_broker_topics(32);
+        if applied > 0 {
+            log_debug!("[REPL] applied {} broker messages", applied);
+        }
+        self.enqueue_bootstrap_pulls(now);
+        self.enqueue_stale_subscriber_replays(now);
+
+        let mut processed = 0usize;
+        while processed < 6 {
+            if started.elapsed() >= time_budget {
+                log_debug!(
+                    "[REPL] replication_work time budget exhausted after {} tasks (elapsed {}ms)",
+                    processed,
+                    started.elapsed().as_millis()
+                );
+                break;
+            }
+            let Some(task) = self.next_ready_replication_task(now) else {
+                break;
+            };
+            self.process_replication_task(task).await;
+            processed += 1;
+        }
+
+        log_debug!(
+            "[REPL] replication processed {} (elapsed {}ms) pending_bootstrap={:?}",
+            processed,
+            started.elapsed().as_millis(),
+            self.groups_pending_bootstrap
+        );
+        if started.elapsed() > Duration::from_secs(5) {
+            log_debug!(
+                "[REPL_DIAG] replication_work slow_call elapsed_ms={} queue_len_end={} pending_bootstrap_end={:?}",
+                started.elapsed().as_millis(),
+                self.replication_queue.len(),
+                self.groups_pending_bootstrap
+            );
+        } else {
+            log_debug!(
+                "[REPL_DIAG] replication_work done elapsed_ms={} queue_len_end={} pending_bootstrap_end={:?}",
+                started.elapsed().as_millis(),
+                self.replication_queue.len(),
+                self.groups_pending_bootstrap
+            );
+        }
+        Ok(())
+    }
+
+    async fn process_replication_task(&mut self, task: ReplicationTask) {
+        let now = ChatState::now_secs();
+        match task.kind {
+            ReplicationKind::PushDelta | ReplicationKind::PushSnapshot => {
+                let is_hub = self
+                    .groups
+                    .get(&task.group_id)
+                    .map(|g| g.hubs.active.contains(&task.peer))
+                    .unwrap_or(false);
+
+                // Check if we're a removed member trying to push our final update.
+                // If so, skip the local ACL check - the remote will decide whether to accept.
+                let our_member_status = self
+                    .groups
+                    .get(&task.group_id)
+                    .and_then(|g| g.members.get(&our().node))
+                    .map(|m| m.status);
+                let is_self_removed = our_member_status == Some(MembershipStatus::Removed);
+
+                if !is_self_removed {
+                    if is_hub {
+                        if let Err(err) = self.require_hub_access(&task.group_id, &our().node) {
+                            log_debug!(
+                                "[REPL][{}] skip push to {} (local hub publish denied): {}",
+                                task.group_id, task.peer, err
+                            );
+                            self.replication_metrics.acl_skips =
+                                self.replication_metrics.acl_skips.saturating_add(1);
+                            return;
+                        }
+                    } else if let Err(err) =
+                        self.require_subscriber_access(&task.group_id, &our().node)
+                    {
+                        log_debug!(
+                            "[REPL][{}] skip push to subscriber {} (local publish denied): {}",
+                            task.group_id, task.peer, err
+                        );
+                        self.replication_metrics.acl_skips =
+                            self.replication_metrics.acl_skips.saturating_add(1);
+                        return;
+                    }
+                }
+
+                let sv_hint = task
+                    .since
+                    .as_ref()
+                    .and_then(|b| StateVector::decode_v1(b).ok())
+                    .or_else(|| self.peer_state_vector(&task.group_id, &task.peer));
+                let acl_version = self.pubsub.whitelist(&task.group_id).map(|w| w.version());
+
+                let manager = match self.ensure_group_doc_manager(&task.group_id) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        log_debug!(
+                            "[REPL][{}] cannot load doc for {}: {:?}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                        return;
+                    }
+                };
+                let doc = manager.doc();
+                let update_bytes = if let ReplicationKind::PushSnapshot = task.kind {
+                    doc.encode_update_since(None)
+                } else {
+                    doc.encode_update_since(sv_hint.as_ref())
+                };
+                let state_vector = doc.state_vector();
+                if update_bytes.is_empty() {
+                    self.update_peer_state_vector(&task.group_id, &task.peer, &state_vector);
+                    self.update_delivery_cursor(
+                        &task.group_id,
+                        &task.peer,
+                        is_hub,
+                        if is_hub {
+                            self.groups
+                                .get(&task.group_id)
+                                .map(|g| g.routing.hub_topic.clone())
+                                .unwrap_or_default()
+                        } else {
+                            self.groups
+                                .get(&task.group_id)
+                                .map(|g| g.routing.subscriber_topic.clone())
+                                .unwrap_or_default()
+                        },
+                        None,
+                    );
+                    return;
+                }
+
+                let payload = base64_encode(&update_bytes);
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "CrdtGroupApplyUpdate": {
+                        "group_id": task.group_id,
+                        "update_payload": payload,
+                        "acl_version": acl_version,
+                    }
+                }))
+                .unwrap_or_default();
+
+                let target = Address::from((task.peer.as_str(), OUR_PROCESS_ID));
+                let req = Request::new()
+                    .target(target.clone())
+                    .body(body)
+                    .expects_response(REPL_RPC_TIMEOUT_SECS);
+                log_debug!(
+                    "[REPL][{}] push kind={:?} peer={} target={:?}",
+                    task.group_id, task.kind, task.peer, target
+                );
+                let rpc_started = Instant::now();
+                match send::<serde_json::Value>(req).await {
+                    Ok(val) => {
+                        log_debug!(
+                            "[REPL_DIAG][{}] push roundtrip_ms={} kind={:?} peer={}",
+                            task.group_id,
+                            rpc_started.elapsed().as_millis(),
+                            task.kind,
+                            task.peer
+                        );
+                        let apply_res = val
+                            .get("Ok")
+                            .cloned()
+                            .or_else(|| Some(val.clone()))
+                            .and_then(|v| serde_json::from_value::<CrdtApplyRes>(v).ok());
+                        if let Some(res) = apply_res {
+                            if res.applied {
+                                self.update_peer_state_vector(
+                                    &task.group_id,
+                                    &task.peer,
+                                    &state_vector,
+                                );
+                                let queue_id = if is_hub {
+                                    self.groups
+                                        .get(&task.group_id)
+                                        .map(|g| g.routing.hub_topic.clone())
+                                        .unwrap_or_default()
+                                } else {
+                                    self.groups
+                                        .get(&task.group_id)
+                                        .map(|g| g.routing.subscriber_topic.clone())
+                                        .unwrap_or_default()
+                                };
+                                self.update_delivery_cursor(
+                                    &task.group_id,
+                                    &task.peer,
+                                    is_hub,
+                                    queue_id,
+                                    None,
+                                );
+                            } else {
+                                self.schedule_backoff(task, now);
+                            }
+                        } else {
+                            log_debug!(
+                                "[REPL][{}] failed to decode apply response from {}: {:?}",
+                                task.group_id, task.peer, val
+                            );
+                            self.schedule_backoff(task, now);
+                        }
+                    }
+                    Err(AppSendError::SendError(send_err)) => {
+                        log_debug!(
+                            "[REPL][{}] push to {} send error: {:?} (kind={:?} target={:?})",
+                            task.group_id, task.peer, send_err, task.kind, target
+                        );
+                        log_debug!(
+                            "[REPL_DIAG][{}] push send_err after_ms={} kind={:?} peer={}",
+                            task.group_id,
+                            rpc_started.elapsed().as_millis(),
+                            task.kind,
+                            task.peer
+                        );
+                        self.schedule_backoff(task, now);
+                    }
+                    Err(AppSendError::BuildError(build_err)) => {
+                        log_debug!(
+                            "[REPL][{}] push to {} build error: {:?} (kind={:?} target={:?})",
+                            task.group_id, task.peer, build_err, task.kind, target
+                        );
+                        log_debug!(
+                            "[REPL_DIAG][{}] push build_err after_ms={} kind={:?} peer={}",
+                            task.group_id,
+                            rpc_started.elapsed().as_millis(),
+                            task.kind,
+                            task.peer
+                        );
+                        self.schedule_backoff(task, now);
+                    }
+                }
+            }
+            ReplicationKind::PullSnapshot => {
+                if let Some(res) = self
+                    .fetch_snapshot_from_peer(&task.group_id, &task.peer)
+                    .await
+                {
+                    if let Err(err) = self.apply_group_update_payload(
+                        &task.group_id,
+                        &res.update_payload,
+                        "replication_pull_snapshot",
+                        None,
+                        false,
+                    ) {
+                        log_debug!(
+                            "[REPL][{}] failed to apply snapshot from {}: {}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                    } else if self.local_group_acl_ready(&task.group_id) {
+                        self.groups_pending_bootstrap.remove(&task.group_id);
+                    }
+                } else {
+                    self.schedule_backoff(task, now);
+                }
+            }
+            ReplicationKind::PullDelta => {
+                let sv = self
+                    .group_doc_managers
+                    .get(&task.group_id)
+                    .and_then(|mgr| mgr.last_state_vector().cloned());
+                if let Some(res) = self
+                    .fetch_update_from_peer(&task.group_id, &task.peer, sv)
+                    .await
+                {
+                    if res.update_payload.is_empty() {
+                        return;
+                    }
+                    if let Err(err) = self.apply_group_update_payload(
+                        &task.group_id,
+                        &res.update_payload,
+                        "replication_pull_delta",
+                        None,
+                        false,
+                    ) {
+                        log_debug!(
+                            "[REPL][{}] failed to apply delta from {}: {}",
+                            task.group_id, task.peer, err
+                        );
+                        self.schedule_backoff(task, now);
+                    }
+                } else {
+                    self.schedule_backoff(task, now);
+                }
+            }
+        }
+    }
+
+    fn schedule_backoff(&mut self, mut task: ReplicationTask, now: u64) {
+        let delay = (1u64 << (task.attempt.min(6))) * 2;
+        task.attempt = task.attempt.saturating_add(1);
+        task.not_before = now + delay;
+        self.replication_metrics.retries = self.replication_metrics.retries.saturating_add(1);
+        log_debug!(
+            "[REPL][{}] backoff {:?} to {} (attempt {} delay={}s)",
+            task.group_id, task.kind, task.peer, task.attempt, delay
+        );
+        self.enqueue_replication_task(task);
+    }
+
+    fn enqueue_bootstrap_pulls(&mut self, now: u64) {
+        let pending: Vec<GroupId> = self
+            .groups
+            .keys()
+            .cloned()
+            .filter(|g| self.group_needs_bootstrap(g))
+            .collect();
+        if !pending.is_empty() {
+            log_debug!(
+                "[BOOT] enqueue_bootstrap_pulls pending_groups={:?}",
+                pending
+            );
+        }
+        for group_id in pending {
+            let peers: Vec<String> = self
+                .groups
+                .get(&group_id)
+                .map(|g| {
+                    g.hubs
+                        .active
+                        .iter()
+                        .filter(|p| *p != &our().node)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for peer in peers {
+                if self.has_replication_task(&group_id, &peer, ReplicationKind::PullSnapshot) {
+                    continue;
+                }
+                self.enqueue_replication_task(ReplicationTask {
+                    group_id: group_id.clone(),
+                    peer,
+                    kind: ReplicationKind::PullSnapshot,
+                    since: None,
+                    attempt: 0,
+                    not_before: now,
+                });
+            }
+        }
+    }
+
+    async fn fetch_update_from_peer(
+        &self,
+        group_id: &GroupId,
+        peer: &str,
+        state_vector: Option<StateVector>,
+    ) -> Option<CrdtUpdateRes> {
+        let target = Address::from((peer, OUR_PROCESS_ID));
+        let sv_encoded = state_vector
+            .as_ref()
+            .map(|sv| base64_encode(&sv.encode_v1()));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "CrdtGroupUpdate": {
+                "group_id": group_id,
+                "state_vector": sv_encoded,
+            }
+        }))
+        .ok()?;
+        let request = Request::new()
+            .target(target.clone())
+            .body(body)
+            .expects_response(REPL_RPC_TIMEOUT_SECS);
+        log_debug!(
+            "[REPL][{}] fetch_update_from_peer peer={} target={}",
+            group_id, peer, target
+        );
+
+        let req_started = Instant::now();
+        match send::<serde_json::Value>(request).await {
+            Ok(val) => {
+                let res = val
+                    .get("Ok")
+                    .cloned()
+                    .or_else(|| Some(val.clone()))
+                    .and_then(|v| serde_json::from_value::<CrdtUpdateRes>(v).ok());
+                if let Some(res) = res {
+                    log_debug!(
+                        "[REPL_DIAG][{}] fetch_update_from_peer ok peer={} elapsed_ms={}",
+                        group_id,
+                        peer,
+                        req_started.elapsed().as_millis(),
+                    );
+                    Some(res)
+                } else {
+                    log_debug!(
+                        "[REPL][{}] failed to decode delta from {} body={:?}",
+                        group_id, peer, val
+                    );
+                    None
+                }
+            }
+            Err(AppSendError::SendError(err)) => {
+                log_debug!(
+                    "[REPL][{}] failed to fetch delta from {} send_err={:?}",
+                    group_id, peer, err
+                );
+                log_debug!(
+                    "[REPL_DIAG][{}] fetch_update_from_peer err peer={} elapsed_ms={}",
+                    group_id,
+                    peer,
+                    req_started.elapsed().as_millis()
+                );
+                None
+            }
+            Err(AppSendError::BuildError(build_err)) => {
+                log_debug!(
+                    "[REPL][{}] failed to build delta request to {}: {:?}",
+                    group_id, peer, build_err
+                );
+                None
+            }
+        }
+    }
+
+    async fn fetch_snapshot_from_peer(
+        &self,
+        group_id: &GroupId,
+        peer: &str,
+    ) -> Option<CrdtUpdateRes> {
+        let target = Address::from((peer, OUR_PROCESS_ID));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "CrdtGroupSnapshot": { "group_id": group_id }
+        }))
+        .ok()?;
+        let request = Request::new()
+            .target(target.clone())
+            .body(body)
+            // Keep snapshot pulls within the replication_work RPC budget.
+            .expects_response(REPL_RPC_TIMEOUT_SECS);
+        log_debug!(
+            "[REPL][{}] fetch_snapshot_from_peer peer={} target={}",
+            group_id, peer, target
+        );
+
+        let req_started = Instant::now();
+        match send::<serde_json::Value>(request).await {
+            Ok(val) => {
+                let res = val
+                    .get("Ok")
+                    .cloned()
+                    .or_else(|| Some(val.clone()))
+                    .and_then(|v| serde_json::from_value::<CrdtUpdateRes>(v).ok());
+                if let Some(res) = res {
+                    log_debug!(
+                        "[REPL_DIAG][{}] fetch_snapshot_from_peer ok peer={} elapsed_ms={}",
+                        group_id,
+                        peer,
+                        req_started.elapsed().as_millis(),
+                    );
+                    Some(res)
+                } else {
+                    log_debug!(
+                        "[REPL][{}] failed to decode snapshot from {} body={:?}",
+                        group_id, peer, val
+                    );
+                    None
+                }
+            }
+            Err(AppSendError::SendError(err)) => {
+                log_debug!(
+                    "[REPL][{}] failed to fetch snapshot from {} send_err={:?}",
+                    group_id, peer, err
+                );
+                log_debug!(
+                    "[REPL_DIAG][{}] fetch_snapshot_from_peer err peer={} elapsed_ms={}",
+                    group_id,
+                    peer,
+                    req_started.elapsed().as_millis()
+                );
+                None
+            }
+            Err(AppSendError::BuildError(build_err)) => {
+                log_debug!(
+                    "[REPL][{}] failed to build snapshot request to {}: {:?}",
+                    group_id, peer, build_err
+                );
+                None
+            }
+        }
+    }
+
+    fn apply_group_update_payload(
+        &mut self,
+        group_id: &GroupId,
+        update_payload: &str,
+        context: &str,
+        incoming_acl_version: Option<u64>,
+        is_subscriber_lane: bool,
+    ) -> Result<(), String> {
+        let local_has_access = self.local_group_acl_ready(group_id);
+        let local_member_status = self
+            .groups
+            .get(group_id)
+            .and_then(|g| g.members.get(&our().node).map(|m| m.status));
+        log_debug!(
+            "[CRDT][{}] apply_group_update_payload: context={} len={} local_acl_ready={} pending_bootstrap={} is_sub_lane={} incoming_acl={:?} local_member_status={:?}",
+            group_id,
+            context,
+            update_payload.len(),
+            local_has_access,
+            self.group_needs_bootstrap(group_id),
+            is_subscriber_lane,
+            incoming_acl_version,
+            local_member_status
+        );
+        if let Some(in_acl) = incoming_acl_version {
+            if let Some(local_wl) = self.pubsub.whitelist(group_id) {
+                let local_version = local_wl.version();
+                if in_acl != local_version {
+                    log_debug!(
+                        "[CRDT][{}] ACL version drift: incoming={} local={}",
+                        group_id, in_acl, local_version
+                    );
+                }
+            }
+        }
+
+        let update_bytes = base64_decode(update_payload.trim())
+            .map_err(|e| format!("Invalid update payload: {e}"))?;
+        if update_bytes.is_empty() {
+            log_debug!(
+                "[CRDT][{}] context={} received EMPTY update payload",
+                group_id, context
+            );
+        }
+        let was_missing = !self.groups.contains_key(group_id);
+        if was_missing {
+            self.groups_pending_bootstrap.insert(group_id.clone());
+            log_debug!(
+                "[BOOT] new group seen via {} -> added to pending_bootstrap set",
+                context
+            );
+        }
+
+        if update_bytes.is_empty() && (was_missing || self.group_needs_bootstrap(group_id)) {
+            log_debug!(
+                "[CRDT][{}] context={} skipping empty update during bootstrap",
+                group_id, context
+            );
+            return Ok(());
+        }
+
+        let mut enforce_acl = local_has_access && !self.group_needs_bootstrap(group_id);
+        if enforce_acl {
+            let local_status = self
+                .groups
+                .get(group_id)
+                .and_then(|g| g.members.get(&our().node).map(|m| m.status));
+            if !matches!(local_status, Some(MembershipStatus::Active)) {
+                // Allow membership bootstrap/update to proceed even if we're not yet whitelisted.
+                log_debug!(
+                    "[CRDT][{}] bypassing ACL for local_status={:?} context={}",
+                    group_id, local_status, context
+                );
+                enforce_acl = false;
+            }
+        }
+        if enforce_acl {
+            let routing = self
+                .groups
+                .get(group_id)
+                .map(|g| g.routing.clone())
+                .unwrap_or_default();
+            let routing_unavailable =
+                routing.hub_topic.is_empty() && routing.subscriber_topic.is_empty();
+            if !routing_unavailable {
+                // Accept either hub subscription or subscriber subscription depending on lane + role.
+                let hub_ok = self.require_hub_subscription(group_id, &our().node);
+                if let Err(hub_err) = hub_ok {
+                    let sub_ok = self.require_subscriber_access(group_id, &our().node);
+                    if let Err(sub_err) = sub_ok {
+                        // Only allow bypass when this update arrived via subscriber lane and we're not yet active.
+                        let member_status = self
+                            .groups
+                            .get(group_id)
+                            .and_then(|g| g.members.get(&our().node).map(|m| m.status));
+                        let is_new_or_pending = member_status.is_none()
+                            || matches!(member_status, Some(MembershipStatus::Pending));
+                        if !(is_subscriber_lane && is_new_or_pending) {
+                            log_debug!(
+                                "[CRDT][{}] ACL reject context={} hub_err={} sub_err={} member_status={:?} is_sub_lane={}",
+                                group_id,
+                                context,
+                                hub_err,
+                                sub_err,
+                                member_status,
+                                is_subscriber_lane
+                            );
+                            return Err(format!(
+                                "hub subscription denied: {}; subscriber access denied: {}",
+                                hub_err, sub_err
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let manager = self
+            .ensure_group_doc_manager(group_id)
+            .map_err(|e| format!("Failed to init group CRDT: {:?}", e))?;
+
+        let doc_id = manager.doc().id().to_string();
+        log_debug!(
+            "[CRDT][{}] context={} incoming_update_bytes={}",
+            doc_id,
+            context,
+            update_bytes.len()
+        );
+
+        {
+            let doc = manager.doc();
+            doc.apply_update(&update_bytes)
+                .map_err(|e| format!("Failed to apply update: {:?}", e))?;
+        }
+
+        let group_state = {
+            let doc = manager.doc();
+            doc.read_state()
+                .map_err(|e| format!("Failed to read CRDT state: {:?}", e))?
+        };
+        log_group_state_summary(&doc_id, context, &group_state);
+        log_debug!(
+            "[CRDT][{}] context={} members_detail={:?}",
+            doc_id,
+            context,
+            group_state
+                .group
+                .members
+                .iter()
+                .map(|(k, v)| (k, (&v.role_id, v.status)))
+                .collect::<Vec<_>>()
+        );
+        log_debug!(
+            "[CRDT][{}] context={} applied_ok members={} hubs={} subs={}",
+            doc_id,
+            context,
+            group_state.group.members.len(),
+            group_state.group.hubs.active.len(),
+            group_state.group.subscribers.entries.len()
+        );
+
+        let new_vector = {
+            let doc = manager.doc();
+            doc.state_vector()
+        };
+        log_crdt_event(&doc_id, context, &new_vector, Some(update_bytes.len()));
+        manager.set_last_state_vector(new_vector.clone());
+        self.update_local_hub_sync_state(group_id, &new_vector);
+
+        group_state.apply_into(self);
+
+        // Notify browser clients so they can refresh group state after receiving remote updates.
+        self.broadcast_ws_message(&WsServerMessage::GroupUpdate {
+            group_id: group_id.clone(),
+        });
+
+        // Consider bootstrap complete once the local node is an active member (or otherwise ACL-ready).
+        // Also mark complete if the local member has been removed - no point bootstrapping a group
+        // we've been kicked from.
+        let local_member = self
+            .groups
+            .get(group_id)
+            .and_then(|g| g.members.get(&our().node));
+        let has_local_membership = local_member
+            .map(|m| m.status == MembershipStatus::Active)
+            .unwrap_or(false);
+        let is_removed = local_member
+            .map(|m| m.status == MembershipStatus::Removed)
+            .unwrap_or(false);
+
+        let acl_ready = self.local_group_acl_ready(group_id);
+        log_debug!(
+            "[CRDT][{}] context={} post-apply has_local_membership={} is_removed={} acl_ready={} pending_bootstrap={}",
+            group_id,
+            context,
+            has_local_membership,
+            is_removed,
+            acl_ready,
+            self.group_needs_bootstrap(group_id)
+        );
+        if acl_ready || has_local_membership || is_removed {
+            self.mark_group_bootstrapped(group_id);
+        }
+        Ok(())
+    }
+}
+
 // Helper methods implementation
 impl ChatState {
+    fn infer_counterparty_from_chat_id(chat_id: &str, our_node: &str) -> String {
+        let mut parts = chat_id.splitn(2, ':');
+        let first = parts.next().unwrap_or_default();
+        let second = parts.next().unwrap_or_default();
+
+        if first == our_node {
+            second.to_string()
+        } else if second == our_node {
+            first.to_string()
+        } else {
+            // malformed ID; fall back to the tail for now
+            second.to_string()
+        }
+    }
+
     // Normalize chat ID to prevent duplicates
     // Always returns the ID in alphabetical order: "nodeA:nodeB"
     fn normalize_chat_id(node1: &str, node2: &str) -> String {
@@ -2163,345 +3524,287 @@ impl ChatState {
         }
     }
 
-    async fn process_delivery_queue(&mut self) {
-        let queue_len = {
-            let queue = self.delivery_queue.lock().unwrap();
-            queue.len()
-        };
-        println!("Processing delivery queue with {} nodes", queue_len);
+    fn get_or_create_chat<'a>(
+        &'a mut self,
+        chat_id: &str,
+        timestamp: u64,
+        counterparty_hint: Option<String>,
+        profile_hint: Option<UserProfile>,
+    ) -> &'a mut Chat {
+        if !self.chats.contains_key(chat_id) {
+            let counterparty = counterparty_hint
+                .or_else(|| Some(Self::infer_counterparty_from_chat_id(chat_id, &our().node)))
+                .unwrap_or_else(|| chat_id.to_string());
 
-        // Process queued messages for each node
-        let nodes_to_process: Vec<String> = {
-            let queue = self.delivery_queue.lock().unwrap();
-            queue.keys().cloned().collect()
-        };
+            let profile = profile_hint.or_else(|| self.node_profiles.get(&counterparty).cloned());
 
-        for node in nodes_to_process {
-            // Get the first message for this node
-            let msg_to_send = {
-                let queue = self.delivery_queue.lock().unwrap();
-                queue.get(&node).and_then(|messages| messages.first().cloned())
-            };
+            self.chats.insert(
+                chat_id.to_string(),
+                Chat {
+                    id: chat_id.to_string(),
+                    counterparty: counterparty.clone(),
+                    messages: Vec::new(),
+                    last_activity: timestamp,
+                    unread_count: 0,
+                    is_blocked: false,
+                    notify: true,
+                    counterparty_profile: profile,
+                },
+            );
+            self.message_sequence_counters
+                .entry(chat_id.to_string())
+                .or_insert(0);
+        }
 
-            if let Some(msg) = msg_to_send {
-                let target = Address::from((node.as_str(), OUR_PROCESS_ID));
+        self.chats
+            .get_mut(chat_id)
+            .expect("chat must exist after get_or_create_chat")
+    }
 
-                // Try to send using generated RPC method
-                let msg_json = serde_json::to_value(&msg).unwrap();
-                let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
+    fn ensure_sequence_state(&mut self, chat_id: &str) {
+        if self.message_sequence_counters.contains_key(chat_id) {
+            return;
+        }
 
-                match receive_message_remote_rpc(&target, msg_for_rpc.clone()).await {
-                    Ok(_) => {
-                        println!("Successfully delivered queued message {} to {}", msg.id, node);
-                        // Remove from queue if successful
+        if !self.chats.contains_key(chat_id) {
+            self.message_sequence_counters
+                .insert(chat_id.to_string(), 0);
+            return;
+        }
+
+        let chat = self
+            .chats
+            .get_mut(chat_id)
+            .expect("chat must exist when ensuring sequences");
+
+        let mut next_seq = 0u64;
+        let mut indices: Vec<usize> = (0..chat.messages.len()).collect();
+        indices.sort_by(|&i, &j| {
+            chat.messages[i]
+                .timestamp
+                .cmp(&chat.messages[j].timestamp)
+                .then_with(|| chat.messages[i].id.cmp(&chat.messages[j].id))
+        });
+
+        let mut max_existing = chat
+            .messages
+            .iter()
+            .filter_map(|m| m.sequence)
+            .max()
+            .map(|val| val + 1);
+
+        if max_existing.is_some() {
+            next_seq = max_existing.take().unwrap();
+        }
+
+        for idx in indices {
+            if chat.messages[idx].sequence.is_none() {
+                chat.messages[idx].sequence = Some(next_seq);
+                next_seq += 1;
+            }
+        }
+
+        if next_seq == 0 {
+            next_seq = chat
+                .messages
+                .iter()
+                .filter_map(|m| m.sequence)
+                .max()
+                .map(|val| val + 1)
+                .unwrap_or(0);
+        }
+
+        self.message_sequence_counters
+            .insert(chat_id.to_string(), next_seq);
+    }
+
+    fn assign_sequence_to_message(&mut self, chat_id: &str, message: &mut ChatMessage) {
+        if message.sequence.is_some() {
+            return;
+        }
+
+        self.ensure_sequence_state(chat_id);
+
+        if let Some(counter) = self.message_sequence_counters.get_mut(chat_id) {
+            let seq = *counter;
+            *counter += 1;
+            message.sequence = Some(seq);
+        }
+    }
+
+    fn enqueue_delivery_message(&self, node: &str, message: ChatMessage) {
+        ChatState::enqueue_delivery_message_inner(
+            &self.delivery_tx,
+            &self.pending_deliveries,
+            node,
+            message,
+        );
+    }
+
+    fn enqueue_delivery_flush(&self, node: &str) {
+        if let Err(err) = self
+            .delivery_tx
+            .unbounded_send(QueuedDelivery::flush(node.to_string()))
+        {
+            log_debug!("Failed to enqueue delivery flush for {}: {:?}", node, err);
+        }
+    }
+
+    fn bootstrap_pending_deliveries(&self) {
+        for chat in self.chats.values() {
+            let counterparty = chat.counterparty.clone();
+            for message in chat.messages.iter() {
+                if message.sender == our().node
+                    && matches!(
+                        message.status,
+                        MessageStatus::Sent | MessageStatus::Sending | MessageStatus::Failed
+                    )
+                {
+                    self.enqueue_delivery_message(&counterparty, message.clone());
+                }
+            }
+        }
+    }
+
+    fn enqueue_delivery_message_inner(
+        delivery_tx: &DeliveryTx,
+        pending_deliveries: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message: ChatMessage,
+    ) {
+        ChatState::record_pending_message(pending_deliveries, node, &message);
+        if let Err(err) =
+            delivery_tx.unbounded_send(QueuedDelivery::message(node.to_string(), message))
+        {
+            log_debug!("Failed to enqueue delivery message for {}: {:?}", node, err);
+        }
+    }
+
+    fn record_pending_message(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message: &ChatMessage,
+    ) {
+        let mut guard = pending.lock().unwrap();
+        let entry = guard.entry(node.to_string()).or_default();
+        if let Some(existing) = entry.iter_mut().find(|m| m.id == message.id) {
+            *existing = message.clone();
+        } else {
+            entry.push(message.clone());
+        }
+    }
+
+    fn remove_pending_message(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message_id: &str,
+    ) {
+        let mut guard = pending.lock().unwrap();
+        if let Some(entry) = guard.get_mut(node) {
+            entry.retain(|m| m.id != message_id);
+            if entry.is_empty() {
+                guard.remove(node);
+            }
+        }
+    }
+
+    fn pending_messages_for_node(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+    ) -> Vec<ChatMessage> {
+        let guard = pending.lock().unwrap();
+        guard.get(node).cloned().unwrap_or_default()
+    }
+
+    fn is_message_pending(
+        pending: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+        node: &str,
+        message_id: &str,
+    ) -> bool {
+        let guard = pending.lock().unwrap();
+        guard
+            .get(node)
+            .map(|messages| messages.iter().any(|m| m.id == message_id))
+            .unwrap_or(false)
+    }
+
+    async fn run_delivery_worker(
+        mut delivery_rx: UnboundedReceiver<QueuedDelivery>,
+        delivery_tx: DeliveryTx,
+        pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    ) {
+        while let Some(queued) = delivery_rx.next().await {
+            match queued.event {
+                DeliveryEvent::Message(message) => {
+                    ChatState::record_pending_message(&pending_deliveries, &queued.node, &message);
+                    ChatState::attempt_delivery(
+                        queued.node.clone(),
+                        message,
+                        delivery_tx.clone(),
+                        pending_deliveries.clone(),
+                    )
+                    .await;
+                }
+                DeliveryEvent::Flush => {
+                    let messages =
+                        ChatState::pending_messages_for_node(&pending_deliveries, &queued.node);
+                    for msg in messages {
+                        if let Err(err) = delivery_tx
+                            .unbounded_send(QueuedDelivery::message(queued.node.clone(), msg))
                         {
-                            let mut queue = self.delivery_queue.lock().unwrap();
-                            if let Some(node_queue) = queue.get_mut(&node) {
-                                node_queue.retain(|m| m.id != msg.id);
-                                if node_queue.is_empty() {
-                                    queue.remove(&node);
-                                }
-                            }
-                        }
-
-                        // Update message status in our chat
-                        for chat in self.chats.values_mut() {
-                            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg.id) {
-                                message.status = safe_update_message_status(&message.status, MessageStatus::Sent);
-
-                                // Send ChatUpdate to WebSocket connections
-                                for &channel_id in self.ws_connections.keys() {
-                                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                                        mime: Some("application/json".to_string()),
-                                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                                    });
-                                }
-                                break;
-                            }
+                            log_debug!(
+                                "Failed to enqueue message during flush for {}: {:?}",
+                                queued.node, err
+                            );
+                            break;
                         }
                     }
-                    Err(e) => {
-                        // Don't attempt more messages to this node if we get Offline or Timeout
-                        println!("Failed to deliver queued message to {}: {:?}", node, e);
-                    }
                 }
             }
         }
     }
 
-    fn handle_client_message(&mut self, channel_id: u32, msg: WsClientMessage) {
-        match msg {
-            WsClientMessage::SendMessage { chat_id, content, reply_to } => {
-                // Create and send message
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+    async fn attempt_delivery(
+        node: String,
+        message: ChatMessage,
+        delivery_tx: DeliveryTx,
+        pending_deliveries: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    ) {
+        let target = Address::from((node.as_str(), OUR_PROCESS_ID));
 
-                let message_id = format!("{}:{}", timestamp, rand::random::<u32>());
-                let sender = self.ws_connections.get(&channel_id)
-                    .cloned()
-                    .unwrap_or_else(|| our().node.clone());
+        let msg_json = serde_json::to_value(&message).unwrap();
+        let msg_for_rpc: CUChatMessage = serde_json::from_value(msg_json).unwrap();
 
-                let message = ChatMessage {
-                    id: message_id.clone(),
-                    sender,
-                    content,
-                    timestamp,
-                    status: MessageStatus::Sending,
-                    reply_to,
-                    reactions: Vec::new(),
-                    message_type: MessageType::Text,
-                    file_info: None,
-                };
-
-                // Add to chat
-                if let Some(chat) = self.chats.get_mut(&chat_id) {
-                    chat.messages.push(message.clone());
-                    chat.last_activity = timestamp;
-
-                    // Send to counterparty if online
-                    let counterparty = chat.counterparty.clone();
-                    if self.online_nodes.contains(&counterparty) {
-                        // Find counterparty's channel
-                        for (&ch_id, node) in &self.ws_connections {
-                            if node == &counterparty {
-                                let msg = WsServerMessage::NewMessage(message.clone());
-                                send_ws_push(ch_id, WsMessageType::Text, LazyLoadBlob {
-                                    mime: Some("application/json".to_string()),
-                                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                                });
-                                break;
-                            }
-                        }
-                    } else {
-                        // Queue for delivery
-                        {
-                            let mut queue = self.delivery_queue.lock().unwrap();
-                            queue.entry(counterparty)
-                                .or_insert_with(Vec::new)
-                                .push(message.clone());
+        match receive_message_remote_rpc(&target, msg_for_rpc).await {
+            Ok(_) => {
+                ChatState::remove_pending_message(&pending_deliveries, &node, &message.id);
+            }
+            Err(err) => {
+                log_debug!(
+                    "Failed to deliver message {} to {}: {:?}",
+                    message.id, node, err
+                );
+                let retry_tx = delivery_tx.clone();
+                let retry_pending = pending_deliveries.clone();
+                let retry_node = node.clone();
+                let retry_message = message.clone();
+                spawn(async move {
+                    let _ = sleep(30000).await;
+                    if ChatState::is_message_pending(&retry_pending, &retry_node, &retry_message.id)
+                    {
+                        if let Err(send_err) = retry_tx.unbounded_send(QueuedDelivery::message(
+                            retry_node.clone(),
+                            retry_message,
+                        )) {
+                            log_debug!(
+                                "Failed to requeue message {} for {}: {:?}",
+                                message.id, retry_node, send_err
+                            );
                         }
                     }
-
-                    // Update status to Sent now that BE has received and processed it
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                        msg.status = safe_update_message_status(&msg.status, MessageStatus::Sent);
-                    }
-
-                    // Send ChatUpdate with the updated status
-                    let chat_update = WsServerMessage::ChatUpdate(chat.clone());
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                        mime: Some("application/json".to_string()),
-                        bytes: serde_json::to_string(&chat_update).unwrap().into_bytes(),
-                    });
-                }
-
-                // Send acknowledgment
-                let ack = WsServerMessage::MessageAck { message_id };
-                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&ack).unwrap().into_bytes(),
                 });
-            }
-            WsClientMessage::Ack { message_id } => {
-                // Update message status
-                for chat in self.chats.values_mut() {
-                    if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-                        message.status = safe_update_message_status(&message.status, MessageStatus::Delivered);
-                        break;
-                    }
-                }
-            }
-            WsClientMessage::MarkRead { chat_id } => {
-                if let Some(chat) = self.chats.get_mut(&chat_id) {
-                    chat.unread_count = 0;
-                }
-            }
-            WsClientMessage::UpdateStatus { status } => {
-                // Track whether this connection is active (user viewing the page)
-                if status == "active" {
-                    self.active_connections.insert(channel_id);
-                } else if status == "inactive" {
-                    self.active_connections.remove(&channel_id);
-                }
-
-                if let Some(node) = self.ws_connections.get(&channel_id) {
-                    let msg = WsServerMessage::StatusUpdate {
-                        node: node.clone(),
-                        status,
-                    };
-                    self.broadcast_to_all(serde_json::to_string(&msg).unwrap());
-                }
-            }
-            WsClientMessage::Heartbeat => {
-                let msg = WsServerMessage::Heartbeat;
-                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                });
-            }
-            _ => {
-                // Other message types not handled in node-to-node
             }
         }
-    }
-
-    fn handle_browser_message(&mut self, channel_id: u32, msg: WsClientMessage) {
-        match msg {
-            WsClientMessage::AuthWithKey { chat_key } => {
-                if let Some(key_data) = self.chat_keys.get(&chat_key) {
-                    if !key_data.is_revoked {
-                        // Store connection
-                        self.browser_connections.insert(chat_key.clone(), channel_id);
-
-                        // Get chat history
-                        let history = self.chats.get(&key_data.chat_id)
-                            .map(|chat| chat.messages.clone())
-                            .unwrap_or_default();
-
-                        let msg = WsServerMessage::AuthSuccess {
-                            chat_id: key_data.chat_id.clone(),
-                            history,
-                        };
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                });
-                    } else {
-                        let msg = WsServerMessage::AuthFailed {
-                            reason: "Chat key has been revoked".to_string(),
-                        };
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                });
-                    }
-                } else {
-                    let msg = WsServerMessage::AuthFailed {
-                        reason: "Invalid chat key".to_string(),
-                    };
-                    send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                });
-                }
-            }
-            WsClientMessage::BrowserMessage { content } => {
-                // Find chat key for this connection
-                if let Some((chat_key, _)) = self.browser_connections.iter().find(|(_, &ch)| ch == channel_id) {
-                    if let Some(key_data) = self.chat_keys.get(chat_key) {
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-
-                        let message = ChatMessage {
-                            id: format!("{}:{}", timestamp, rand::random::<u32>()),
-                            sender: key_data.user_name.clone(),
-                            content,
-                            timestamp,
-                            status: MessageStatus::Sent,
-                            reply_to: None,
-                            reactions: Vec::new(),
-                            message_type: MessageType::Text,
-                            file_info: None,
-                        };
-
-                        // Add to chat
-                        let chat = self.chats.entry(key_data.chat_id.clone())
-                            .or_insert_with(|| Chat {
-                                id: key_data.chat_id.clone(),
-                                counterparty: key_data.user_name.clone(),
-                                messages: Vec::new(),
-                                last_activity: timestamp,
-                                unread_count: 0,
-                                is_blocked: false,
-                                notify: true,
-                                counterparty_profile: None,
-                            });
-
-                        chat.messages.push(message.clone());
-                        chat.last_activity = timestamp;
-                        chat.unread_count += 1;
-
-                        // Send message to all participants
-                        let msg = WsServerMessage::NewMessage(message);
-                        send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                });
-                    }
-                }
-            }
-            WsClientMessage::Heartbeat => {
-                let msg = WsServerMessage::Heartbeat;
-                send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                    mime: Some("application/json".to_string()),
-                    bytes: serde_json::to_string(&msg).unwrap().into_bytes(),
-                });
-            }
-            _ => {}
-        }
-    }
-
-    fn broadcast_to_all(&self, message: String) {
-        for &channel_id in self.ws_connections.keys() {
-            send_ws_push(channel_id, WsMessageType::Text, LazyLoadBlob {
-                mime: Some("application/json".to_string()),
-                bytes: message.clone().into_bytes(),
-            });
-        }
-    }
-}
-
-// Add rand for generating IDs
-mod rand {
-    pub fn random<T>() -> T
-    where
-        T: From<u32>
-    {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u32;
-        T::from(timestamp)
-    }
-}
-
-// Simple base64 decoder
-mod base64 {
-    pub fn decode(input: &str) -> Result<Vec<u8>, String> {
-        // Remove any whitespace
-        let input = input.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-
-        // Base64 character set
-        const BASE64_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-        let mut output = Vec::new();
-        let mut buffer = 0u32;
-        let mut bits_collected = 0;
-
-        for c in input.chars() {
-            if c == '=' {
-                break; // Padding character, we're done
-            }
-
-            let value = BASE64_CHARS.find(c)
-                .ok_or_else(|| format!("Invalid base64 character: {}", c))? as u32;
-
-            buffer = (buffer << 6) | value;
-            bits_collected += 6;
-
-            while bits_collected >= 8 {
-                bits_collected -= 8;
-                output.push((buffer >> bits_collected) as u8);
-                buffer &= (1 << bits_collected) - 1;
-            }
-        }
-
-        Ok(output)
     }
 }
 
@@ -2521,30 +3824,5 @@ impl ChatState {
             name: profile.name,
             profile_pic: profile.profile_pic,
         }
-    }
-}
-
-mod arc_mutex_serde {
-    use super::*;
-
-    pub fn serialize<S, T>(val: &Arc<Mutex<T>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-        T: Serialize,
-    {
-        use serde::ser::Error;
-        match val.lock() {
-            Ok(guard) => guard.serialize(serializer),
-            Err(_) => Err(Error::custom("mutex poisoned")),
-        }
-    }
-
-    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Arc<Mutex<T>>, D::Error>
-    where
-        D: Deserializer<'de>,
-        T: Deserialize<'de>,
-    {
-        let data = T::deserialize(deserializer)?;
-        Ok(Arc::new(Mutex::new(data)))
     }
 }

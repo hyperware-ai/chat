@@ -14,6 +14,11 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    "baseUrl": ".",
+    "paths": {
+      "#caller-utils": ["../target/ui/caller-utils.ts"]
+    },
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": false,

@@ -1,10 +1,10 @@
 import React from 'react';
-import { ChatMessage } from '../../types/chat';
+import { Chat } from '#caller-utils';
 import Message from './Message';
 import './MessageList.css';
 
 interface MessageListProps {
-  messages: ChatMessage[];
+  messages: Chat.ChatMessage[];
 }
 
 const MessageList: React.FC<MessageListProps> = ({ messages }) => {

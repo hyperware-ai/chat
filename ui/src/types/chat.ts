@@ -1,12 +1,4 @@
-// Import and re-export types from generated caller-utils
-export type {
-  Settings,
-  ChatKey,
-  UserProfile,
-  Chat,
-  ChatMessage,
-  MessageStatus
-} from '../../../target/ui/caller-utils';
+import { Chat } from '#caller-utils';
 
 // Additional frontend-specific types
 export interface WsClientMessage {
@@ -19,16 +11,15 @@ export interface WsClientMessage {
   Heartbeat?: null;
 }
 
-import type { ChatMessage, Chat, UserProfile } from '../../../target/ui/caller-utils';
-
 export interface WsServerMessage {
-  NewMessage?: ChatMessage;
+  NewMessage?: Chat.ChatMessage;
   MessageAck?: { message_id: string };
   StatusUpdate?: { node: string; status: string };
-  ChatUpdate?: Chat;
-  ProfileUpdate?: { node: string; profile: UserProfile };
-  AuthSuccess?: { chat_id: string; history: ChatMessage[] };
+  ChatUpdate?: Chat.Chat;
+  ProfileUpdate?: { node: string; profile: Chat.UserProfile };
+  AuthSuccess?: { chat_id: string; history: Chat.ChatMessage[] };
   AuthFailed?: { reason: string };
+  GroupUpdate?: { group_id: string };
   Heartbeat?: null;
   Error?: { message: string };
 }

@@ -4,11 +4,12 @@ import MessageList from './MessageList';
 import MessageInput from './MessageInput';
 import ChatHeader from './ChatHeader';
 import './ChatView.css';
+import { Chat } from '#caller-utils';
 
 const ChatView: React.FC = () => {
-  const { 
-    activeChat, 
-    markChatAsRead, 
+  const {
+    activeChat,
+    markChatAsRead,
     setActiveChat,
     forceSyncChat
   } = useChatStore();
@@ -16,8 +17,7 @@ const ChatView: React.FC = () => {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [swipeX, setSwipeX] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
-  const [showOfflineTooltip, setShowOfflineTooltip] = useState(false);
-  const [showScrollButton, setShowScrollButton] = useState(false);
+    const [showScrollButton, setShowScrollButton] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);
   const startXRef = useRef(0);
@@ -31,24 +31,7 @@ const ChatView: React.FC = () => {
     if (activeChat) {
       markChatAsRead(activeChat.id);
 
-      // Check if this is a new chat with no messages or only "Sent" messages
-      // This indicates the node might be offline
-      const hasOnlySentMessages = activeChat.messages.length > 0 &&
-        activeChat.messages.every(msg =>
-          msg.sender !== activeChat.counterparty &&
-          (msg.status === 'Sent' || msg.status === 'Sending')
-        );
-
-      const isNewChat = activeChat.messages.length === 0 ||
-        (activeChat.messages.length === 1 && activeChat.messages[0].sender === 'System');
-
-      if (isNewChat || hasOnlySentMessages) {
-        setShowOfflineTooltip(true);
-        // Auto-hide after 10 seconds
-        const timer = setTimeout(() => setShowOfflineTooltip(false), 10000);
-        return () => clearTimeout(timer);
       }
-    }
   }, [activeChat, markChatAsRead]);
 
   useEffect(() => {
@@ -62,12 +45,12 @@ const ChatView: React.FC = () => {
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = container;
-      
+
       // Check if at bottom
       const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
       isAtBottomRef.current = isAtBottom;
       setShowScrollButton(!isAtBottom);
-      
+
       // Store last scroll position
       lastScrollTopRef.current = scrollTop;
     };
@@ -78,71 +61,66 @@ const ChatView: React.FC = () => {
     return () => container.removeEventListener('scroll', handleScroll);
   }, [activeChat]);
 
-  // Hide tooltip when user sends a message or taps
-  const handleUserInteraction = () => {
-    setShowOfflineTooltip(false);
-  };
-
   // Scroll to bottom function
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
-  
+
   // Handle pull-to-refresh for syncing
   const handleMessagesTouchStart = (e: React.TouchEvent) => {
     const container = messagesContainerRef.current;
     if (!container) return;
-    
+
     // Check if we're at the bottom
     const { scrollTop, scrollHeight, clientHeight } = container;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
-    
+
     if (isAtBottom) {
       touchStartYRef.current = e.touches[0].clientY;
     }
   };
-  
+
   const handleMessagesTouchMove = (e: React.TouchEvent) => {
     if (touchStartYRef.current === 0 || isSyncing) return;
-    
+
     const container = messagesContainerRef.current;
     if (!container) return;
-    
+
     // Check if still at bottom
     const { scrollTop, scrollHeight, clientHeight } = container;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
-    
+
     if (!isAtBottom) {
       // User has scrolled up, cancel pull-to-refresh
       touchStartYRef.current = 0;
       setPullDistance(0);
       return;
     }
-    
+
     const currentY = e.touches[0].clientY;
     const deltaY = currentY - touchStartYRef.current; // Positive when pulling down
-    
+
     // If pulling down past the bottom
     if (deltaY > 10) {
       // Prevent default to stop bounce on iOS
       e.preventDefault();
-      
+
       const pull = Math.min(deltaY, 100);
       setPullDistance(pull);
-      
+
       // Add haptic feedback at threshold
       if (pull >= 60 && pull < 65 && 'vibrate' in navigator) {
         navigator.vibrate(10);
       }
     }
   };
-  
+
   const handleMessagesTouchEnd = async () => {
     if (pullDistance >= 60 && !isSyncing && activeChat) {
       // Trigger sync
       setIsSyncing(true);
       setPullDistance(0);
-      
+
       try {
         console.log('[PULL-REFRESH] Syncing chat:', activeChat.id);
         await forceSyncChat(activeChat.id);
@@ -152,7 +130,7 @@ const ChatView: React.FC = () => {
     } else {
       setPullDistance(0);
     }
-    
+
     // Reset touch start
     touchStartYRef.current = 0;
   };
@@ -211,7 +189,6 @@ const ChatView: React.FC = () => {
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
-      onClick={handleUserInteraction}
       style={{
         transform: `translateX(${swipeX}px)`,
         transition: isSwiping ? 'none' : 'transform 0.3s ease-out',
@@ -220,20 +197,8 @@ const ChatView: React.FC = () => {
     >
       <ChatHeader chat={activeChat} />
 
-      {showOfflineTooltip && (
-        <div className="offline-tooltip" onClick={handleUserInteraction}>
-          <div className="offline-tooltip-content" style={{ textAlign: 'center' }}>
-            Users can be messaged whether they are online or not. Messages display their delivery status:
-            <br />
-            • ✓ Attempting to deliver message
-            <br />
-            • ✓✓ Message successfully delivered
-          </div>
-        </div>
-      )}
-
-      <div 
-        className="messages-container" 
+      <div
+        className="messages-container"
         ref={messagesContainerRef}
         onTouchStart={handleMessagesTouchStart}
         onTouchMove={handleMessagesTouchMove}
@@ -241,7 +206,7 @@ const ChatView: React.FC = () => {
       >
         {/* Pull-to-refresh indicator */}
         {(pullDistance > 0 || isSyncing) && (
-          <div 
+          <div
             className="sync-indicator"
             style={{
               height: pullDistance > 0 ? `${pullDistance}px` : '60px',
@@ -268,13 +233,13 @@ const ChatView: React.FC = () => {
             </div>
           </div>
         )}
-        
+
         <MessageList messages={activeChat.messages} />
         <div ref={messagesEndRef} />
       </div>
 
       {showScrollButton && (
-        <button 
+        <button
           className="scroll-to-bottom-button"
           onClick={scrollToBottom}
           aria-label="Scroll to bottom"
@@ -283,7 +248,7 @@ const ChatView: React.FC = () => {
         </button>
       )}
 
-      <MessageInput chatId={activeChat.id} onSendMessage={handleUserInteraction} />
+      <MessageInput chatId={activeChat.id} />
     </div>
   );
 };

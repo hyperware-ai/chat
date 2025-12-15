@@ -1,7 +1,7 @@
 /* Inherits from global modal styles in App.css */
 
 .modal-content form {
-  padding: 20px 0;
+  padding: 18px 20px 12px;
 }
 
 .delete-chat-button {

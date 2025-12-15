@@ -1,23 +1,24 @@
 import React, { useState } from 'react';
-import { ChatMessage } from '../../types/chat';
+import { Chat } from '#caller-utils';
 import { useChatStore } from '../../store/chat';
-import { add_reaction, forward_message } from '../../../../target/ui/caller-utils';
+import * as Caller from '#caller-utils';
 import DeleteMessageModal from './DeleteMessageModal';
 import './MessageMenu.css';
 
 interface MessageMenuProps {
-  message: ChatMessage;
+  message: Chat.ChatMessage;
   isOwn: boolean;
   position: { x: number; y: number };
   onClose: () => void;
 }
 
+const { add_reaction } = Caller.Chat;
+
 const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onClose }) => {
-  const { deleteMessage, deleteMessageLocally, editMessage, chats, activeChat } = useChatStore();
+  const { deleteMessage, deleteMessageLocally, activeChat, setEditingMessage } = useChatStore();
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const [showForwardPicker, setShowForwardPicker] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  
+
   const commonEmojis = ['👍', '❤️', '😂', '😮', '😢', '😡', '👎', '⚡', '🔥', '💯'];
 
   const handleReply = () => {
@@ -32,10 +33,7 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   };
 
   const handleEdit = () => {
-    const newContent = prompt('Edit message:', message.content);
-    if (newContent && newContent !== message.content) {
-      editMessage(message.id, newContent);
-    }
+    setEditingMessage({ id: message.id, content: message.content });
     onClose();
   };
 
@@ -55,29 +53,15 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
   
   const handleAddReaction = async (emoji: string) => {
     try {
-      await add_reaction({ 
+      await add_reaction({
         chat_id: activeChat?.id || '',
-        message_id: message.id, 
-        emoji 
+        message_id: message.id,
+        emoji
       });
       // WebSocket will handle the update
       onClose();
     } catch (err) {
       console.error('Error adding reaction:', err);
-    }
-  };
-  
-  const handleForward = async (toChatId: string) => {
-    try {
-      await forward_message({ 
-        from_chat_id: activeChat?.id || '',
-        message_id: message.id, 
-        to_chat_id: toChatId 
-      });
-      // WebSocket will handle the update
-      onClose();
-    } catch (err) {
-      console.error('Error forwarding message:', err);
     }
   };
 
@@ -157,29 +141,10 @@ const MessageMenu: React.FC<MessageMenuProps> = ({ message, isOwn, position, onC
           style={menuStyle}
         >
           <button onClick={handleReply}>Reply</button>
-          <button onClick={() => setShowForwardPicker(!showForwardPicker)}>Forward</button>
           <button onClick={handleCopy}>Copy</button>
-          <button onClick={() => {
-            setShowEmojiPicker(true);
-            setShowForwardPicker(false);
-          }}>React</button>
+          <button onClick={() => setShowEmojiPicker(true)}>React</button>
           {isOwn && <button onClick={handleEdit}>Edit</button>}
           {isOwn && <button onClick={handleDelete}>Delete</button>}
-          
-          {showForwardPicker && (
-            <div className="forward-picker">
-              <div className="forward-header">Forward to:</div>
-              {chats.map(chat => (
-                <button 
-                  key={chat.id}
-                  className="forward-option"
-                  onClick={() => handleForward(chat.id)}
-                >
-                  {chat.counterparty}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       )}
     </>

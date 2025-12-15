@@ -1,0 +1,5 @@
+world chat-test-ware-dot-hypr-v0 {
+    import chat;
+    import tester;
+    include process-v1;
+}

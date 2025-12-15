@@ -1,10 +1,10 @@
 import React from 'react';
-import { Chat } from '../../types/chat';
+import { Chat } from '#caller-utils';
 import { useChatStore } from '../../store/chat';
 import './ChatSettings.css';
 
 interface ChatSettingsProps {
-  chat: Chat;
+  chat: Chat.Chat;
   onClose: () => void;
 }
 

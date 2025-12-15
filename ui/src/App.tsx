@@ -4,6 +4,8 @@ import './styles/button-selectable.css';
 import { useChatStore } from './store/chat';
 import SplashScreen from './components/SplashScreen/SplashScreen';
 import ChatView from './components/Chat/ChatView';
+import { useGroupStore } from './store/groups';
+import GroupView from './components/Groups/GroupView';
 
 function App() {
   const { 
@@ -16,11 +18,20 @@ function App() {
     chats,
     isLoading
   } = useChatStore();
+  const { activeGroup, loadGroups, fetchReplicationState } = useGroupStore();
 
   // Initialize on mount
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  // Prime group data when we have a connection
+  useEffect(() => {
+    if (isConnected) {
+      loadGroups();
+      fetchReplicationState(null);
+    }
+  }, [isConnected, loadGroups, fetchReplicationState]);
 
   // Show loading state only if we're truly loading (no cached data and no connection yet)
   // BUT: If we have chats from cache, skip the loading screen entirely
@@ -59,11 +70,7 @@ function App() {
       )}
 
       {/* Main app content */}
-      {activeChat ? (
-        <ChatView />
-      ) : (
-        <SplashScreen />
-      )}
+      {activeGroup ? <GroupView /> : activeChat ? <ChatView /> : <SplashScreen />}
     </div>
   );
 }

@@ -1,5 +1,20 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { resolve } from 'node:path'
+import { randomFillSync, webcrypto } from 'node:crypto'
+
+// Use the existing global crypto when available to avoid reassigning a readonly getter.
+const cryptoPolyfill = (webcrypto as unknown as Crypto) ?? ({} as Crypto)
+const globalCrypto = (globalThis as any).crypto ?? cryptoPolyfill
+
+if (!globalCrypto.getRandomValues) {
+  (globalCrypto as any).getRandomValues = (array: ArrayBufferView) =>
+    randomFillSync(array as unknown as NodeJS.ArrayBufferView)
+}
+
+if (!(globalThis as any).crypto) {
+  (globalThis as any).crypto = globalCrypto
+}
 
 /*
 If you are developing a UI outside of a Hyperware project,
@@ -25,6 +40,11 @@ export default defineConfig({
   define: {
     'import.meta.env.VITE_APP_VERSION': JSON.stringify(metadata.properties.current_version),
   },
+  resolve: {
+    alias: {
+      '#caller-utils': resolve(__dirname, '../target/ui/caller-utils.ts'),
+    },
+  },
   base: BASE_URL,
   build: {
     rollupOptions: {
@@ -34,6 +54,10 @@ export default defineConfig({
   server: {
     open: true,
     proxy: {
+      '/our.js': {
+        target: PROXY_URL,
+        changeOrigin: true,
+      },
       '/our': {
         target: PROXY_URL,
         changeOrigin: true,

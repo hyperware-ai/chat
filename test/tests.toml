@@ -1,0 +1,41 @@
+runtime = { FetchVersion = "latest" }
+persist_home = true
+runtime_build_release = false
+always_print_node_output = false
+
+[[tests]]
+dependency_package_paths = [".."]
+setup_packages = [
+    { path = "..", run = true }
+]
+setup_scripts = []
+test_package_paths = ["chat-test"]
+test_scripts = []
+timeout_secs = 45
+fakechain_router = 8545
+hyperapp = true
+features = ["caller-utils", "disable-notifications"]
+
+[[tests.nodes]]
+port = 8080
+home = "home/fake"
+fake_node_name = "fake.os"
+runtime_verbosity = 2
+
+[[tests.nodes]]
+port = 8081
+home = "home/fake2"
+fake_node_name = "fake2.os"
+runtime_verbosity = 2
+
+[[tests.nodes]]
+port = 8082
+home = "home/fake3"
+fake_node_name = "fake3.os"
+runtime_verbosity = 2
+
+[[tests.nodes]]
+port = 8083
+home = "home/fake4"
+fake_node_name = "fake4.os"
+runtime_verbosity = 2

@@ -1,8 +1,0 @@
-api
-*swp
-**/target
-pkg/*.wasm
-pkg/*.zip
-pkg/ui
-pkg/ui-call
-wasi-sdk-*

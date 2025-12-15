@@ -3,26 +3,38 @@
   border-top: 1px solid var(--border-color);
 }
 
-.reply-preview {
+.reply-preview,
+.edit-preview {
   padding: 8px 15px;
   background: var(--background);
   border-bottom: 1px solid var(--border-color);
 }
 
-.reply-info {
+.edit-preview {
+  border-left: 3px solid var(--primary-color);
+}
+
+.reply-info,
+.edit-info {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 4px;
 }
 
-.reply-label {
+.reply-label,
+.edit-label {
   font-size: 12px;
   color: var(--text-secondary);
   font-weight: 500;
 }
 
-.cancel-reply {
+.edit-label {
+  color: var(--primary-color);
+}
+
+.cancel-reply,
+.cancel-edit {
   background: none;
   border: none;
   color: var(--text-secondary);
@@ -33,11 +45,13 @@
   border-radius: 4px;
 }
 
-.cancel-reply:hover {
+.cancel-reply:hover,
+.cancel-edit:hover {
   background: var(--surface);
 }
 
-.reply-content {
+.reply-content,
+.edit-content {
   font-size: 13px;
   color: var(--text-primary);
   opacity: 0.8;
@@ -55,19 +69,8 @@
   padding-bottom: calc(10px + var(--safe-area-bottom));
 }
 
-.attachment-button {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: none;
-  border: none;
-  color: var(--primary-color);
-  font-size: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
+.message-input-container.editing {
+  background: rgba(0, 122, 255, 0.05);
 }
 
 .message-input {
@@ -88,18 +91,23 @@
   border-color: var(--primary-color);
 }
 
-.send-button,
-.voice-button {
+.send-button {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: var(--primary-color);
+  background: linear-gradient(135deg, #007aff, #5ac8fa);
   color: white;
   border: none;
-  font-size: 20px;
+  font-size: 18px;
+  font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

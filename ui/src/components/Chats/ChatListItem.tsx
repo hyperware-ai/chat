@@ -1,11 +1,11 @@
 import React from 'react';
-import { Chat } from '../../types/chat';
+import { Chat } from '#caller-utils';
 import { useChatStore } from '../../store/chat';
 import Avatar from '../Common/Avatar';
 import './ChatListItem.css';
 
 interface ChatListItemProps {
-  chat: Chat;
+  chat: Chat.Chat;
 }
 
 const ChatListItem: React.FC<ChatListItemProps> = ({ chat }) => {

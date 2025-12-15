@@ -1,0 +1,209 @@
+.group-message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.group-message.mine {
+  align-items: flex-end;
+}
+
+.group-message-sender {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding-left: 6px;
+}
+
+.group-message-bubble {
+  max-width: 85%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--message-other, #e5e5ea);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: relative;
+}
+
+.group-message.mine .group-message-bubble {
+  background: var(--message-own, #007aff);
+  color: white;
+  border-color: transparent;
+}
+
+.group-message-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.group-message-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: inherit;
+  opacity: 0.8;
+  gap: 8px;
+}
+
+.group-message-status {
+  font-weight: 600;
+}
+
+.group-message-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.group-message-actions .link {
+  background: none;
+  border: none;
+  color: var(--primary-color);
+  padding: 0;
+  cursor: pointer;
+}
+
+.group-message-actions .link:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.group-message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.group-message-thread-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px dashed var(--border-color, #ccc);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.group-message-thread-indicator:hover {
+  background: rgba(0, 0, 0, 0.05);
+  border-style: solid;
+}
+
+.group-message-thread-indicator.has-thread {
+  background: rgba(0, 0, 0, 0.05);
+  border: none;
+  color: var(--primary-color, #007aff);
+}
+
+.group-message-thread-indicator.has-thread:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.group-message.mine .group-message-thread-indicator {
+  border-color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.group-message.mine .group-message-thread-indicator:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.group-message.mine .group-message-thread-indicator.has-thread {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: white;
+}
+
+.group-message.mine .group-message-thread-indicator.has-thread:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.thread-icon {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.thread-label {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+/* Reply preview */
+.group-message-reply-to {
+  max-width: 85%;
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border-left: 3px solid var(--primary-color, #007aff);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.group-message-reply-to:hover {
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.group-message.mine .group-message-reply-to {
+  align-self: flex-end;
+  background: rgba(255, 255, 255, 0.15);
+  border-left-color: rgba(255, 255, 255, 0.5);
+}
+
+.group-message.mine .group-message-reply-to:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.group-message-reply-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+  font-weight: 500;
+}
+
+.group-message.mine .group-message-reply-label {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.group-message-reply-content {
+  font-size: 13px;
+  color: var(--text-primary);
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.group-message.mine .group-message-reply-content {
+  color: white;
+  opacity: 0.9;
+}
+
+/* Highlight animation for scrolled-to messages */
+.group-message.highlight .group-message-bubble {
+  animation: highlight-pulse 2s ease-out;
+}
+
+@keyframes highlight-pulse {
+  0% {
+    box-shadow: 0 0 0 3px var(--primary-color, #007aff);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}

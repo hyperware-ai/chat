@@ -1,17 +1,19 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { ChatMessage } from '../../types/chat';
+import { Chat } from '#caller-utils';
 import MessageMenu from './MessageMenu';
 import './Message.css';
-import { add_reaction, remove_reaction } from '../../../../target/ui/caller-utils';
+import * as Caller from '#caller-utils';
 import { useChatStore } from '../../store/chat';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkHwProtocol from '../../utils/remarkHwProtocol';
 
 interface MessageProps {
-  message: ChatMessage;
+  message: Chat.ChatMessage;
   isOwn: boolean;
 }
+
+const { add_reaction, remove_reaction } = Caller.Chat;
 
 const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const [showMenu, setShowMenu] = useState(false);
@@ -44,13 +46,13 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
 
   const getStatusIcon = () => {
     switch (message.status) {
-      case 'Sending':
+      case Chat.MessageStatus.Sending:
         return '...';
-      case 'Sent':
+      case Chat.MessageStatus.Sent:
         return '✓';
-      case 'Delivered':
+      case Chat.MessageStatus.Delivered:
         return '✓✓';
-      case 'Failed':
+      case Chat.MessageStatus.Failed:
         return '❌';
       default:
         return '';

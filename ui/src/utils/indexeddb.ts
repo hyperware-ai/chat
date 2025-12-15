@@ -1,4 +1,6 @@
-import { Chat, ChatMessage } from '../types/chat';
+import { Chat } from '#caller-utils';
+export type Chat = Chat.Chat;
+export type ChatMessage = Chat.ChatMessage;
 
 const DB_NAME = 'ChatAppDB';
 const DB_VERSION = 1;

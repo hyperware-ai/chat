@@ -2,6 +2,7 @@
 anyhow = "1.0"
 base64 = "0.21"
 flate2 = "1.0"
+futures = "0.3"
 process_macros = "0.1"
 rand = "0.8"
 serde_json = "1.0"
@@ -11,14 +12,20 @@ wit-bindgen = "0.42.1"
 optional = true
 path = "../target/chat-caller-utils"
 
-[dependencies.hyperprocess_macro]
-git = "https://github.com/hyperware-ai/hyperprocess-macro"
-rev = "ac43744"
+[dependencies.hyperapp_macro]
+git = "https://github.com/hyperware-ai/hyperapp-macro"
+rev = "28f0a41"
+
+[dependencies.hyperware-crdt]
+path = "../../hyperware-crdt"
+
+[dependencies.hyperware-pubsub-core]
+path = "../../hyperware-pubsub"
 
 [dependencies.hyperware_process_lib]
 features = ["hyperapp"]
 git = "https://github.com/hyperware-ai/process_lib"
-rev = "b9f1ead"
+rev = "067fab6"
 
 [dependencies.serde]
 features = [
@@ -27,12 +34,21 @@ features = [
 ]
 version = "1.0"
 
+[dev-dependencies]
+rmp-serde = "1"
+
 [features]
 caller-utils = ["chat_caller_utils"]
+default = ["caller-utils"]
+disable-notifications = []
 simulation-mode = []
+test-helpers = []
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = [
+    "cdylib",
+    "rlib",
+]
 
 [package]
 edition = "2021"
