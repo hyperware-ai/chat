@@ -1854,9 +1854,10 @@ dependencies = [
 [[package]]
 name = "hyperware-crdt"
 version = "0.1.0"
+source = "git+https://github.com/hyperware-ai/hyperware-crdt?rev=1945e85#1945e8541f23d9ca246e17dbcb329c3705a7ad84"
 dependencies = [
  "base64 0.22.1",
- "hyperware_process_lib 3.0.0 (git+https://github.com/hyperware-ai/process_lib?rev=067fab6)",
+ "hyperware_process_lib 2.2.0",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -1867,6 +1868,7 @@ dependencies = [
 [[package]]
 name = "hyperware-pubsub-core"
 version = "0.1.0"
+source = "git+https://github.com/hyperware-ai/hyperware-pubsub?rev=b554236#b5542360bbad000a6da9cf4947a1af0c8a7e69f6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1875,6 +1877,36 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hyperware_process_lib"
+version = "2.2.0"
+source = "git+https://github.com/hyperware-ai/process_lib?rev=4beff93#4beff9389598978d2f97e4cd6d1d0f74a7acac0f"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-sol-macro",
+ "alloy-sol-types",
+ "anyhow",
+ "base64 0.22.1",
+ "bincode",
+ "color-eyre",
+ "futures-util",
+ "http",
+ "mime_guess",
+ "rand 0.8.5",
+ "regex",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "wit-bindgen 0.42.1",
 ]
 
 [[package]]
