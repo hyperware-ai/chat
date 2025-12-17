@@ -1854,6 +1854,7 @@ dependencies = [
 [[package]]
 name = "hyperware-crdt"
 version = "0.1.0"
+source = "git+https://github.com/hyperware-ai/hyperware-crdt?rev=2c92774#2c92774712b3ad8ac812077a57d2cf60805674de"
 dependencies = [
  "base64 0.22.1",
  "hyperware_process_lib 3.0.0 (git+https://github.com/hyperware-ai/process_lib?rev=067fab6)",
@@ -1867,6 +1868,7 @@ dependencies = [
 [[package]]
 name = "hyperware-pubsub-core"
 version = "0.1.0"
+source = "git+https://github.com/hyperware-ai/hyperware-pubsub?rev=abd30a6#abd30a63db2672ce8acb40095a769c2c1cd8d1f5"
 dependencies = [
  "async-trait",
  "bytes",
