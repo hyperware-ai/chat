@@ -35,17 +35,6 @@ const NotificationSettings: React.FC = () => {
           <span>Notify for group messages</span>
         </label>
       </div>
-      
-      <div className="setting-item">
-        <label>
-          <input
-            type="checkbox"
-            checked={settings.notify_calls}
-            onChange={() => handleToggle('notify_calls')}
-          />
-          <span>Notify for incoming calls</span>
-        </label>
-      </div>
     </div>
   );
 };

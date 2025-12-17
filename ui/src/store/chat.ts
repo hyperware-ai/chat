@@ -37,6 +37,7 @@ interface ChatStore {
   deleteMessage: (messageId: string) => Promise<void>;
   deleteMessageLocally: (messageId: string) => void;
   deleteChat: (chatId: string) => Promise<void>;
+  updateChatSettings: (chatId: string, settings: { notify?: boolean | null }) => Promise<void>;
   updateSettings: (settings: api.Settings) => Promise<void>;
   updateProfile: (profile: api.UserProfile) => Promise<void>;
   searchChats: (query: string) => Promise<api.Chat[]>;
@@ -678,13 +679,32 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   deleteChat: async (chatId: string) => {
     try {
       await api.delete_chat({ chat_id: chatId });
-      
+
       set(state => ({
         chats: state.chats.filter(chat => chat.id !== chatId),
         activeChat: state.activeChat?.id === chatId ? null : state.activeChat,
       }));
     } catch (error) {
       set({ error: 'Failed to delete chat' });
+    }
+  },
+
+  // Update per-chat settings (notifications, etc)
+  updateChatSettings: async (chatId: string, settings: { notify?: boolean | null }) => {
+    try {
+      const updatedChat = await api.update_chat_settings({
+        chat_id: chatId,
+        notify: settings.notify ?? null,
+      });
+
+      set(state => ({
+        chats: state.chats.map(chat =>
+          chat.id === chatId ? updatedChat : chat
+        ),
+        activeChat: state.activeChat?.id === chatId ? updatedChat : state.activeChat,
+      }));
+    } catch (error) {
+      set({ error: 'Failed to update chat settings' });
     }
   },
 
@@ -777,9 +797,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     if (message.GroupUpdate) {
       const { group_id } = message.GroupUpdate;
-      const { activeGroupId, refreshActiveGroup, refreshGroupPreviews } = useGroupStore.getState();
+      const { activeGroupId, refreshActiveGroup, refreshGroupPreviews, loadGroups } = useGroupStore.getState();
       if (activeGroupId === group_id) {
         refreshActiveGroup();
+      } else {
+        // Reload groups to get updated unread counts when not viewing this group
+        loadGroups();
       }
       // Always update the chat list preview for this group
       refreshGroupPreviews([group_id]);

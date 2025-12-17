@@ -5,6 +5,7 @@ export interface WsClientMessage {
   SendMessage?: { chat_id: string; content: string; reply_to?: string };
   Ack?: { message_id: string };
   MarkRead?: { chat_id: string };
+  MarkGroupRead?: { group_id: string };
   UpdateStatus?: { status: string };
   AuthWithKey?: { chat_key: string };
   BrowserMessage?: { content: string };

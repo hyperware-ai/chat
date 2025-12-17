@@ -42,14 +42,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
             Profile
           </button>
           <button
-            className="settings-tab disabled"
-            disabled
+            className={`settings-tab ${activeTab === 'general' ? 'active' : ''}`}
+            onClick={() => setActiveTab('general')}
           >
             General
           </button>
           <button
-            className="settings-tab disabled"
-            disabled
+            className={`settings-tab ${activeTab === 'notifications' ? 'active' : ''}`}
+            onClick={() => setActiveTab('notifications')}
           >
             Notifications
           </button>

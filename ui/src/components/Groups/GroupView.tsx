@@ -17,6 +17,7 @@ type ThreadWithId = Chat.Thread & { id: string };
 const GroupView: React.FC = () => {
   const {
     activeGroup,
+    activeGroupId,
     activeThreadId,
     draftThread,
     setActiveThread,
@@ -36,6 +37,9 @@ const GroupView: React.FC = () => {
     setReplyingTo,
     editingMessage,
     setEditingMessage,
+    markGroupAsRead,
+    groupNotify,
+    updateGroupSettings,
   } = useGroupStore();
   const { nodeId } = useChatStore();
   const [showMembers, setShowMembers] = useState(false);
@@ -66,6 +70,13 @@ const GroupView: React.FC = () => {
     const interval = setInterval(() => fetchSubscriberEvents(), 20000);
     return () => clearInterval(interval);
   }, [activeGroup?.id, fetchSubscriberEvents]);
+
+  // Mark group as read when entering the group view
+  useEffect(() => {
+    if (activeGroupId) {
+      markGroupAsRead(activeGroupId);
+    }
+  }, [activeGroupId, markGroupAsRead]);
 
   if (!activeGroup) return null;
 
@@ -193,6 +204,19 @@ const GroupView: React.FC = () => {
                   }}
                 >
                   Members
+                </button>
+                <button
+                  onClick={() => {
+                    if (activeGroupId) {
+                      const currentNotify = groupNotify[activeGroupId] ?? true;
+                      updateGroupSettings(activeGroupId, { notify: !currentNotify });
+                    }
+                    setShowMenu(false);
+                  }}
+                >
+                  {activeGroupId && groupNotify[activeGroupId] === false
+                    ? 'Enable Notifications'
+                    : 'Mute Notifications'}
                 </button>
 {/* Settings option hidden for now - keeping wiring for future use
                 <button

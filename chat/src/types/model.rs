@@ -395,6 +395,9 @@ pub enum WsClientMessage {
     MarkRead {
         chat_id: String,
     },
+    MarkGroupRead {
+        group_id: String,
+    },
     UpdateStatus {
         status: String,
     },
