@@ -8,11 +8,12 @@ use flate2::Compression;
 use futures::{channel::mpsc::UnboundedReceiver, pin_mut, select, FutureExt, StreamExt};
 use hyperapp_macro::*;
 use hyperware_crdt::yrs::{Decode, Encode, StateVector};
+use base64::{engine::general_purpose, Engine as _};
 use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::WsMessageType,
     hyperapp::{send, sleep, source, spawn, AppSendError, SaveOptions},
-    our, println, vfs, Address, LazyLoadBlob, ProcessId, Request,
+    our, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use std::cmp::Ordering;
 use std::collections::{hash_map::DefaultHasher, HashMap};
@@ -117,13 +118,13 @@ fn decompress_data(compressed: &[u8]) -> Result<Vec<u8>, String> {
     Ok(decompressed)
 }
 
-// Helper functions for base64 encoding/decoding (wrapper around base64 0.21)
+// Helper functions for base64 encoding/decoding
 fn base64_encode(data: &[u8]) -> String {
-    ::base64::encode(data)
+    general_purpose::STANDARD.encode(data)
 }
 
-fn base64_decode(input: &str) -> Result<Vec<u8>, ::base64::DecodeError> {
-    ::base64::decode(input)
+fn base64_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    general_purpose::STANDARD.decode(input)
 }
 
 /// Send the WIT `ReplicationWork` unit variant to ourselves. This wakes the
@@ -3815,14 +3816,6 @@ impl ChatState {
         CUUserProfile {
             name: profile.name.clone(),
             profile_pic: profile.profile_pic.clone(),
-        }
-    }
-
-    // Helper function to convert from chat_caller_utils::UserProfile to our UserProfile
-    fn from_cu_user_profile(profile: CUUserProfile) -> UserProfile {
-        UserProfile {
-            name: profile.name,
-            profile_pic: profile.profile_pic,
         }
     }
 }

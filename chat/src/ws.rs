@@ -4,7 +4,7 @@ use crate::{
 };
 use hyperware_process_lib::{
     http::server::{send_ws_push, WsMessageType},
-    println, LazyLoadBlob,
+    LazyLoadBlob,
 };
 use serde_json;
 

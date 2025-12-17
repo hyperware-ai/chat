@@ -3,11 +3,9 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crdt::{
-    AttachmentDescriptor, Group, GroupId, GroupRoutingConfig, GroupTier, GroupVisibility,
-    HubSyncState, MembershipActionKind, MembershipDecision, MembershipDecisionStatus,
-    MembershipProposal, MembershipRuleBox, MembershipRuleConfig, MembershipRuleError,
-    MembershipStatus, MessageId, MessageMeta, NodeId, Role, SubscriberSyncState, Thread, ThreadId,
-    ThreadParentRef,
+    Group, GroupId, GroupTier, MembershipActionKind, MembershipDecision, MembershipDecisionStatus,
+    MembershipProposal, MembershipRuleBox, MembershipRuleConfig, MembershipStatus, NodeId,
+    SubscriberSyncState, ThreadId,
 };
 use hyperware_process_lib::our;
 
