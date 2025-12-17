@@ -18,11 +18,11 @@ rev = "28f0a41"
 
 [dependencies.hyperware-crdt]
 git = "https://github.com/hyperware-ai/hyperware-crdt"
-rev = "1945e85"
+rev = "2c92774"
 
 [dependencies.hyperware-pubsub-core]
 git = "https://github.com/hyperware-ai/hyperware-pubsub"
-rev = "b554236"
+rev = "abd30a6"
 
 [dependencies.hyperware_process_lib]
 features = ["hyperapp"]
