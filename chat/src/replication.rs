@@ -6,7 +6,7 @@ use crate::{
     BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask, SubscriberDeliveryEvent,
 };
 use hyperware_crdt::yrs::{Decode, Encode, StateVector};
-use hyperware_process_lib::{our, println};
+use hyperware_process_lib::our;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 

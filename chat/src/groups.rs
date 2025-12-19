@@ -210,7 +210,6 @@ impl ChatState {
     ) -> Result<crate::SendGroupMessageRes, String> {
         self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
             .map_err(|err| format!("cannot edit group message: {}", err))?;
-        let now = current_timestamp();
 
         let updated = {
             let group = self
