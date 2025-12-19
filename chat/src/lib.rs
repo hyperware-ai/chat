@@ -1826,14 +1826,21 @@ impl ChatState {
             self.broadcast_ws_message(&msg);
 
             // Send push notification if user has notifications enabled AND no active connections
-            if self
+            let chat_notify_enabled = self
                 .chats
                 .get(&chat_id)
                 .map(|chat| chat.notify)
-                .unwrap_or(true)
-                && self.settings.notify_chats
-                && self.active_connections.is_empty()
-            {
+                .unwrap_or(true);
+            let global_notify_enabled = self.settings.notify_chats;
+            let active_connection_count = self.active_connections.len();
+            log_debug!(
+                "[NOTIFY] chat_push_gate chat_id={} chat_notify={} global_notify={} active_connections={}",
+                chat_id,
+                chat_notify_enabled,
+                global_notify_enabled,
+                active_connection_count
+            );
+            if chat_notify_enabled && global_notify_enabled && active_connection_count == 0 {
                 let chat_id_for_push = chat_id.clone();
                 let message_for_push = message_for_events.clone();
                 spawn(async move {
@@ -1844,6 +1851,14 @@ impl ChatState {
                     )
                     .await;
                 });
+            } else {
+                log_debug!(
+                    "[NOTIFY] chat_push_skip chat_id={} chat_notify={} global_notify={} active_connections={}",
+                    chat_id,
+                    chat_notify_enabled,
+                    global_notify_enabled,
+                    active_connection_count
+                );
             }
         }
 
@@ -3624,9 +3639,18 @@ impl ChatState {
 
                 // Send push notification if conditions are met
                 let group_notify_enabled = self.group_notify.get(group_id).copied().unwrap_or(true);
-                if self.settings.notify_groups
+                let global_notify_enabled = self.settings.notify_groups;
+                let active_connection_count = self.active_connections.len();
+                log_debug!(
+                    "[NOTIFY] group_push_gate group_id={} group_notify={} global_notify={} active_connections={}",
+                    group_id,
+                    group_notify_enabled,
+                    global_notify_enabled,
+                    active_connection_count
+                );
+                if global_notify_enabled
                     && group_notify_enabled
-                    && self.active_connections.is_empty()
+                    && active_connection_count == 0
                 {
                     // Only notify for the most recent message to avoid spam
                     if let Some(latest) = new_messages.iter().max_by_key(|m| m.timestamp) {
@@ -3639,6 +3663,14 @@ impl ChatState {
                                 .await;
                         });
                     }
+                } else {
+                    log_debug!(
+                        "[NOTIFY] group_push_skip group_id={} group_notify={} global_notify={} active_connections={}",
+                        group_id,
+                        group_notify_enabled,
+                        global_notify_enabled,
+                        active_connection_count
+                    );
                 }
             }
         }
