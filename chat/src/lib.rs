@@ -2519,7 +2519,7 @@ impl ChatState {
         // We'll differentiate between public and private connections via authentication
         match message_type {
             WsMessageType::Close => {
-                log_debug!("WebSocket connection closed: {}", channel_id);
+                log_debug!("[WS_DEBUG] WebSocket Close received for channel {}, ws_connections before: {:?}", channel_id, self.ws_connections.keys().collect::<Vec<_>>());
                 // Clean up connection
                 if let Some(node) = self.ws_connections.remove(&channel_id) {
                     // Broadcast status update
@@ -2551,10 +2551,14 @@ impl ChatState {
                                     .any(|&ch| ch == channel_id)
                             {
                                 log_debug!(
-                                    "WebSocket: New connection from channel {}, initializing...",
-                                    channel_id
+                                    "[WS_DEBUG] New connection from channel {}, ws_connections before: {:?}",
+                                    channel_id, self.ws_connections.keys().collect::<Vec<_>>()
                                 );
                                 self.ws_connections.insert(channel_id, our().node.clone());
+                                log_debug!(
+                                    "[WS_DEBUG] After insert, ws_connections: {:?}",
+                                    self.ws_connections.keys().collect::<Vec<_>>()
+                                );
 
                                 // Send all existing chats to the new connection
                                 log_debug!(
