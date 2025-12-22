@@ -11,7 +11,7 @@ pub const VERBOSE: bool = false;
 #[macro_export]
 macro_rules! log_debug {
     ($($arg:tt)*) => {
-        if $crate::logging::VERBOSE {
+        if $crate::logging::VERBOSE && cfg!(not(test)) {
             hyperware_process_lib::println!($($arg)*);
         }
     };
