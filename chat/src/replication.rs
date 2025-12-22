@@ -373,6 +373,11 @@ impl ChatState {
     }
 
     fn enqueue_stale_subscriber_replays_inner(&mut self, now: u64) {
+        let local_node = our().node.clone();
+        self.enqueue_stale_subscriber_replays_for_node(now, &local_node);
+    }
+
+    fn enqueue_stale_subscriber_replays_for_node(&mut self, now: u64, local_node: &str) {
         let groups: Vec<(GroupId, Group)> = self
             .groups
             .iter()
@@ -383,7 +388,7 @@ impl ChatState {
                 continue;
             }
             for (node_id, _) in group.subscribers.entries.iter() {
-                if node_id == &our().node {
+                if node_id == local_node {
                     continue;
                 }
                 if self.has_replication_task(&group_id, node_id, ReplicationKind::PushSnapshot)
@@ -391,11 +396,15 @@ impl ChatState {
                 {
                     continue;
                 }
-                let cursor_age = group
-                    .delivery
-                    .subscriber_cursors
-                    .get(node_id)
-                    .map(|cursor| now.saturating_sub(cursor.updated_at));
+                // Check the correct cursor based on whether node is a hub or subscriber.
+                // Hubs use hub_cursors, subscribers use subscriber_cursors.
+                let is_hub = group.hubs.active.contains(node_id);
+                let cursor_age = if is_hub {
+                    group.delivery.hub_cursors.get(node_id)
+                } else {
+                    group.delivery.subscriber_cursors.get(node_id)
+                }
+                .map(|cursor| now.saturating_sub(cursor.updated_at));
                 let stale = cursor_age
                     .map(|age| age > SUBSCRIBER_ACK_DEADLINE_SECS)
                     .unwrap_or(true);
@@ -423,12 +432,13 @@ impl ChatState {
                 self.replication_metrics.stale_replays =
                     self.replication_metrics.stale_replays.saturating_add(1);
                 crate::log_debug!(
-                    "[REPL][{}] queued {} replay to subscriber {} (age={}s)",
+                    "[REPL][{}] queued {} replay to {} {} (age={}s)",
                     group_id,
                     match kind_for_log {
                         ReplicationKind::PushSnapshot => "snapshot",
                         _ => "delta",
                     },
+                    if is_hub { "hub" } else { "subscriber" },
                     node_id,
                     age
                 );
@@ -580,5 +590,66 @@ impl ChatState {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SUBSCRIBER_ACK_DEADLINE_SECS;
+    use crate::crdt::{DeliveryCursor, Group, GroupRoutingConfig, SubscriberSyncState};
+    use crate::ChatState;
+
+    #[test]
+    fn enqueue_stale_replays_uses_hub_cursors_for_hubs() {
+        let mut state = ChatState::default();
+        let group_id = "group:replay".to_string();
+        let hub_node = "hub.node".to_string();
+        let sub_node = "sub.node".to_string();
+
+        let mut group = Group::default();
+        group.routing = GroupRoutingConfig::for_group(&group_id);
+        group
+            .subscribers
+            .entries
+            .insert(hub_node.clone(), SubscriberSyncState::default());
+        group
+            .subscribers
+            .entries
+            .insert(sub_node.clone(), SubscriberSyncState::default());
+        group.hubs.active.insert(hub_node.clone());
+
+        let now: u64 = 1_000;
+        group.delivery.hub_cursors.insert(
+            hub_node.clone(),
+            DeliveryCursor {
+                queue_id: "hub-queue".to_string(),
+                last_offset: 1,
+                updated_at: now.saturating_sub(SUBSCRIBER_ACK_DEADLINE_SECS - 1),
+            },
+        );
+        group.delivery.subscriber_cursors.insert(
+            hub_node.clone(),
+            DeliveryCursor {
+                queue_id: "sub-queue".to_string(),
+                last_offset: 1,
+                updated_at: now.saturating_sub(SUBSCRIBER_ACK_DEADLINE_SECS + 1),
+            },
+        );
+        group.delivery.subscriber_cursors.insert(
+            sub_node.clone(),
+            DeliveryCursor {
+                queue_id: "sub-queue".to_string(),
+                last_offset: 1,
+                updated_at: now.saturating_sub(SUBSCRIBER_ACK_DEADLINE_SECS + 1),
+            },
+        );
+
+        state.groups.insert(group_id, group);
+
+        state.enqueue_stale_subscriber_replays_for_node(now, "local.node");
+
+        let peers: Vec<String> = state.replication_queue.iter().map(|t| t.peer.clone()).collect();
+        assert!(peers.contains(&sub_node));
+        assert!(!peers.contains(&hub_node));
     }
 }
