@@ -7,6 +7,7 @@ import { useChatStore } from '../../store/chat';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkHwProtocol from '../../utils/remarkHwProtocol';
+import { normalizeMessageContent } from '../../utils/normalizeMessageContent';
 
 interface MessageProps {
   message: Chat.ChatMessage;
@@ -196,6 +197,11 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   };
 
   // Render message content with markdown support
+  const normalizedContent = useMemo(
+    () => normalizeMessageContent(message.content),
+    [message.content],
+  );
+
   const renderMessageContent = useMemo(() => {
     return (
       <ReactMarkdown
@@ -356,10 +362,10 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
           },
         }}
       >
-        {message.content}
+        {normalizedContent}
       </ReactMarkdown>
     );
-  }, [message.content, settings?.show_images, isOwn]);
+  }, [normalizedContent, settings?.show_images, isOwn]);
 
   return (
     <>

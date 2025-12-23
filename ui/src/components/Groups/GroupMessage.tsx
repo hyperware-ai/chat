@@ -1,6 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import { GroupMessage as GroupMessageType } from '../../types/groups';
 import GroupMessageMenu from './GroupMessageMenu';
+import { useChatStore } from '../../store/chat';
+import ReactMarkdown from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
+import remarkHwProtocol from '../../utils/remarkHwProtocol';
+import { normalizeMessageContent } from '../../utils/normalizeMessageContent';
 import './GroupMessage.css';
 
 interface ChildThreadInfo {
@@ -55,6 +60,7 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
     }, [message.reactions]);
 
     const viewerId = currentNode ?? '';
+    const { settings } = useChatStore();
 
     const handleReaction = (emoji: string) => {
       if (onReact) {
@@ -77,6 +83,184 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
       }
     };
 
+    const normalizedContent = useMemo(
+      () => normalizeMessageContent(message.content),
+      [message.content],
+    );
+
+    const renderMessageContent = useMemo(() => (
+      <ReactMarkdown
+        remarkPlugins={[remarkBreaks, remarkHwProtocol]}
+        urlTransform={(url: string) => {
+          if (url.startsWith('hw://')) {
+            return url;
+          }
+          return url;
+        }}
+        components={{
+          a: ({ href, children }) => {
+            const imageRegex = /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i;
+            const isHwProtocol = href?.startsWith('hw://');
+            const linkColor = isMine ? '#ffffff' : '#4da6ff';
+
+            if (href && imageRegex.test(href) && settings?.show_images) {
+              return (
+                <div style={{ margin: '8px 0' }}>
+                  <a href={href} target="_blank" rel="noopener noreferrer">
+                    <img
+                      src={href}
+                      alt="Image"
+                      style={{
+                        maxWidth: '100%',
+                        maxHeight: '300px',
+                        borderRadius: '8px',
+                        display: 'block',
+                      }}
+                      onError={(e) => {
+                        const target = e.target as HTMLImageElement;
+                        target.style.display = 'none';
+                        const link = document.createElement('a');
+                        link.href = href;
+                        link.target = '_blank';
+                        link.rel = 'noopener noreferrer';
+                        link.textContent = href;
+                        link.style.color = linkColor;
+                        link.style.textDecoration = 'underline';
+                        target.parentNode?.replaceChild(link, target);
+                      }}
+                    />
+                  </a>
+                </div>
+              );
+            }
+
+            if (isHwProtocol) {
+              return (
+                <a
+                  href={href}
+                  style={{
+                    color: linkColor,
+                    textDecoration: 'underline',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
+
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  color: linkColor,
+                  textDecoration: 'underline',
+                }}
+              >
+                {children}
+              </a>
+            );
+          },
+          p: ({ children }) => (
+            <p style={{ margin: '4px 0', wordBreak: 'break-word' }}>{children}</p>
+          ),
+          code: ({ children, ...props }) => {
+            const inline = !(
+              'className' in props &&
+              typeof props.className === 'string' &&
+              props.className.includes('language-')
+            );
+            if (inline) {
+              return (
+                <code
+                  style={{
+                    backgroundColor: isMine
+                      ? 'rgba(0,0,0,0.2)'
+                      : 'rgba(0,0,0,0.1)',
+                    padding: '2px 4px',
+                    borderRadius: '3px',
+                    fontSize: '0.9em',
+                  }}
+                >
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <pre
+                style={{
+                  backgroundColor: isMine
+                    ? 'rgba(0,0,0,0.2)'
+                    : 'rgba(0,0,0,0.1)',
+                  padding: '8px',
+                  borderRadius: '4px',
+                  overflowX: 'auto',
+                  fontSize: '0.9em',
+                }}
+              >
+                <code>{children}</code>
+              </pre>
+            );
+          },
+          ul: ({ children }) => (
+            <ul style={{ margin: '4px 0', paddingLeft: '20px' }}>{children}</ul>
+          ),
+          ol: ({ children }) => (
+            <ol style={{ margin: '4px 0', paddingLeft: '20px' }}>{children}</ol>
+          ),
+          blockquote: ({ children }) => (
+            <blockquote
+              style={{
+                borderLeft: `3px solid ${
+                  isMine ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.2)'
+                }`,
+                paddingLeft: '12px',
+                margin: '8px 0',
+                fontStyle: 'italic',
+              }}
+            >
+              {children}
+            </blockquote>
+          ),
+          h1: ({ children }) => (
+            <h1 style={{ fontSize: '1.3em', fontWeight: 'bold', margin: '8px 0 4px 0' }}>
+              {children}
+            </h1>
+          ),
+          h2: ({ children }) => (
+            <h2 style={{ fontSize: '1.2em', fontWeight: 'bold', margin: '6px 0 4px 0' }}>
+              {children}
+            </h2>
+          ),
+          h3: ({ children }) => (
+            <h3 style={{ fontSize: '1.1em', fontWeight: 'bold', margin: '4px 0' }}>
+              {children}
+            </h3>
+          ),
+          img: ({ src, alt }) => {
+            if (!settings?.show_images) return null;
+            return (
+              <img
+                src={src}
+                alt={alt}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '300px',
+                  borderRadius: '8px',
+                  display: 'block',
+                  margin: '8px 0',
+                }}
+              />
+            );
+          },
+        }}
+      >
+        {normalizedContent}
+      </ReactMarkdown>
+    ), [normalizedContent, settings?.show_images, isMine]);
+
     return (
       <>
         <div className={`group-message ${isMine ? 'mine' : ''}`} ref={ref} id={`group-message-${message.id}`}>
@@ -88,7 +272,7 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
             </div>
           )}
           <div className="group-message-bubble" onContextMenu={handleContextMenu}>
-            <div className="group-message-text">{message.content}</div>
+            <div className="group-message-text">{renderMessageContent}</div>
             <div className="group-message-meta">
               <span>{formatTime(message.timestamp)}</span>
               {statusLabel && <span className="group-message-status">{statusLabel}</span>}
