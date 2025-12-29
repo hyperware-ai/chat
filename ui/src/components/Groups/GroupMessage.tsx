@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { GroupMessage as GroupMessageType } from '../../types/groups';
 import GroupMessageMenu from './GroupMessageMenu';
 import { useChatStore } from '../../store/chat';
@@ -42,6 +42,17 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
         ? 'Failed'
         : '';
     const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+    const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+
+    // Clean up timer on unmount
+    useEffect(() => {
+      return () => {
+        if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current);
+        }
+      };
+    }, []);
 
     const handleContextMenu = (e: React.MouseEvent) => {
       e.preventDefault();
@@ -81,6 +92,50 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
           setTimeout(() => element.classList.remove('highlight'), 2000);
         }
       }
+    };
+
+    // Touch handlers for iOS long press
+    const handleTouchStart = (e: React.TouchEvent) => {
+      const touch = e.touches[0];
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+
+      // Clear any existing timer
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
+
+      // Start long press timer (500ms)
+      longPressTimerRef.current = setTimeout(() => {
+        setMenuPosition({ x: touch.clientX, y: touch.clientY });
+        // Haptic feedback
+        if ('vibrate' in navigator) {
+          navigator.vibrate(10);
+        }
+      }, 500);
+    };
+
+    const handleTouchMove = (e: React.TouchEvent) => {
+      if (!touchStartRef.current) return;
+
+      const touch = e.touches[0];
+      const deltaX = Math.abs(touch.clientX - touchStartRef.current.x);
+      const deltaY = Math.abs(touch.clientY - touchStartRef.current.y);
+
+      // Cancel long press if finger moves too much
+      if (deltaX > 10 || deltaY > 10) {
+        if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current);
+          longPressTimerRef.current = null;
+        }
+      }
+    };
+
+    const handleTouchEnd = () => {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+      touchStartRef.current = null;
     };
 
     const normalizedContent = useMemo(
@@ -271,7 +326,13 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
               <div className="group-message-reply-content">{replyToMessage.content}</div>
             </div>
           )}
-          <div className="group-message-bubble" onContextMenu={handleContextMenu}>
+          <div
+            className="group-message-bubble"
+            onContextMenu={handleContextMenu}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+          >
             <div className="group-message-text">{renderMessageContent}</div>
             <div className="group-message-meta">
               <span>{formatTime(message.timestamp)}</span>
