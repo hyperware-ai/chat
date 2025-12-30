@@ -80,6 +80,31 @@
   padding: 8px 10px;
 }
 
+.group-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-action-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+  background: var(--background);
+  font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.group-action-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .group-input-row textarea {
   flex: 1;
   resize: none;

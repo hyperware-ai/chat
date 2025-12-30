@@ -119,9 +119,33 @@ pub struct UploadFileReq {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct UploadGroupFileReq {
+    pub group_id: GroupId,
+    #[serde(default)]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default)]
+    pub reply_to: Option<MessageId>,
+    pub filename: String,
+    pub mime_type: String,
+    pub data: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct DownloadFileReq {
     pub chat_id: String,
     pub file_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DownloadGroupFileReq {
+    pub group_id: GroupId,
+    pub attachment_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FetchGroupFileReq {
+    pub group_id: GroupId,
+    pub attachment_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

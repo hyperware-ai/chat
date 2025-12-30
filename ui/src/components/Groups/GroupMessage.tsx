@@ -1,7 +1,9 @@
-import React, { useMemo, useState, useRef, useEffect } from 'react';
+import React, { useCallback, useMemo, useState, useRef, useEffect } from 'react';
+import { Chat } from '#caller-utils';
 import { GroupMessage as GroupMessageType } from '../../types/groups';
 import GroupMessageMenu from './GroupMessageMenu';
 import { useChatStore } from '../../store/chat';
+import { useGroupStore } from '../../store/groups';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkHwProtocol from '../../utils/remarkHwProtocol';
@@ -30,6 +32,43 @@ interface GroupMessageProps {
 const formatTime = (timestamp: number) => {
   const date = new Date(timestamp * 1000);
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+const formatFileSize = (bytes: number) => {
+  if (!bytes || Number.isNaN(bytes)) return '0 KB';
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / 1024).toFixed(1)} KB`;
+};
+
+const buildApiUrl = (path: string) => {
+  const envBase = import.meta.env.BASE_URL;
+  let basePath = '';
+
+  if (envBase && envBase !== '/') {
+    basePath = envBase.endsWith('/') ? envBase.slice(0, -1) : envBase;
+  } else if ((window as any).our?.process) {
+    basePath = `/${(window as any).our.process}`;
+  }
+
+  if (basePath && path.startsWith(`${basePath}/`)) {
+    return path;
+  }
+
+  return `${basePath}${path}`;
+};
+
+const parseApiResponse = <T,>(response: any): T => {
+  if (response && typeof response === 'object') {
+    if ('Ok' in response && response.Ok !== undefined) {
+      return response.Ok as T;
+    }
+    if ('Err' in response && response.Err !== undefined) {
+      throw new Error(response.Err as string);
+    }
+  }
+  return response as T;
 };
 
 const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
@@ -72,6 +111,9 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
 
     const viewerId = currentNode ?? '';
     const { settings } = useChatStore();
+    const { activeGroupId } = useGroupStore();
+    const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+    const imageUrlsRef = useRef<Record<string, string>>({});
 
     const handleReaction = (emoji: string) => {
       if (onReact) {
@@ -142,6 +184,119 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
       () => normalizeMessageContent(message.content),
       [message.content],
     );
+
+    const extractFilePayload = (payload: unknown): { bytes: Uint8Array | null; mimeType?: string } => {
+      if (Array.isArray(payload)) {
+        if (
+          payload.length === 2 &&
+          typeof payload[0] === 'string' &&
+          Array.isArray(payload[1]) &&
+          payload[1].every((value) => typeof value === 'number')
+        ) {
+          return { bytes: new Uint8Array(payload[1]), mimeType: payload[0] };
+        }
+
+        if (payload.every((value) => typeof value === 'number')) {
+          return { bytes: new Uint8Array(payload as number[]) };
+        }
+      }
+      return { bytes: null };
+    };
+
+    const fetchAttachmentBytes = useCallback(async (attachmentId: string) => {
+      if (!activeGroupId) {
+        throw new Error('No active group');
+      }
+
+      const response = await fetch(buildApiUrl('/api/download-group-file'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          DownloadGroupFile: {
+            group_id: activeGroupId,
+            attachment_id: attachmentId,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Download failed with status ${response.status}`);
+      }
+
+      const json = await response.json();
+      const payload = parseApiResponse<unknown>(json);
+      return extractFilePayload(payload);
+    }, [activeGroupId]);
+
+    const handleAttachmentDownload = async (attachment: Chat.AttachmentDescriptor) => {
+      try {
+        const { bytes, mimeType } = await fetchAttachmentBytes(attachment.attachment_id);
+        if (!bytes) {
+          console.error('Unexpected attachment payload for', attachment.attachment_id);
+          return;
+        }
+
+        const arrayBuffer = new Uint8Array(bytes).buffer;
+        const blob = new Blob([arrayBuffer], {
+          type: mimeType || attachment.mime_type || 'application/octet-stream',
+        });
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = attachment.filename || attachment.attachment_id;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      } catch (error) {
+        console.error('Failed to download attachment:', error);
+      }
+    };
+
+    useEffect(() => {
+      return () => {
+        Object.values(imageUrlsRef.current).forEach((url) => {
+          if (url.startsWith('blob:')) {
+            URL.revokeObjectURL(url);
+          }
+        });
+      };
+    }, []);
+
+    useEffect(() => {
+      if (!settings?.show_images || !activeGroupId) return;
+      const imageAttachments = message.attachments.filter((attachment) =>
+        attachment.mime_type?.startsWith('image/'),
+      );
+
+      imageAttachments.forEach(async (attachment) => {
+        if (imageUrlsRef.current[attachment.attachment_id]) {
+          return;
+        }
+
+        if (attachment.uri?.startsWith('data:')) {
+          imageUrlsRef.current[attachment.attachment_id] = attachment.uri;
+          setImageUrls((prev) => ({ ...prev, [attachment.attachment_id]: attachment.uri as string }));
+          return;
+        }
+
+        try {
+          const { bytes, mimeType } = await fetchAttachmentBytes(attachment.attachment_id);
+          if (!bytes) {
+            return;
+          }
+          const arrayBuffer = new Uint8Array(bytes).buffer;
+          const blob = new Blob([arrayBuffer], {
+            type: mimeType || attachment.mime_type || 'application/octet-stream',
+          });
+          const objectUrl = URL.createObjectURL(blob);
+          imageUrlsRef.current[attachment.attachment_id] = objectUrl;
+          setImageUrls((prev) => ({ ...prev, [attachment.attachment_id]: objectUrl }));
+        } catch (error) {
+          console.error('Failed to load group attachment image:', error);
+        }
+      });
+    }, [activeGroupId, fetchAttachmentBytes, message.attachments, settings?.show_images]);
 
     const renderMessageContent = useMemo(() => (
       <ReactMarkdown
@@ -316,6 +471,16 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
       </ReactMarkdown>
     ), [normalizedContent, settings?.show_images, isMine]);
 
+    const hasAttachments = message.attachments && message.attachments.length > 0;
+    const firstAttachmentLabel =
+      message.attachments?.[0]?.filename ||
+      message.attachments?.[0]?.mime_type ||
+      'Attachment';
+    const shouldRenderText =
+      !hasAttachments ||
+      (message.content && message.content.trim() && message.content.trim() !== firstAttachmentLabel);
+    const attachmentLinkColor = isMine ? '#ffffff' : '#4da6ff';
+
     return (
       <>
         <div className={`group-message ${isMine ? 'mine' : ''}`} ref={ref} id={`group-message-${message.id}`}>
@@ -333,7 +498,52 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
           >
-            <div className="group-message-text">{renderMessageContent}</div>
+            <div className="group-message-text">
+              {hasAttachments && (
+                <div className="group-attachments">
+                  {message.attachments.map((attachment) => {
+                    const isImage = attachment.mime_type?.startsWith('image/');
+                    const previewUrl = imageUrls[attachment.attachment_id];
+                    const filename = attachment.filename || attachment.attachment_id;
+
+                    return (
+                      <div key={attachment.attachment_id} className="group-attachment">
+                        {isImage && settings?.show_images && previewUrl && (
+                          <img
+                            src={previewUrl}
+                            alt={filename}
+                            className="group-attachment-image"
+                            onClick={() => handleAttachmentDownload(attachment)}
+                          />
+                        )}
+                        {isImage && settings?.show_images && !previewUrl && (
+                          <div className="group-attachment-loading">Loading image…</div>
+                        )}
+                        <a
+                          href={attachment.uri || '#'}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            handleAttachmentDownload(attachment);
+                          }}
+                          style={{
+                            color: attachmentLinkColor,
+                            textDecoration: 'underline',
+                            textUnderlineOffset: '2px',
+                            display: 'inline-block',
+                          }}
+                        >
+                          {filename}
+                        </a>
+                        <div className="group-attachment-size">
+                          {formatFileSize(attachment.size_bytes)}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {shouldRenderText && renderMessageContent}
+            </div>
             <div className="group-message-meta">
               <span>{formatTime(message.timestamp)}</span>
               {statusLabel && <span className="group-message-status">{statusLabel}</span>}

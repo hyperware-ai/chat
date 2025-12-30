@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import GroupFileUpload from './GroupFileUpload';
 import './GroupMessageInput.css';
 
 interface ReplyingToMessage {
@@ -36,6 +37,7 @@ const GroupMessageInput: React.FC<GroupMessageInputProps> = ({
   const [message, setMessage] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  const [showFileUpload, setShowFileUpload] = useState(false);
 
   useEffect(() => {
     if (!disabled) {
@@ -127,6 +129,19 @@ const GroupMessageInput: React.FC<GroupMessageInputProps> = ({
         <div className="group-input-warning">{disabledReason}</div>
       )}
       <div className={`group-input-row ${disabled ? 'disabled' : ''} ${editingMessage ? 'editing' : ''}`}>
+        {!editingMessage && (
+          <div className="group-actions">
+            <button
+              className="group-action-button"
+              type="button"
+              onClick={() => setShowFileUpload(true)}
+              disabled={disabled}
+              aria-label="Attach file"
+            >
+              📎
+            </button>
+          </div>
+        )}
         <textarea
           ref={inputRef}
           placeholder={editingMessage ? 'Edit your message…' : disabled ? 'Sending disabled' : 'Type a message…'}
@@ -145,6 +160,7 @@ const GroupMessageInput: React.FC<GroupMessageInputProps> = ({
           {editingMessage ? '✓' : '➤'}
         </button>
       </div>
+      {showFileUpload && <GroupFileUpload onClose={() => setShowFileUpload(false)} />}
     </div>
   );
 };

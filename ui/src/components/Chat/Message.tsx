@@ -107,9 +107,32 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       return;
     }
 
-    const fileRef = extractFileRef(message.file_info.url);
+    const downloadBlob = (blob: Blob) => {
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = message.file_info?.filename || 'download';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    };
+
+    const fileUrl = message.file_info.url;
+    if (fileUrl.startsWith('data:')) {
+      try {
+        const response = await fetch(fileUrl);
+        const blob = await response.blob();
+        downloadBlob(blob);
+      } catch (error) {
+        console.error('Failed to download image data URL:', error);
+      }
+      return;
+    }
+
+    const fileRef = extractFileRef(fileUrl);
     if (!fileRef) {
-      console.error('Unsupported file URL:', message.file_info.url);
+      console.error('Unsupported file URL:', fileUrl);
       return;
     }
 
@@ -156,14 +179,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       }
 
       const blob = new Blob([new Uint8Array(fileBytes)], { type: mimeType });
-      const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = objectUrl;
-      link.download = message.file_info.filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      downloadBlob(blob);
     } catch (error) {
       console.error('Failed to download file:', error);
     }
@@ -528,7 +544,24 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
                   marginBottom: '8px'
                 }}
               />
-              <div style={{ fontSize: '12px', opacity: 0.8 }}>{message.file_info.filename}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <a
+                  href={buildDownloadUrl(message.file_info.url)}
+                  onClick={handleFileDownload}
+                  download={message.file_info.filename}
+                  style={{ 
+                    color: isOwn ? '#ffffff' : '#4da6ff',
+                    textDecoration: 'underline',
+                    textUnderlineOffset: '2px',
+                    display: 'inline-block'
+                  }}
+                >
+                  {message.file_info.filename}
+                </a>
+                <div style={{ fontSize: '12px', opacity: 0.8 }}>
+                  {(message.file_info.size / 1024).toFixed(1)} KB
+                </div>
+              </div>
             </div>
           ) : message.file_info && message.message_type === 'File' ? (
             <div>

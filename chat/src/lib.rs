@@ -1552,6 +1552,163 @@ impl ChatState {
 
         Ok(file_data)
     }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http]
+    async fn upload_group_file(
+        &mut self,
+        req: UploadGroupFileReq,
+    ) -> Result<SendGroupMessageRes, String> {
+        let file_data =
+            base64_decode(&req.data).map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+        let file_size_mb = (file_data.len() as u64) / (1024 * 1024);
+        if file_size_mb > self.settings.max_file_size_mb {
+            return Err(format!(
+                "File size exceeds limit of {} MB",
+                self.settings.max_file_size_mb
+            ));
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let message_type = if req.mime_type.starts_with("image/") {
+            MessageType::Image
+        } else {
+            MessageType::File
+        };
+
+        let package_id = our().package_id();
+        let file_id = format!("{}_{}", timestamp, rand::random::<u32>());
+        let group_dir = req.group_id.replace(":", "_");
+        let file_url = format!("/files/{}/{}", group_dir, file_id);
+        let vfs_path = format!("/{}/files/{}/{}", package_id, group_dir, file_id);
+
+        let dir_path = format!("/{}/files/{}", package_id, group_dir);
+        let _ = vfs::open_dir(&dir_path, true, Some(5));
+
+        let file = vfs::create_file(&vfs_path, Some(5))
+            .map_err(|e| format!("Failed to create VFS file: {:?}", e))?;
+        file.write(&file_data)
+            .map_err(|e| format!("Failed to write to VFS: {:?}", e))?;
+
+        let attachment = crate::crdt::AttachmentDescriptor {
+            attachment_id: file_id,
+            filename: req.filename.clone(),
+            mime_type: req.mime_type.clone(),
+            size_bytes: file_data.len() as u64,
+            checksum: None,
+            uri: Some(file_url),
+        };
+
+        let send_req = SendGroupMessageReq {
+            group_id: req.group_id,
+            thread_id: req.thread_id,
+            content: req.filename,
+            message_type,
+            reply_to: req.reply_to,
+            attachments: vec![attachment],
+        };
+
+        self.send_group_message_state(send_req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http(method = "POST", path = "/api/download-group-file")]
+    async fn download_group_file(&mut self, req: DownloadGroupFileReq) -> Result<Vec<u8>, String> {
+        if req.group_id.contains('/') || req.group_id.contains("..") || req.attachment_id.contains('/')
+        {
+            set_response_status(hyperware_process_lib::http::StatusCode::BAD_REQUEST);
+            return Err("Invalid file path".to_string());
+        }
+
+        let group_dir = req.group_id.replace(":", "_");
+        let package_id = our().package_id();
+        let vfs_path = format!("/{}/files/{}/{}", package_id, group_dir, req.attachment_id);
+
+        if let Ok(file) = vfs::open_file(&vfs_path, false, Some(5)) {
+            let file_data = file.read().map_err(|e| {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                format!("Failed to read file: {:?}", e)
+            })?;
+            return Ok(file_data);
+        }
+
+        let sender = self
+            .groups
+            .get(&req.group_id)
+            .and_then(|group| {
+                group.messages.values().find_map(|meta| {
+                    meta.attachments
+                        .iter()
+                        .any(|att| att.attachment_id == req.attachment_id)
+                        .then(|| meta.sender.clone())
+                })
+            })
+            .ok_or_else(|| {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                "Attachment not found".to_string()
+            })?;
+
+        if sender == our().node {
+            set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+            return Err("Attachment not available".to_string());
+        }
+
+        let fetch_req = FetchGroupFileReq {
+            group_id: req.group_id.clone(),
+            attachment_id: req.attachment_id.clone(),
+        };
+        let body = serde_json::to_vec(&serde_json::json!({ "FetchGroupFile": fetch_req }))
+            .map_err(|e| format!("Failed to encode fetch request: {:?}", e))?;
+        let target = Address::from((sender.as_str(), OUR_PROCESS_ID));
+
+        match send::<Result<Vec<u8>, String>>(Request::to(&target).body(body)).await {
+            Ok(Ok(file_data)) => {
+                let dir_path = format!("/{}/files/{}", package_id, group_dir);
+                let _ = vfs::open_dir(&dir_path, true, Some(5));
+                if let Ok(file) = vfs::create_file(&vfs_path, Some(5)) {
+                    let _ = file.write(&file_data);
+                }
+                Ok(file_data)
+            }
+            Ok(Err(err)) => {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                Err(err)
+            }
+            Err(err) => {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                Err(format!("Failed to fetch attachment: {:?}", err))
+            }
+        }
+    }
+
+    #[remote]
+    async fn fetch_group_file(&self, req: FetchGroupFileReq) -> Result<Vec<u8>, String> {
+        let caller = source().node.clone();
+        self.require_subscriber_access(&req.group_id, &caller)
+            .map_err(|err| format!("unauthorized: {}", err))?;
+
+        if req.group_id.contains('/') || req.group_id.contains("..") || req.attachment_id.contains('/') {
+            return Err("Invalid file path".to_string());
+        }
+
+        let group_dir = req.group_id.replace(":", "_");
+        let package_id = our().package_id();
+        let vfs_path = format!("/{}/files/{}/{}", package_id, group_dir, req.attachment_id);
+
+        let file = vfs::open_file(&vfs_path, false, Some(5))
+            .map_err(|e| format!("Failed to open file: {:?}", e))?;
+        let file_data = file
+            .read()
+            .map_err(|e| format!("Failed to read file: {:?}", e))?;
+        Ok(file_data)
+    }
     // uncomment #[remote] for tests
     // #[remote]
     #[http]
