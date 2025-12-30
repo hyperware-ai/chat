@@ -108,9 +108,18 @@ impl GroupDocState {
     }
 
     pub fn apply_into(&self, runtime: &mut ChatState) {
-        runtime
+        // Preserve local delivery state (cursors) - these are local tracking data
+        // that shouldn't be overwritten by incoming CRDT updates
+        let preserved_delivery = runtime
             .groups
-            .insert(self.group_id.clone(), self.group.clone());
+            .get(&self.group_id)
+            .map(|g| g.delivery.clone())
+            .unwrap_or_default();
+
+        let mut group = self.group.clone();
+        group.delivery = preserved_delivery;
+
+        runtime.groups.insert(self.group_id.clone(), group);
         runtime.invalidate_group_rules(&self.group_id);
         runtime.rebuild_pubsub_for_group(&self.group_id);
     }
@@ -118,7 +127,10 @@ impl GroupDocState {
 
 impl From<(&GroupId, &Group)> for GroupDocState {
     fn from((group_id, group): (&GroupId, &Group)) -> Self {
-        GroupDocState::new(group_id.clone(), group.clone())
+        let mut group = group.clone();
+        // Delivery cursors are local-only runtime state; never replicate via CRDT snapshots.
+        group.delivery = GroupDeliveryState::default();
+        GroupDocState::new(group_id.clone(), group)
     }
 }
 
@@ -126,8 +138,8 @@ impl From<(&GroupId, &Group)> for GroupDocState {
 mod tests {
     use super::{GroupCrdtManager, GroupDocState};
     use crate::crdt::{
-        Group, GroupCounters, GroupMember, GroupPermissions, GroupRoutingConfig, GroupTier,
-        MembershipStatus, Role, SubscriberSyncState,
+        DeliveryCursor, Group, GroupCounters, GroupDeliveryState, GroupMember, GroupPermissions,
+        GroupRoutingConfig, GroupTier, MembershipStatus, Role, SubscriberSyncState,
     };
     use crate::ChatState;
     use hyperware_pubsub_core::{whitelist::NodeId as BrokerNodeId, TopicId as BrokerTopicId};
@@ -181,6 +193,102 @@ mod tests {
             .expect("group should be present");
         assert_eq!(stored.counters.next_thread, 4);
         assert_eq!(stored.counters.next_message, 9);
+    }
+
+    #[test]
+    fn group_doc_state_apply_preserves_delivery_state() {
+        let mut runtime = ChatState::default();
+        let group_id = "group:delivery".to_string();
+
+        let mut local_group = Group::default();
+        let mut local_delivery = GroupDeliveryState::default();
+        local_delivery.hub_cursors.insert(
+            "hub.node".into(),
+            DeliveryCursor {
+                queue_id: "hub-queue".to_string(),
+                last_offset: 42,
+                updated_at: 100,
+            },
+        );
+        local_delivery.subscriber_cursors.insert(
+            "sub.node".into(),
+            DeliveryCursor {
+                queue_id: "sub-queue".to_string(),
+                last_offset: 7,
+                updated_at: 200,
+            },
+        );
+        local_group.delivery = local_delivery.clone();
+        runtime.groups.insert(group_id.clone(), local_group);
+
+        let mut incoming_group = Group::default();
+        incoming_group.delivery.hub_cursors.insert(
+            "hub.node".into(),
+            DeliveryCursor {
+                queue_id: "remote-queue".to_string(),
+                last_offset: 1,
+                updated_at: 1,
+            },
+        );
+        let snapshot = GroupDocState::new(group_id.clone(), incoming_group);
+        snapshot.apply_into(&mut runtime);
+
+        let stored = runtime
+            .groups
+            .get(&group_id)
+            .expect("group should be present");
+        assert_eq!(stored.delivery, local_delivery);
+    }
+
+    #[test]
+    fn group_doc_state_apply_ignores_remote_delivery_on_first_apply() {
+        let mut runtime = ChatState::default();
+        let group_id = "group:delivery-first".to_string();
+
+        let mut incoming_group = Group::default();
+        incoming_group.delivery.hub_cursors.insert(
+            "hub.node".into(),
+            DeliveryCursor {
+                queue_id: "remote-queue".to_string(),
+                last_offset: 9,
+                updated_at: 900,
+            },
+        );
+        incoming_group.delivery.subscriber_cursors.insert(
+            "sub.node".into(),
+            DeliveryCursor {
+                queue_id: "remote-sub".to_string(),
+                last_offset: 3,
+                updated_at: 901,
+            },
+        );
+
+        let snapshot = GroupDocState::new(group_id.clone(), incoming_group);
+        snapshot.apply_into(&mut runtime);
+
+        let stored = runtime
+            .groups
+            .get(&group_id)
+            .expect("group should be present");
+        assert_eq!(stored.delivery, GroupDeliveryState::default());
+    }
+
+    #[test]
+    fn group_doc_state_from_strips_delivery() {
+        let group_id = "group:delivery-from".to_string();
+        let mut group = Group::default();
+        group.delivery.hub_cursors.insert(
+            "hub.node".into(),
+            DeliveryCursor {
+                queue_id: "hub-queue".to_string(),
+                last_offset: 12,
+                updated_at: 345,
+            },
+        );
+
+        let snapshot: GroupDocState = (&group_id, &group).into();
+
+        assert_eq!(snapshot.group.delivery, GroupDeliveryState::default());
     }
 
     #[test]

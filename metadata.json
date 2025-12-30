@@ -4,10 +4,13 @@
   "image": "https://raw.githubusercontent.com/hyperware-ai/chat/refs/heads/master/ui/public/chat-256.png",
   "properties": {
     "package_name": "chat",
-    "current_version": "0.3.0",
+    "current_version": "0.4.2",
     "publisher": "ware.hypr",
     "mirrors": ["ware.hypr", "nick.hypr", "nick1udwig.os", "diligence.os", "yael-solutions.os"],
     "code_hashes": {
+      "0.4.2": "d12b45930f66bce2d12b3525ea50d69e2682731d8aa36530a6bec33a07413ef0",
+      "0.4.1": "28d483bff71f610b4f104d3e167401fa367e103941cfaa28df4951ce68267c1b",
+      "0.4.0": "bca54ec0f6ceb5c7abaa50e18ec6350e6ec719cd1ac64852234620d58368f528",
       "0.3.0": "70dc6c79b6f8465f951ba42eb2789d9289104d2b01c347bdd72f2f208c5bf66c",
       "0.2.0": "a9950180ff6bda7e7c05eb8e630fcf2342fcff2bdba067c2380a4522f6f9d281",
       "0.1.1": "3ef4ffa50ef8ef7555a7bd924c45a6e8d3cf692dcb2dc5f97679928632983a71",

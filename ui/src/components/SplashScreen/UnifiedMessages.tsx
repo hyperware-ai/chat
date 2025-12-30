@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore } from '../../store/chat';
 import { useGroupStore } from '../../store/groups';
 import ChatSearch from '../Chats/ChatSearch';
@@ -24,6 +24,7 @@ const UnifiedMessages: React.FC = () => {
   const [showNewChat, setShowNewChat] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showChooser, setShowChooser] = useState(false);
+  const chooserOpenedAtRef = useRef(0);
 
   // Keep group data fresh when we land on the unified view
   useEffect(() => {
@@ -125,8 +126,23 @@ const UnifiedMessages: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (showChooser) {
+      chooserOpenedAtRef.current = Date.now();
+    }
+  }, [showChooser]);
+
+  const handleChooserOverlayClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    // Ignore the delayed click that can land on the overlay right after opening on Android.
+    if (Date.now() - chooserOpenedAtRef.current < 350) {
+      event.stopPropagation();
+      return;
+    }
+    setShowChooser(false);
+  };
+
   const NewChatChooser = () => (
-    <div className="modal-overlay" onClick={() => setShowChooser(false)}>
+    <div className="modal-overlay" onClick={handleChooserOverlayClick}>
       <div className="modal-content chooser" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>New chat</h3>

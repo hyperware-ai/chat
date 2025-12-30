@@ -126,7 +126,6 @@ fn get_chats(chat_address: &Address) -> String {
                         for msg in &messages_array[start..] {
                             let sender = msg.get("sender").and_then(|v| v.as_str()).unwrap_or("?");
                             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                            let msg_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                             let timestamp =
                                 msg.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
 

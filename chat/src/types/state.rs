@@ -6,10 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crdt::{
-    Group, GroupCrdtManager, GroupId, GroupMember, GroupMetadata, GroupPermissions,
-    GroupRoutingConfig, GroupTier, GroupVisibility, HubSyncState, MembershipRuleBox,
-    MembershipRuleConfig, MembershipStatus, MessageMeta, NodeId, Role, SubscriberSyncState, Thread,
-    ThreadId, ThreadParentRef,
+    Group, GroupCrdtManager, GroupId, GroupMember, GroupMetadata, GroupRoutingConfig, GroupTier,
+    GroupVisibility, HubSyncState, MembershipRuleBox, MembershipStatus, NodeId, Role,
+    SubscriberSyncState, Thread, ThreadParentRef,
 };
 use crate::pubsub::PubSubRegistry;
 use hyperware_crdt::yrs::Encode;
@@ -19,10 +18,7 @@ use hyperware_pubsub_core::{whitelist::NodeId as BrokerNodeId, TopicId as Broker
 
 use super::api::*;
 use super::model::*;
-use super::model::{
-    active_member_count, aggregate_rule_decisions, current_timestamp, ensure_membership_rules,
-    generate_group_id, group_root_thread_id, membership_proposal_key, sync_member_membership_sets,
-};
+use super::model::{current_timestamp, ensure_membership_rules, generate_group_id, group_root_thread_id};
 use super::replication::{
     BrokerEnvelope, ReplicationKind, ReplicationMetrics, ReplicationTask, ReplicationTx,
     ReplicationWakeRx, ReplicationWakeTx, SubscriberDeliveryEvent,
@@ -369,6 +365,7 @@ impl<'de> Deserialize<'de> for ChatState {
         }
 
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct ChatStateSerdeV1 {
             profile: UserProfile,
             chats: HashMap<String, Chat>,

@@ -4,13 +4,13 @@ use std::fmt;
 
 use crate::crdt::{
     AttachmentDescriptor, DeliveryCursor, Group, GroupId, GroupMetadata, GroupRoutingConfig,
-    GroupTier, GroupVisibility, HubSyncState, MembershipDecision, MembershipRuleConfig,
-    MembershipRuleError, MessageId, MessageMeta, NodeId, Thread, ThreadId,
+    GroupVisibility, MembershipDecision, MembershipRuleConfig, MembershipRuleError, MessageId,
+    MessageMeta, NodeId, ThreadId,
 };
 
 use super::{
-    default_group_message_type, FileInfo, MessageReaction, MessageStatus, MessageType,
-    PushSubscription, ReplicationMetrics, SubscriberDeliveryEvent, UserProfile,
+    default_group_message_type, FileInfo, MessageType, ReplicationMetrics,
+    SubscriberDeliveryEvent,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
