@@ -17,10 +17,12 @@ git = "https://github.com/hyperware-ai/hyperapp-macro"
 rev = "28f0a41"
 
 [dependencies.hyperware-crdt]
-path = "../../hyperware-crdt"
+git = "https://github.com/hyperware-ai/hyperware-crdt"
+rev = "2c92774"
 
 [dependencies.hyperware-pubsub-core]
-path = "../../hyperware-pubsub"
+git = "https://github.com/hyperware-ai/hyperware-pubsub"
+rev = "abd30a6"
 
 [dependencies.hyperware_process_lib]
 features = ["hyperapp"]
