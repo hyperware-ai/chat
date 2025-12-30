@@ -119,6 +119,12 @@ pub struct UploadFileReq {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct DownloadFileReq {
+    pub chat_id: String,
+    pub file_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct UploadProfilePictureReq {
     pub mime_type: String,
     pub data: String,

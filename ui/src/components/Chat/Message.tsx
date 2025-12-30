@@ -60,6 +60,115 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
     }
   };
 
+  const buildDownloadUrl = (rawUrl: string) => {
+    if (!rawUrl.startsWith('/')) {
+      return rawUrl;
+    }
+
+    const envBase = import.meta.env.BASE_URL;
+    let basePath = '';
+
+    if (envBase && envBase !== '/') {
+      basePath = envBase.endsWith('/') ? envBase.slice(0, -1) : envBase;
+    } else if ((window as any).our?.process) {
+      basePath = `/${(window as any).our.process}`;
+    }
+
+    if (basePath && rawUrl.startsWith(`${basePath}/`)) {
+      return rawUrl;
+    }
+
+    return `${basePath}${rawUrl}`;
+  };
+
+  const extractFileRef = (rawUrl: string) => {
+    const filesIndex = rawUrl.indexOf('/files/');
+    if (filesIndex === -1) {
+      return null;
+    }
+
+    const rest = rawUrl
+      .slice(filesIndex + '/files/'.length)
+      .split('?')[0]
+      .split('#')[0];
+    const [chatId, fileId] = rest.split('/');
+
+    if (!chatId || !fileId) {
+      return null;
+    }
+
+    return { chatId, fileId };
+  };
+
+  const handleFileDownload = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+
+    if (!message.file_info) {
+      return;
+    }
+
+    const fileRef = extractFileRef(message.file_info.url);
+    if (!fileRef) {
+      console.error('Unsupported file URL:', message.file_info.url);
+      return;
+    }
+
+    try {
+      const response = await fetch(buildDownloadUrl('/api/download-file'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          DownloadFile: {
+            chat_id: fileRef.chatId,
+            file_id: fileRef.fileId,
+          },
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Download failed with status ${response.status}`);
+      }
+
+      const json = await response.json();
+      if (json && typeof json === 'object' && 'Err' in json) {
+        throw new Error((json as { Err: string }).Err);
+      }
+
+      const payload = json && typeof json === 'object' && 'Ok' in json
+        ? (json as { Ok: unknown }).Ok
+        : json;
+      let mimeType = message.file_info.mime_type || 'application/octet-stream';
+      let fileBytes: number[] | null = null;
+
+      if (Array.isArray(payload)) {
+        if (payload.length === 2 && typeof payload[0] === 'string' && Array.isArray(payload[1])) {
+          mimeType = payload[0];
+          fileBytes = payload[1] as number[];
+        } else if (payload.every((value) => typeof value === 'number')) {
+          fileBytes = payload as number[];
+        }
+      }
+
+      if (!fileBytes) {
+        console.error('Unexpected file payload shape:', payload);
+        return;
+      }
+
+      const blob = new Blob([new Uint8Array(fileBytes)], { type: mimeType });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = message.file_info.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (error) {
+      console.error('Failed to download file:', error);
+    }
+  };
+
   const handleLongPress = (e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault();
     const rect = (e.target as HTMLElement).getBoundingClientRect();
@@ -424,19 +533,21 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
           ) : message.file_info && message.message_type === 'File' ? (
             <div>
               <a 
-                href={message.file_info.url}
+                href={buildDownloadUrl(message.file_info.url)}
+                onClick={handleFileDownload}
                 download={message.file_info.filename}
                 style={{ 
                   color: isOwn ? '#ffffff' : '#4da6ff',
-                  textDecoration: 'none',
+                  textDecoration: 'underline',
+                  textUnderlineOffset: '2px',
                   display: 'inline-block'
                 }}
               >
-                <div style={{ marginBottom: '8px' }}>📎 {message.file_info.filename}</div>
-                <div style={{ fontSize: '12px', opacity: 0.8 }}>
-                  {(message.file_info.size / 1024).toFixed(1)} KB - Click to download
-                </div>
+                {message.file_info.filename}
               </a>
+              <div style={{ fontSize: '12px', opacity: 0.8, marginTop: '4px' }}>
+                {(message.file_info.size / 1024).toFixed(1)} KB
+              </div>
             </div>
           ) : (
             renderMessageContent

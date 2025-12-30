@@ -69,6 +69,31 @@
   padding-bottom: calc(10px + var(--safe-area-bottom));
 }
 
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.message-action-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+  background: var(--background);
+  font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.message-action-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .message-input-container.editing {
   background: rgba(0, 122, 255, 0.05);
 }

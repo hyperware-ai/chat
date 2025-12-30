@@ -12,7 +12,7 @@ use base64::{engine::general_purpose, Engine as _};
 use hyperware_process_lib::{
     homepage::add_to_homepage,
     http::server::WsMessageType,
-    hyperapp::{send, sleep, source, spawn, AppSendError, SaveOptions},
+    hyperapp::{get_path, send, set_response_status, sleep, source, spawn, AppSendError, SaveOptions},
     our, vfs, Address, LazyLoadBlob, ProcessId, Request,
 };
 use std::cmp::Ordering;
@@ -1526,6 +1526,32 @@ impl ChatState {
         self.dispatch_outgoing_message(counterparty, remote_message);
         Ok(stored_message)
     }
+
+    // uncomment #[remote] for tests
+    // #[remote]
+    #[http(method = "POST", path = "/api/download-file")]
+    async fn download_file(&self, req: DownloadFileReq) -> Result<Vec<u8>, String> {
+        if req.chat_id.contains('/') || req.chat_id.contains("..") || req.file_id.contains('/') {
+            set_response_status(hyperware_process_lib::http::StatusCode::BAD_REQUEST);
+            return Err("Invalid file path".to_string());
+        }
+
+        let chat_id = req.chat_id.replace(":", "_");
+        let package_id = our().package_id();
+        let vfs_path = format!("/{}/files/{}/{}", package_id, chat_id, req.file_id);
+
+        let file = vfs::open_file(&vfs_path, false, Some(5)).map_err(|e| {
+            set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+            format!("Failed to open file: {:?}", e)
+        })?;
+
+        let file_data = file.read().map_err(|e| {
+            set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+            format!("Failed to read file: {:?}", e)
+        })?;
+
+        Ok(file_data)
+    }
     // uncomment #[remote] for tests
     // #[remote]
     #[http]
@@ -2212,32 +2238,56 @@ impl ChatState {
         Ok(include_str!("../../ui/public/browser-chat.html").to_string())
     }
 
-    #[http(path = "/files/*")]
-    async fn serve_file(&self, path_segments: Vec<String>) -> Result<(String, Vec<u8>), String> {
-        // Extract path from segments (should be /files/chat_id/file_id)
-        if path_segments.len() < 3 {
-            return Err("Invalid file path".to_string());
-        }
+    #[http(method = "GET", path = "/files/*")]
+    async fn serve_file(&self) -> Result<Vec<u8>, String> {
+        let path = match get_path() {
+            Some(path) => path,
+            None => {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                return Err("Invalid file path".to_string());
+            }
+        };
 
-        let chat_id = &path_segments[1];
-        let file_id = &path_segments[2];
+        let rest = match path.strip_prefix("/files/") {
+            Some(rest) => rest,
+            None => {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                return Err("Invalid file path".to_string());
+            }
+        };
+
+        let mut segments = rest.split('/');
+        let chat_id = match segments.next() {
+            Some(chat_id) if !chat_id.is_empty() => chat_id,
+            _ => {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                return Err("Invalid file path".to_string());
+            }
+        };
+        let file_id = match segments.next() {
+            Some(file_id) if !file_id.is_empty() => file_id,
+            _ => {
+                set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+                return Err("Invalid file path".to_string());
+            }
+        };
 
         // Build VFS path
         let package_id = our().package_id();
         let vfs_path = format!("/{}/files/{}/{}", package_id, chat_id, file_id);
 
         // Read file from VFS
-        let file = vfs::open_file(&vfs_path, false, Some(5))
-            .map_err(|e| format!("Failed to open file: {:?}", e))?;
+        let file = vfs::open_file(&vfs_path, false, Some(5)).map_err(|e| {
+            set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+            format!("Failed to open file: {:?}", e)
+        })?;
 
-        let file_data = file
-            .read()
-            .map_err(|e| format!("Failed to read file: {:?}", e))?;
+        let file_data = file.read().map_err(|e| {
+            set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+            format!("Failed to read file: {:?}", e)
+        })?;
 
-        // Try to determine MIME type from file content or default to application/octet-stream
-        let mime_type = "application/octet-stream".to_string();
-
-        Ok((mime_type, file_data))
+        Ok(file_data)
     }
     // SEARCH
 

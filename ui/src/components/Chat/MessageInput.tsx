@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useChatStore } from '../../store/chat';
+import FileUpload from './FileUpload';
+import VoiceNote from './VoiceNote';
 import './MessageInput.css';
 
 interface MessageInputProps {
@@ -9,6 +11,8 @@ interface MessageInputProps {
 
 const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) => {
   const [message, setMessage] = useState('');
+  const [showFileUpload, setShowFileUpload] = useState(false);
+  const [showVoiceNote, setShowVoiceNote] = useState(false);
   const { sendMessage, replyingTo, setReplyingTo, editingMessage, setEditingMessage, editMessage } = useChatStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -103,6 +107,26 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
       )}
 
       <div className={`message-input-container ${editingMessage ? 'editing' : ''}`}>
+        {!editingMessage && (
+          <div className="message-actions">
+            <button
+              className="message-action-button"
+              type="button"
+              onClick={() => setShowFileUpload(true)}
+              aria-label="Attach file"
+            >
+              📎
+            </button>
+            {/* <button
+              className="message-action-button"
+              type="button"
+              onClick={() => setShowVoiceNote(true)}
+              aria-label="Record voice note"
+            >
+              🎤
+            </button> */}
+          </div>
+        )}
         <textarea
           ref={inputRef}
           className="message-input"
@@ -121,6 +145,8 @@ const MessageInput: React.FC<MessageInputProps> = ({ chatId, onSendMessage }) =>
           {editingMessage ? '✓' : '➤'}
         </button>
       </div>
+      {showFileUpload && <FileUpload onClose={() => setShowFileUpload(false)} />}
+      {showVoiceNote && <VoiceNote onClose={() => setShowVoiceNote(false)} />}
     </div>
   );
 };
