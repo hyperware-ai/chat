@@ -337,6 +337,95 @@ async fn send_push_notification_for_message(sender: &str, content: &str, chat_id
     }
 }
 
+// Helper function to send push notification for a group message
+async fn send_push_notification_for_group_message(
+    sender: &str,
+    content: &str,
+    group_id: &str,
+    group_name: &str,
+) {
+    if cfg!(feature = "disable-notifications") {
+        log_debug!("[NOTIFY] skipping group push notification (disable-notifications feature enabled)");
+        return;
+    }
+    let notify_started = Instant::now();
+    let notifications_address = Address::new(
+        &our().node,
+        ProcessId::new(Some("notifications"), "distro", "sys"),
+    );
+
+    // Truncate message for notification
+    let truncated_content = if content.len() > 100 {
+        format!("{}...", &content[..97])
+    } else {
+        content.to_string()
+    };
+
+    let notification_action = NotificationsAction::SendNotification {
+        title: format!("{} in {}", sender, group_name),
+        body: truncated_content,
+        icon: Some("/icon-180.png".to_string()),
+        data: Some(serde_json::json!({
+            "url": format!("/chat#group:{}", group_id),
+            "group_id": group_id,
+            "sender": sender,
+            "appId": "chat:chat:ware.hypr",
+            "appLabel": "Chat"
+        })),
+    };
+
+    log_debug!("[NOTIFY] Sending group notification to notifications:distro:sys");
+    let request = Request::to(notifications_address.clone())
+        .body(serde_json::to_vec(&notification_action).unwrap())
+        .expects_response(5);
+
+    match send::<NotificationsResponse>(request).await {
+        Ok(resp) => {
+            log_debug!("Group push notification response: {:?}", resp);
+            match resp {
+                NotificationsResponse::NotificationSent => {
+                    log_debug!("Group push notification sent successfully");
+                }
+                NotificationsResponse::Err(e) => {
+                    log_debug!("Group notification server error: {}", e);
+                    // Handle invalid endpoint same as DM notifications
+                    if e.contains("EndpointNotValid") {
+                        if let Some(start) = e.find("https://") {
+                            if let Some(end) = e[start..].find(':') {
+                                let endpoint = &e[start..start + end];
+                                log_debug!("Removing invalid endpoint: {}", endpoint);
+                                let remove_action = NotificationsAction::RemoveSubscription {
+                                    endpoint: endpoint.to_string(),
+                                };
+                                let remove_request = Request::to(notifications_address.clone())
+                                    .body(serde_json::to_vec(&remove_action).unwrap())
+                                    .expects_response(5);
+                                spawn(async move {
+                                    let _ = send::<NotificationsResponse>(remove_request).await;
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    log_debug!("Unexpected group notification response");
+                }
+            }
+            log_debug!(
+                "[NOTIFY_DIAG] send_push_notification_for_group ok elapsed_ms={}",
+                notify_started.elapsed().as_millis()
+            );
+        }
+        Err(e) => {
+            log_debug!("Error sending group notification request: {:?}", e);
+            log_debug!(
+                "[NOTIFY_DIAG] send_push_notification_for_group err elapsed_ms={}",
+                notify_started.elapsed().as_millis()
+            );
+        }
+    }
+}
+
 // HYPERAPP IMPLEMENTATION
 
 #[hyperapp(
@@ -675,6 +764,24 @@ impl ChatState {
         Ok("Chat deleted".to_string())
     }
 
+    #[local]
+    #[http]
+    async fn update_chat_settings(
+        &mut self,
+        req: UpdateChatSettingsReq,
+    ) -> Result<Chat, String> {
+        let chat = self
+            .chats
+            .get_mut(&req.chat_id)
+            .ok_or_else(|| "Chat not found".to_string())?;
+
+        if let Some(notify) = req.notify {
+            chat.notify = notify;
+        }
+
+        Ok(chat.clone())
+    }
+
     // GROUP OPERATIONS
 
     // uncomment #[remote] for tests
@@ -689,6 +796,32 @@ impl ChatState {
     #[http]
     async fn list_groups(&self) -> Result<ListGroupsRes, String> {
         Ok(self.list_groups_state())
+    }
+
+    #[local]
+    #[http]
+    async fn update_group_settings(
+        &mut self,
+        req: UpdateGroupSettingsReq,
+    ) -> Result<GroupSummary, String> {
+        // Verify group exists
+        let group = self
+            .groups
+            .get(&req.group_id)
+            .ok_or_else(|| "Group not found".to_string())?;
+
+        if let Some(notify) = req.notify {
+            self.group_notify.insert(req.group_id.clone(), notify);
+        }
+
+        Ok(GroupSummary {
+            group_id: req.group_id.clone(),
+            metadata: group.metadata.clone(),
+            member_count: group.members.len(),
+            thread_count: group.threads.len(),
+            unread_count: self.group_unread.get(&req.group_id).copied().unwrap_or(0),
+            notify: self.group_notify.get(&req.group_id).copied().unwrap_or(true),
+        })
     }
 
     // uncomment #[remote] for tests
@@ -1694,14 +1827,21 @@ impl ChatState {
             self.broadcast_ws_message(&msg);
 
             // Send push notification if user has notifications enabled AND no active connections
-            if self
+            let chat_notify_enabled = self
                 .chats
                 .get(&chat_id)
                 .map(|chat| chat.notify)
-                .unwrap_or(true)
-                && self.settings.notify_chats
-                && self.active_connections.is_empty()
-            {
+                .unwrap_or(true);
+            let global_notify_enabled = self.settings.notify_chats;
+            let active_connection_count = self.active_connections.len();
+            log_debug!(
+                "[NOTIFY] chat_push_gate chat_id={} chat_notify={} global_notify={} active_connections={}",
+                chat_id,
+                chat_notify_enabled,
+                global_notify_enabled,
+                active_connection_count
+            );
+            if chat_notify_enabled && global_notify_enabled && active_connection_count == 0 {
                 let chat_id_for_push = chat_id.clone();
                 let message_for_push = message_for_events.clone();
                 spawn(async move {
@@ -1712,6 +1852,14 @@ impl ChatState {
                     )
                     .await;
                 });
+            } else {
+                log_debug!(
+                    "[NOTIFY] chat_push_skip chat_id={} chat_notify={} global_notify={} active_connections={}",
+                    chat_id,
+                    chat_notify_enabled,
+                    global_notify_enabled,
+                    active_connection_count
+                );
             }
         }
 
@@ -3464,7 +3612,73 @@ impl ChatState {
         manager.set_last_state_vector(new_vector.clone());
         self.update_local_hub_sync_state(group_id, &new_vector);
 
+        // Capture old message IDs before applying update
+        let old_message_ids: std::collections::HashSet<String> = self
+            .groups
+            .get(group_id)
+            .map(|g| g.messages.keys().cloned().collect())
+            .unwrap_or_default();
+
         group_state.apply_into(self);
+
+        // Detect new messages and handle notifications/unread counts
+        if let Some(group) = self.groups.get(group_id) {
+            let group_name = group
+                .metadata
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| "Group".to_string());
+            let our_node = our().node.clone();
+
+            // Find new messages from other users
+            let new_messages: Vec<_> = group
+                .messages
+                .values()
+                .filter(|m| !old_message_ids.contains(&m.message_id) && m.sender != our_node)
+                .collect();
+
+            if !new_messages.is_empty() {
+                // Increment unread count for this group
+                let unread_increment = new_messages.len() as u32;
+                *self.group_unread.entry(group_id.clone()).or_insert(0) += unread_increment;
+
+                // Send push notification if conditions are met
+                let group_notify_enabled = self.group_notify.get(group_id).copied().unwrap_or(true);
+                let global_notify_enabled = self.settings.notify_groups;
+                let active_connection_count = self.active_connections.len();
+                log_debug!(
+                    "[NOTIFY] group_push_gate group_id={} group_notify={} global_notify={} active_connections={}",
+                    group_id,
+                    group_notify_enabled,
+                    global_notify_enabled,
+                    active_connection_count
+                );
+                if global_notify_enabled
+                    && group_notify_enabled
+                    && active_connection_count == 0
+                {
+                    // Only notify for the most recent message to avoid spam
+                    if let Some(latest) = new_messages.iter().max_by_key(|m| m.timestamp) {
+                        let sender = latest.sender.clone();
+                        let content = latest.body.clone();
+                        let gid = group_id.clone();
+                        let gname = group_name.clone();
+                        spawn(async move {
+                            send_push_notification_for_group_message(&sender, &content, &gid, &gname)
+                                .await;
+                        });
+                    }
+                } else {
+                    log_debug!(
+                        "[NOTIFY] group_push_skip group_id={} group_notify={} global_notify={} active_connections={}",
+                        group_id,
+                        group_notify_enabled,
+                        global_notify_enabled,
+                        active_connection_count
+                    );
+                }
+            }
+        }
 
         // Notify browser clients so they can refresh group state after receiving remote updates.
         self.broadcast_ws_message(&WsServerMessage::GroupUpdate {

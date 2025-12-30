@@ -50,6 +50,12 @@ pub struct DeleteChatReq {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct UpdateChatSettingsReq {
+    pub chat_id: String,
+    pub notify: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SendMessageReq {
     pub chat_id: String,
     pub content: String,
@@ -235,6 +241,20 @@ pub struct GroupSummary {
     pub metadata: Option<GroupMetadata>,
     pub member_count: usize,
     pub thread_count: usize,
+    #[serde(default)]
+    pub unread_count: u32,
+    #[serde(default = "default_true")]
+    pub notify: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UpdateGroupSettingsReq {
+    pub group_id: GroupId,
+    pub notify: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

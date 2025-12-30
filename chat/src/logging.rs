@@ -5,7 +5,7 @@
 //! Use `log_debug!` for diagnostic messages that should only appear when verbose mode is on.
 
 /// Set to `true` to enable verbose debug logging, `false` to suppress.
-pub const VERBOSE: bool = false;
+pub const VERBOSE: bool = true;
 
 /// Log a debug message (only when VERBOSE is true).
 #[macro_export]

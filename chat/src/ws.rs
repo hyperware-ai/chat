@@ -37,6 +37,9 @@ impl ChatState {
                     chat.unread_count = 0;
                 }
             }
+            WsClientMessage::MarkGroupRead { group_id } => {
+                self.group_unread.insert(group_id, 0);
+            }
             WsClientMessage::UpdateStatus { status } => {
                 // Track whether this connection is active (user viewing the page)
                 if status == "active" {

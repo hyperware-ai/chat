@@ -11,6 +11,7 @@ const UnifiedMessages: React.FC = () => {
   const {
     groups,
     groupPreviews,
+    groupUnread,
     loadGroups,
     fetchReplicationState,
     openGroup,
@@ -98,7 +99,7 @@ const UnifiedMessages: React.FC = () => {
         threadPath,
         lastActivity,
         onClick: () => openGroup(group.group_id),
-        unread: 0,
+        unread: groupUnread[group.group_id] || 0,
       };
     });
 

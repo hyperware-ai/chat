@@ -269,6 +269,10 @@ pub struct ChatState {
     pub node_profiles: HashMap<String, UserProfile>,
     #[serde(default)]
     pub groups: HashMap<GroupId, Group>,
+    #[serde(default)]
+    pub group_unread: HashMap<GroupId, u32>,
+    #[serde(default)]
+    pub group_notify: HashMap<GroupId, bool>,
     #[serde(skip)]
     pub membership_rule_cache: HashMap<GroupId, Vec<MembershipRuleBox>>,
     #[serde(skip)]
@@ -313,6 +317,8 @@ impl Default for ChatState {
             active_connections: HashSet::new(),
             node_profiles: HashMap::new(),
             groups: HashMap::new(),
+            group_unread: HashMap::new(),
+            group_notify: HashMap::new(),
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
@@ -351,6 +357,10 @@ impl<'de> Deserialize<'de> for ChatState {
             #[serde(default)]
             groups: HashMap<GroupId, Group>,
             #[serde(default)]
+            group_unread: HashMap<GroupId, u32>,
+            #[serde(default)]
+            group_notify: HashMap<GroupId, bool>,
+            #[serde(default)]
             node_profiles: HashMap<String, UserProfile>,
         }
 
@@ -384,7 +394,7 @@ impl<'de> Deserialize<'de> for ChatState {
             V1(ChatStateSerdeV1),
         }
 
-        let (profile, chats, chat_keys, settings, message_sequence_counters, groups, node_profiles) =
+        let (profile, chats, chat_keys, settings, message_sequence_counters, groups, group_unread, group_notify, node_profiles) =
             match ChatStateCompat::deserialize(deserializer)? {
                 ChatStateCompat::V2(data) => (
                     data.profile,
@@ -393,6 +403,8 @@ impl<'de> Deserialize<'de> for ChatState {
                     data.settings,
                     data.message_sequence_counters,
                     data.groups,
+                    data.group_unread,
+                    data.group_notify,
                     data.node_profiles,
                 ),
                 ChatStateCompat::V1(data) => (
@@ -400,6 +412,8 @@ impl<'de> Deserialize<'de> for ChatState {
                     data.chats,
                     data.chat_keys,
                     data.settings,
+                    HashMap::new(),
+                    HashMap::new(),
                     HashMap::new(),
                     HashMap::new(),
                     data.node_profiles,
@@ -436,6 +450,8 @@ impl<'de> Deserialize<'de> for ChatState {
             active_connections: HashSet::new(),
             node_profiles,
             groups,
+            group_unread,
+            group_notify,
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
@@ -1001,6 +1017,8 @@ impl ChatState {
                 metadata: group.metadata.clone(),
                 member_count: group.members.len(),
                 thread_count: group.threads.len(),
+                unread_count: self.group_unread.get(group_id).copied().unwrap_or(0),
+                notify: self.group_notify.get(group_id).copied().unwrap_or(true),
             })
             .collect();
         ListGroupsRes { groups }

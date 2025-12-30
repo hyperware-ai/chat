@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { Chat } from '#caller-utils';
 import { GroupMessage, NormalizedGroup } from '../types/groups';
+import { useChatStore } from './chat';
 
 type BodyCache = Record<string, string>;
 type GroupPreview = {
@@ -249,6 +250,8 @@ interface DraftThread {
 interface GroupStore {
   groups: Chat.GroupSummary[];
   groupPreviews: Record<string, GroupPreview>;
+  groupUnread: Record<string, number>;
+  groupNotify: Record<string, boolean>;
   activeGroupId: string | null;
   activeGroup: NormalizedGroup | null;
   activeThreadId: string | null;
@@ -301,11 +304,15 @@ interface GroupStore {
   leaveGroup: () => Promise<Chat.MembershipDecision | null>;
   refreshGroupPreviews: (groupIds?: string[]) => Promise<void>;
   toggleReaction: (messageId: string, emoji: string) => Promise<void>;
+  markGroupAsRead: (groupId: string) => void;
+  updateGroupSettings: (groupId: string, settings: { notify?: boolean }) => Promise<void>;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
   groups: [],
   groupPreviews: {},
+  groupUnread: {},
+  groupNotify: {},
   activeGroupId: null,
   activeGroup: null,
   activeThreadId: null,
@@ -333,7 +340,17 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
         const bTs = b.metadata?.updated_at ?? 0;
         return bTs - aTs;
       });
-      set({ groups: sorted, error: null });
+      // Build groupUnread and groupNotify maps from API response
+      const groupUnread: Record<string, number> = {};
+      const groupNotify: Record<string, boolean> = {};
+      for (const g of sorted) {
+        if ((g as any).unread_count !== undefined) {
+          groupUnread[g.group_id] = (g as any).unread_count;
+        }
+        // Default to true if not specified
+        groupNotify[g.group_id] = (g as any).notify ?? true;
+      }
+      set({ groups: sorted, groupUnread, groupNotify, error: null });
       await get().refreshGroupPreviews(sorted.map((g) => g.group_id));
     } catch (error) {
       console.error('[GROUPS] Failed to load groups', error);
@@ -1007,5 +1024,34 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       }));
     }
     return decision;
+  },
+
+  markGroupAsRead: (groupId: string) => {
+    // Optimistically update local state
+    set((state) => ({
+      groupUnread: { ...state.groupUnread, [groupId]: 0 },
+    }));
+
+    // Send via WebSocket if connected
+    const ws = useChatStore.getState().wsConnection;
+    if (ws) {
+      ws.send({ MarkGroupRead: { group_id: groupId } });
+    }
+  },
+
+  updateGroupSettings: async (groupId: string, settings: { notify?: boolean }) => {
+    try {
+      const res = await Chat.update_group_settings({
+        group_id: groupId,
+        notify: settings.notify ?? null,
+      });
+
+      // Update local state with the response
+      set((state) => ({
+        groupNotify: { ...state.groupNotify, [groupId]: res.notify },
+      }));
+    } catch (error) {
+      console.error('[GROUPS] Failed to update group settings', error);
+    }
   },
 }));

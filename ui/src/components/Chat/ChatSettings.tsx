@@ -9,16 +9,15 @@ interface ChatSettingsProps {
 }
 
 const ChatSettings: React.FC<ChatSettingsProps> = ({ chat, onClose }) => {
-  const { deleteChat } = useChatStore();
+  const { deleteChat, updateChatSettings } = useChatStore();
 
   const handleBlockToggle = () => {
     // TODO: Implement block functionality
     console.log('Block toggle');
   };
 
-  const handleNotifyToggle = () => {
-    // TODO: Implement notify toggle
-    console.log('Notify toggle');
+  const handleNotifyToggle = async () => {
+    await updateChatSettings(chat.id, { notify: !chat.notify });
   };
 
   const handleDeleteChat = async () => {
