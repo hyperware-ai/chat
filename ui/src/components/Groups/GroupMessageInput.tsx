@@ -1,4 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
+import GroupFileUpload from './GroupFileUpload';
+import VoiceNote from '../Chat/VoiceNote';
+import { useGroupStore } from '../../store/groups';
 import './GroupMessageInput.css';
 
 interface ReplyingToMessage {
@@ -36,6 +39,120 @@ const GroupMessageInput: React.FC<GroupMessageInputProps> = ({
   const [message, setMessage] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  const [showFileUpload, setShowFileUpload] = useState(false);
+  const [showVoiceNote, setShowVoiceNote] = useState(false);
+  const {
+    activeGroupId,
+    activeThreadId,
+    draftThread,
+    createThread,
+    clearDraftThread,
+    setActiveThread,
+    refreshActiveGroup,
+  } = useGroupStore();
+
+  const buildApiUrl = (path: string) => {
+    const envBase = import.meta.env.BASE_URL;
+    let basePath = '';
+
+    if (envBase && envBase !== '/') {
+      basePath = envBase.endsWith('/') ? envBase.slice(0, -1) : envBase;
+    } else if ((window as any).our?.process) {
+      basePath = `/${(window as any).our.process}`;
+    }
+
+    if (basePath && path.startsWith(`${basePath}/`)) {
+      return path;
+    }
+
+    return `${basePath}${path}`;
+  };
+
+  const parseApiResponse = <T,>(response: any): T => {
+    if (response && typeof response === 'object') {
+      if ('Ok' in response && response.Ok !== undefined) {
+        return response.Ok as T;
+      }
+      if ('Err' in response && response.Err !== undefined) {
+        throw new Error(response.Err as string);
+      }
+    }
+    return response as T;
+  };
+
+  const sendGroupVoiceNote = async (payload: { base64: string; duration: number; mimeType: string }) => {
+    if (disabled) return;
+    if (!activeGroupId) {
+      throw new Error('No active group');
+    }
+
+    let threadId = activeThreadId;
+    const replyToId = replyingTo?.id ?? null;
+
+    const postVoiceNote = async (targetThreadId: string) => {
+      const response = await fetch(buildApiUrl('/api/send-group-voice-note'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          SendGroupVoiceNote: {
+            group_id: activeGroupId,
+            thread_id: targetThreadId,
+            reply_to: replyToId,
+            audio_data: payload.base64,
+            duration: payload.duration,
+            mime_type: payload.mimeType,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Voice note failed with status ${response.status}`);
+      }
+
+      const json = await response.json();
+      return parseApiResponse<{ message?: { message_id?: string } }>(json);
+    };
+
+    if (!threadId && draftThread) {
+      const parentThreadId = draftThread.parentThreadId;
+      if (!draftThread.rootMessageId && parentThreadId) {
+        const rootRes = await postVoiceNote(parentThreadId);
+        const rootMessageId = rootRes.message?.message_id;
+        if (rootMessageId) {
+          const title = `Voice note ${payload.duration}s`;
+          const newThreadId = await createThread(title, parentThreadId, rootMessageId);
+          if (newThreadId) {
+            clearDraftThread();
+            setActiveThread(newThreadId);
+          }
+        }
+        await refreshActiveGroup();
+        onCancelReply?.();
+        return;
+      }
+
+      const title = `Voice note ${payload.duration}s`;
+      const newThreadId = await createThread(
+        title,
+        parentThreadId,
+        draftThread.rootMessageId,
+      );
+      if (!newThreadId) {
+        throw new Error('Failed to create thread');
+      }
+      clearDraftThread();
+      setActiveThread(newThreadId);
+      threadId = newThreadId;
+    }
+
+    if (!threadId) {
+      throw new Error('Select a thread to share voice notes');
+    }
+
+    await postVoiceNote(threadId);
+    await refreshActiveGroup();
+    onCancelReply?.();
+  };
 
   useEffect(() => {
     if (!disabled) {
@@ -127,6 +244,28 @@ const GroupMessageInput: React.FC<GroupMessageInputProps> = ({
         <div className="group-input-warning">{disabledReason}</div>
       )}
       <div className={`group-input-row ${disabled ? 'disabled' : ''} ${editingMessage ? 'editing' : ''}`}>
+        {!editingMessage && (
+          <div className="group-actions">
+            <button
+              className="group-action-button"
+              type="button"
+              onClick={() => setShowFileUpload(true)}
+              disabled={disabled}
+              aria-label="Attach file"
+            >
+              📎
+            </button>
+            <button
+              className="group-action-button"
+              type="button"
+              onClick={() => setShowVoiceNote(true)}
+              disabled={disabled}
+              aria-label="Record voice note"
+            >
+              🎤
+            </button>
+          </div>
+        )}
         <textarea
           ref={inputRef}
           placeholder={editingMessage ? 'Edit your message…' : disabled ? 'Sending disabled' : 'Type a message…'}
@@ -145,6 +284,13 @@ const GroupMessageInput: React.FC<GroupMessageInputProps> = ({
           {editingMessage ? '✓' : '➤'}
         </button>
       </div>
+      {showFileUpload && <GroupFileUpload onClose={() => setShowFileUpload(false)} />}
+      {showVoiceNote && (
+        <VoiceNote
+          onClose={() => setShowVoiceNote(false)}
+          onSend={sendGroupVoiceNote}
+        />
+      )}
     </div>
   );
 };
