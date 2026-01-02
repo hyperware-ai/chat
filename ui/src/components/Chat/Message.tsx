@@ -21,6 +21,8 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
   const [swipeX, setSwipeX] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
   const { activeChat, settings, setReplyingTo } = useChatStore();
   const messageRef = useRef<HTMLDivElement>(null);
   const startXRef = useRef(0);
@@ -33,6 +35,14 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
     return () => {
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (audioUrlRef.current && audioUrlRef.current.startsWith('blob:')) {
+        URL.revokeObjectURL(audioUrlRef.current);
       }
     };
   }, []);
@@ -191,6 +201,89 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
     setMenuPosition({ x: rect.left, y: rect.top });
     setShowMenu(true);
   };
+
+  const isAudioMessage = Boolean(
+    message.file_info && message.message_type === Chat.MessageType.VoiceNote,
+  );
+
+  useEffect(() => {
+    if (!isAudioMessage || !message.file_info) {
+      if (audioUrlRef.current && audioUrlRef.current.startsWith('blob:')) {
+        URL.revokeObjectURL(audioUrlRef.current);
+      }
+      audioUrlRef.current = null;
+      setAudioUrl(null);
+      return;
+    }
+
+    const fileUrl = message.file_info.url;
+    if (fileUrl.startsWith('data:')) {
+      setAudioUrl(fileUrl);
+      return;
+    }
+
+    const fileRef = extractFileRef(fileUrl);
+    if (!fileRef) {
+      return;
+    }
+
+    let cancelled = false;
+    const fetchAudio = async () => {
+      try {
+        const response = await fetch(buildDownloadUrl('/api/download-file'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            DownloadFile: {
+              chat_id: fileRef.chatId,
+              file_id: fileRef.fileId,
+            },
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Download failed with status ${response.status}`);
+        }
+
+        const json = await response.json();
+        if (json && typeof json === 'object' && 'Err' in json) {
+          throw new Error((json as { Err: string }).Err);
+        }
+        const payload =
+          json && typeof json === 'object' && 'Ok' in json ? (json as { Ok: unknown }).Ok : json;
+        let mimeType = message.file_info?.mime_type || 'audio/webm';
+        let fileBytes: number[] | null = null;
+
+        if (Array.isArray(payload)) {
+          if (payload.length === 2 && typeof payload[0] === 'string' && Array.isArray(payload[1])) {
+            mimeType = payload[0];
+            fileBytes = payload[1] as number[];
+          } else if (payload.every((value) => typeof value === 'number')) {
+            fileBytes = payload as number[];
+          }
+        }
+
+        if (!fileBytes || cancelled) {
+          return;
+        }
+
+        const blob = new Blob([new Uint8Array(fileBytes)], { type: mimeType });
+        const objectUrl = URL.createObjectURL(blob);
+        if (audioUrlRef.current && audioUrlRef.current.startsWith('blob:')) {
+          URL.revokeObjectURL(audioUrlRef.current);
+        }
+        audioUrlRef.current = objectUrl;
+        setAudioUrl(objectUrl);
+      } catch (error) {
+        console.error('Failed to load audio:', error);
+      }
+    };
+
+    fetchAudio();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAudioMessage, message.file_info?.url, message.file_info?.mime_type, message.message_type]);
 
   // Swipe handlers for swipe-to-reply
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -531,7 +624,19 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
         
         <div className="message-content">
           {/* If this is a file/image message with file info, show it specially */}
-          {message.file_info && message.message_type === 'Image' && settings?.show_images ? (
+          {isAudioMessage && message.file_info ? (
+            <div className="dm-audio-wrapper">
+              {audioUrl ? (
+                <audio
+                  controls
+                  src={audioUrl}
+                  className="dm-audio-player"
+                />
+              ) : (
+                <div style={{ fontSize: '12px', opacity: 0.7 }}>Loading audio…</div>
+              )}
+            </div>
+          ) : message.file_info && message.message_type === 'Image' && settings?.show_images ? (
             <div>
               <img 
                 src={message.file_info.url} 

@@ -186,3 +186,21 @@
     transform: translateX(0);
   }
 }
+
+/* Voice note / audio player styles */
+.dm-audio-wrapper {
+  background: #2c2c2e;
+  border-radius: 12px;
+  padding: 8px 12px;
+  margin: 2px 0;
+}
+
+.dm-audio-player {
+  width: 100%;
+  min-width: 220px;
+  height: 32px;
+  border: none;
+  outline: none;
+  background: transparent;
+  display: block;
+}

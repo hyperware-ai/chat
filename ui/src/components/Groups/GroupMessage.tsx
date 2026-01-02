@@ -42,6 +42,7 @@ const formatFileSize = (bytes: number) => {
   return `${(bytes / 1024).toFixed(1)} KB`;
 };
 
+
 const buildApiUrl = (path: string) => {
   const envBase = import.meta.env.BASE_URL;
   let basePath = '';
@@ -112,8 +113,8 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
     const viewerId = currentNode ?? '';
     const { settings } = useChatStore();
     const { activeGroupId } = useGroupStore();
-    const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
-    const imageUrlsRef = useRef<Record<string, string>>({});
+    const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
+    const attachmentUrlsRef = useRef<Record<string, string>>({});
 
     const handleReaction = (emoji: string) => {
       if (onReact) {
@@ -255,7 +256,7 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
 
     useEffect(() => {
       return () => {
-        Object.values(imageUrlsRef.current).forEach((url) => {
+        Object.values(attachmentUrlsRef.current).forEach((url) => {
           if (url.startsWith('blob:')) {
             URL.revokeObjectURL(url);
           }
@@ -263,20 +264,31 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
       };
     }, []);
 
-    useEffect(() => {
-      if (!settings?.show_images || !activeGroupId) return;
-      const imageAttachments = message.attachments.filter((attachment) =>
-        attachment.mime_type?.startsWith('image/'),
-      );
+    const isVoiceNote = message.type === Chat.MessageType.VoiceNote;
 
-      imageAttachments.forEach(async (attachment) => {
-        if (imageUrlsRef.current[attachment.attachment_id]) {
+    useEffect(() => {
+      if (!activeGroupId) return;
+      const previewAttachments = message.attachments.filter((attachment) => {
+        if (attachment.mime_type?.startsWith('audio/')) {
+          return isVoiceNote;
+        }
+        if (attachment.mime_type?.startsWith('image/')) {
+          return settings?.show_images;
+        }
+        return false;
+      });
+
+      previewAttachments.forEach(async (attachment) => {
+        if (attachmentUrlsRef.current[attachment.attachment_id]) {
           return;
         }
 
         if (attachment.uri?.startsWith('data:')) {
-          imageUrlsRef.current[attachment.attachment_id] = attachment.uri;
-          setImageUrls((prev) => ({ ...prev, [attachment.attachment_id]: attachment.uri as string }));
+          attachmentUrlsRef.current[attachment.attachment_id] = attachment.uri;
+          setAttachmentUrls((prev) => ({
+            ...prev,
+            [attachment.attachment_id]: attachment.uri as string,
+          }));
           return;
         }
 
@@ -290,13 +302,13 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
             type: mimeType || attachment.mime_type || 'application/octet-stream',
           });
           const objectUrl = URL.createObjectURL(blob);
-          imageUrlsRef.current[attachment.attachment_id] = objectUrl;
-          setImageUrls((prev) => ({ ...prev, [attachment.attachment_id]: objectUrl }));
+          attachmentUrlsRef.current[attachment.attachment_id] = objectUrl;
+          setAttachmentUrls((prev) => ({ ...prev, [attachment.attachment_id]: objectUrl }));
         } catch (error) {
-          console.error('Failed to load group attachment image:', error);
+          console.error('Failed to load group attachment preview:', error);
         }
       });
-    }, [activeGroupId, fetchAttachmentBytes, message.attachments, settings?.show_images]);
+    }, [activeGroupId, fetchAttachmentBytes, isVoiceNote, message.attachments, settings?.show_images]);
 
     const renderMessageContent = useMemo(() => (
       <ReactMarkdown
@@ -478,7 +490,10 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
       'Attachment';
     const shouldRenderText =
       !hasAttachments ||
-      (message.content && message.content.trim() && message.content.trim() !== firstAttachmentLabel);
+      (!isVoiceNote &&
+        message.content &&
+        message.content.trim() &&
+        message.content.trim() !== firstAttachmentLabel);
     const attachmentLinkColor = isMine ? '#ffffff' : '#4da6ff';
 
     return (
@@ -503,7 +518,8 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
                 <div className="group-attachments">
                   {message.attachments.map((attachment) => {
                     const isImage = attachment.mime_type?.startsWith('image/');
-                    const previewUrl = imageUrls[attachment.attachment_id];
+                    const isAudio = isVoiceNote && attachment.mime_type?.startsWith('audio/');
+                    const previewUrl = attachmentUrls[attachment.attachment_id];
                     const filename = attachment.filename || attachment.attachment_id;
 
                     return (
@@ -519,24 +535,42 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
                         {isImage && settings?.show_images && !previewUrl && (
                           <div className="group-attachment-loading">Loading image…</div>
                         )}
-                        <a
-                          href={attachment.uri || '#'}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            handleAttachmentDownload(attachment);
-                          }}
-                          style={{
-                            color: attachmentLinkColor,
-                            textDecoration: 'underline',
-                            textUnderlineOffset: '2px',
-                            display: 'inline-block',
-                          }}
-                        >
-                          {filename}
-                        </a>
-                        <div className="group-attachment-size">
-                          {formatFileSize(attachment.size_bytes)}
-                        </div>
+                        {isAudio && previewUrl && (
+                          <div className="group-audio-wrapper">
+                            <audio
+                              controls
+                              src={previewUrl}
+                              className="group-attachment-audio"
+                            />
+                          </div>
+                        )}
+                        {isAudio && !previewUrl && (
+                          <div className="group-audio-wrapper">
+                            <div className="group-attachment-loading">Loading audio…</div>
+                          </div>
+                        )}
+                        {isAudio ? null : (
+                          <>
+                            <a
+                              href={attachment.uri || '#'}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleAttachmentDownload(attachment);
+                              }}
+                              style={{
+                                color: attachmentLinkColor,
+                                textDecoration: 'underline',
+                                textUnderlineOffset: '2px',
+                                display: 'inline-block',
+                              }}
+                            >
+                              {filename}
+                            </a>
+                            <div className="group-attachment-size">
+                              {formatFileSize(attachment.size_bytes)}
+                            </div>
+                          </>
+                        )}
                       </div>
                     );
                   })}

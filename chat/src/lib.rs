@@ -1619,6 +1619,74 @@ impl ChatState {
 
     // uncomment #[remote] for tests
     // #[remote]
+    #[http]
+    async fn send_group_voice_note(
+        &mut self,
+        req: SendGroupVoiceNoteReq,
+    ) -> Result<SendGroupMessageRes, String> {
+        let file_data = base64_decode(&req.audio_data)
+            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+        let file_size_mb = (file_data.len() as u64) / (1024 * 1024);
+        if file_size_mb > self.settings.max_file_size_mb {
+            return Err(format!(
+                "File size exceeds limit of {} MB",
+                self.settings.max_file_size_mb
+            ));
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let message_type = MessageType::VoiceNote;
+        let package_id = our().package_id();
+        let file_id = format!("{}_{}", timestamp, rand::random::<u32>());
+        let group_dir = req.group_id.replace(":", "_");
+        let file_url = format!("/files/{}/{}", group_dir, file_id);
+        let vfs_path = format!("/{}/files/{}/{}", package_id, group_dir, file_id);
+
+        let dir_path = format!("/{}/files/{}", package_id, group_dir);
+        let _ = vfs::open_dir(&dir_path, true, Some(5));
+
+        let file = vfs::create_file(&vfs_path, Some(5))
+            .map_err(|e| format!("Failed to create VFS file: {:?}", e))?;
+        file.write(&file_data)
+            .map_err(|e| format!("Failed to write to VFS: {:?}", e))?;
+
+        let extension = req
+            .mime_type
+            .split('/')
+            .nth(1)
+            .and_then(|ext| ext.split(';').next())
+            .unwrap_or("webm");
+        let filename = format!("voice_note_{}.{}", timestamp, extension);
+
+        let attachment = crate::crdt::AttachmentDescriptor {
+            attachment_id: file_id,
+            filename,
+            mime_type: req.mime_type.clone(),
+            size_bytes: file_data.len() as u64,
+            checksum: None,
+            uri: Some(file_url),
+        };
+
+        let content = format!("Voice note ({}s)", req.duration);
+        let send_req = SendGroupMessageReq {
+            group_id: req.group_id,
+            thread_id: req.thread_id,
+            content,
+            message_type,
+            reply_to: req.reply_to,
+            attachments: vec![attachment],
+        };
+
+        self.send_group_message_state(send_req)
+    }
+
+    // uncomment #[remote] for tests
+    // #[remote]
     #[http(method = "POST", path = "/api/download-group-file")]
     async fn download_group_file(&mut self, req: DownloadGroupFileReq) -> Result<Vec<u8>, String> {
         if req.group_id.contains('/') || req.group_id.contains("..") || req.attachment_id.contains('/')
@@ -1713,6 +1781,20 @@ impl ChatState {
     // #[remote]
     #[http]
     async fn send_voice_note(&mut self, req: SendVoiceNoteReq) -> Result<ChatMessage, String> {
+        let audio_bytes = base64_decode(&req.audio_data)
+            .map_err(|e| {
+                set_response_status(hyperware_process_lib::http::StatusCode::BAD_REQUEST);
+                format!("Failed to decode base64: {}", e)
+            })?;
+        let audio_size_mb = (audio_bytes.len() as u64) / (1024 * 1024);
+        if audio_size_mb > self.settings.max_file_size_mb {
+            set_response_status(hyperware_process_lib::http::StatusCode::PAYLOAD_TOO_LARGE);
+            return Err(format!(
+                "File size exceeds limit of {} MB",
+                self.settings.max_file_size_mb
+            ));
+        }
+
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1726,7 +1808,7 @@ impl ChatState {
         let file_info = FileInfo {
             filename: format!("voice_note_{}.webm", message_id),
             mime_type: "audio/webm".to_string(),
-            size: req.audio_data.len() as u64,
+            size: audio_bytes.len() as u64,
             url: file_url,
         };
 

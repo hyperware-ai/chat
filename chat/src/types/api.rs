@@ -163,6 +163,18 @@ pub struct SendVoiceNoteReq {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct SendGroupVoiceNoteReq {
+    pub group_id: GroupId,
+    #[serde(default)]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default)]
+    pub reply_to: Option<MessageId>,
+    pub audio_data: String,
+    pub duration: u32,
+    pub mime_type: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SearchChatsReq {
     pub query: String,
 }
