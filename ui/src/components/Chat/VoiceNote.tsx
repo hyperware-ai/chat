@@ -125,13 +125,16 @@ const VoiceNote: React.FC<VoiceNoteProps> = ({ onClose, onSend }) => {
         const blob = new Blob(chunksRef.current, {
           type: mimeTypeRef.current || 'audio/webm',
         });
+        stopTracks();
         resolve(blob);
       };
     });
 
+    if (recorder.state === 'recording') {
+      recorder.requestData();
+    }
     recorder.stop();
     clearTimer();
-    stopTracks();
     setIsRecording(false);
 
     const blob = await stopped;

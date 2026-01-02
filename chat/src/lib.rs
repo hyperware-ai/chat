@@ -50,7 +50,7 @@ pub mod test_exports {
     pub use crate::types::{BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask};
 }
 
-use crate::crdt::{GroupId, MembershipDecisionStatus, MembershipStatus};
+use crate::crdt::{GroupId, GroupPermissions, MembershipDecisionStatus, MembershipStatus};
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
 // Replication RPC timeout to keep admin/test calls responsive.
@@ -1536,7 +1536,22 @@ impl ChatState {
             return Err("Invalid file path".to_string());
         }
 
-        let chat_id = req.chat_id.replace(":", "_");
+        let caller = source().node.clone();
+        let chat = self.chats.get(&req.chat_id).or_else(|| {
+            self.chats
+                .values()
+                .find(|chat| chat.id.replace(":", "_") == req.chat_id)
+        });
+        let chat = chat.ok_or_else(|| {
+            set_response_status(hyperware_process_lib::http::StatusCode::NOT_FOUND);
+            "Chat not found".to_string()
+        })?;
+        if caller != our().node && caller != chat.counterparty {
+            set_response_status(hyperware_process_lib::http::StatusCode::FORBIDDEN);
+            return Err("unauthorized".to_string());
+        }
+
+        let chat_id = chat.id.replace(":", "_");
         let package_id = our().package_id();
         let vfs_path = format!("/{}/files/{}/{}", package_id, chat_id, req.file_id);
 
@@ -1560,6 +1575,17 @@ impl ChatState {
         &mut self,
         req: UploadGroupFileReq,
     ) -> Result<SendGroupMessageRes, String> {
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
+            .map_err(|err| {
+                set_response_status(hyperware_process_lib::http::StatusCode::FORBIDDEN);
+                format!("unauthorized: {}", err)
+            })?;
+        self.require_subscriber_access(&req.group_id, &our().node)
+            .map_err(|err| {
+                set_response_status(hyperware_process_lib::http::StatusCode::FORBIDDEN);
+                format!("unauthorized: {}", err)
+            })?;
+
         let file_data =
             base64_decode(&req.data).map_err(|e| format!("Failed to decode base64: {}", e))?;
 
@@ -1624,6 +1650,17 @@ impl ChatState {
         &mut self,
         req: SendGroupVoiceNoteReq,
     ) -> Result<SendGroupMessageRes, String> {
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::SEND_MESSAGES)
+            .map_err(|err| {
+                set_response_status(hyperware_process_lib::http::StatusCode::FORBIDDEN);
+                format!("unauthorized: {}", err)
+            })?;
+        self.require_subscriber_access(&req.group_id, &our().node)
+            .map_err(|err| {
+                set_response_status(hyperware_process_lib::http::StatusCode::FORBIDDEN);
+                format!("unauthorized: {}", err)
+            })?;
+
         let file_data = base64_decode(&req.audio_data)
             .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
@@ -1694,6 +1731,13 @@ impl ChatState {
             set_response_status(hyperware_process_lib::http::StatusCode::BAD_REQUEST);
             return Err("Invalid file path".to_string());
         }
+
+        let caller = source().node.clone();
+        self.require_subscriber_access(&req.group_id, &caller)
+            .map_err(|err| {
+                set_response_status(hyperware_process_lib::http::StatusCode::FORBIDDEN);
+                format!("unauthorized: {}", err)
+            })?;
 
         let group_dir = req.group_id.replace(":", "_");
         let package_id = our().package_id();

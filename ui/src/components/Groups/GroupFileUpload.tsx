@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import '../Chat/FileUpload.css';
 import { useGroupStore } from '../../store/groups';
 import { useChatStore } from '../../store/chat';
@@ -8,6 +8,7 @@ interface GroupFileUploadProps {
 }
 
 interface UploadStatus {
+  filename: string;
   progress: number;
   error?: string;
 }
@@ -60,18 +61,22 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
   const { settings } = useChatStore();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<Record<string, UploadStatus>>({});
-  const pendingUploadsRef = useRef(0);
 
-  const readFileAsBase64 = useCallback((file: File): Promise<string> => {
+  const readFileAsBase64 = useCallback((file: File, fileKey: string): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
+      const filename = file.name || 'attachment';
 
       reader.onprogress = (event) => {
         if (event.lengthComputable) {
           const percentComplete = (event.loaded / event.total) * 50;
           setUploadStatus((prev) => ({
             ...prev,
-            [file.name]: { ...prev[file.name], progress: percentComplete },
+            [fileKey]: {
+              filename,
+              progress: percentComplete,
+              error: prev[fileKey]?.error,
+            },
           }));
         }
       };
@@ -121,13 +126,13 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
   }, []);
 
   const uploadSingleFile = useCallback(
-    async (file: File, maxSizeBytes: number): Promise<boolean> => {
+    async (file: File, maxSizeBytes: number, fileKey: string): Promise<boolean> => {
       const filename = file.name || 'attachment';
 
       if (!activeGroupId) {
         setUploadStatus((prev) => ({
           ...prev,
-          [filename]: { progress: 0, error: 'No active group' },
+          [fileKey]: { filename, progress: 0, error: 'No active group' },
         }));
         return false;
       }
@@ -136,16 +141,16 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
         const maxMb = Math.round(maxSizeBytes / (1024 * 1024));
         setUploadStatus((prev) => ({
           ...prev,
-          [filename]: { progress: 0, error: `Exceeds ${maxMb}MB limit` },
+          [fileKey]: { filename, progress: 0, error: `Exceeds ${maxMb}MB limit` },
         }));
         return false;
       }
 
-      setUploadStatus((prev) => ({ ...prev, [filename]: { progress: 0 } }));
+      setUploadStatus((prev) => ({ ...prev, [fileKey]: { filename, progress: 0 } }));
 
       try {
-        const base64 = await readFileAsBase64(file);
-        setUploadStatus((prev) => ({ ...prev, [filename]: { progress: 50 } }));
+        const base64 = await readFileAsBase64(file, fileKey);
+        setUploadStatus((prev) => ({ ...prev, [fileKey]: { filename, progress: 50 } }));
 
         let threadId = activeThreadId;
         const replyToId = replyingTo?.id ?? null;
@@ -171,7 +176,7 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
                 setActiveThread(newThreadId);
               }
             }
-            setUploadStatus((prev) => ({ ...prev, [filename]: { progress: 100 } }));
+            setUploadStatus((prev) => ({ ...prev, [fileKey]: { filename, progress: 100 } }));
             return true;
           }
 
@@ -183,7 +188,7 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
           if (!newThreadId) {
             setUploadStatus((prev) => ({
               ...prev,
-              [filename]: { progress: 0, error: 'Failed to create thread' },
+              [fileKey]: { filename, progress: 0, error: 'Failed to create thread' },
             }));
             return false;
           }
@@ -195,19 +200,19 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
         if (!threadId) {
           setUploadStatus((prev) => ({
             ...prev,
-            [filename]: { progress: 0, error: 'Select a thread to share files' },
+            [fileKey]: { filename, progress: 0, error: 'Select a thread to share files' },
           }));
           return false;
         }
 
         await uploadFileToThread(activeGroupId, threadId, replyToId, file, base64);
-        setUploadStatus((prev) => ({ ...prev, [filename]: { progress: 100 } }));
+        setUploadStatus((prev) => ({ ...prev, [fileKey]: { filename, progress: 100 } }));
         return true;
       } catch (error) {
         console.error('Error uploading group file:', error);
         setUploadStatus((prev) => ({
           ...prev,
-          [filename]: { progress: 0, error: 'Upload failed' },
+          [fileKey]: { filename, progress: 0, error: 'Upload failed' },
         }));
         return false;
       }
@@ -230,13 +235,15 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
     if (!files || files.length === 0) return;
 
     const maxSizeBytes = (settings.max_file_size_mb || 10) * 1024 * 1024;
-    const fileArray = Array.from(files);
+    const fileArray = Array.from(files).map((file, index) => ({
+      file,
+      key: `${file.name || 'attachment'}-${file.lastModified}-${index}`,
+    }));
 
     setIsUploading(true);
-    pendingUploadsRef.current = fileArray.length;
 
     const results = await Promise.all(
-      fileArray.map((file) => uploadSingleFile(file, maxSizeBytes)),
+      fileArray.map(({ file, key }) => uploadSingleFile(file, maxSizeBytes, key)),
     );
 
     const hasSuccess = results.some(Boolean);
@@ -260,9 +267,9 @@ const GroupFileUpload: React.FC<GroupFileUploadProps> = ({ onClose }) => {
       <div className="file-upload-menu" onClick={(e) => e.stopPropagation()}>
         {Object.keys(uploadStatus).length > 0 && (
           <div className="upload-progress-container">
-            {Object.entries(uploadStatus).map(([filename, status]) => (
-              <div key={filename} className={`upload-progress-item ${status.error ? 'has-error' : ''}`}>
-                <div className="upload-filename">{filename}</div>
+            {Object.entries(uploadStatus).map(([fileKey, status]) => (
+              <div key={fileKey} className={`upload-progress-item ${status.error ? 'has-error' : ''}`}>
+                <div className="upload-filename">{status.filename}</div>
                 {status.error ? (
                   <div className="upload-error">{status.error}</div>
                 ) : (
