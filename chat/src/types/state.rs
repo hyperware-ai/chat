@@ -209,6 +209,95 @@ mod tests {
             Some("bob")
         );
     }
+
+    #[test]
+    fn legacy_invite_only_groups_deserialize_as_public() {
+        use serde::{Deserialize, Serialize};
+        use std::collections::HashMap;
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+        enum LegacyGroupVisibility {
+            Private,
+            InviteOnly,
+            Public,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+        struct LegacyGroupMetadata {
+            name: String,
+            description: Option<String>,
+            avatar: Option<String>,
+            creator_id: String,
+            created_at: u64,
+            updated_at: u64,
+            visibility: LegacyGroupVisibility,
+            default_role_id: String,
+            root_thread_id: String,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+        struct LegacyGroup {
+            #[serde(default)]
+            metadata: Option<LegacyGroupMetadata>,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+        struct LegacyChatStateV2 {
+            profile: UserProfile,
+            chats: HashMap<String, Chat>,
+            chat_keys: HashMap<String, ChatKey>,
+            settings: Settings,
+            message_sequence_counters: HashMap<String, u64>,
+            groups: HashMap<GroupId, LegacyGroup>,
+            group_unread: HashMap<GroupId, u32>,
+            group_notify: HashMap<GroupId, bool>,
+            node_profiles: HashMap<String, UserProfile>,
+        }
+
+        let group_id = "group:alice.node:123:0".to_string();
+        let legacy_group = LegacyGroup {
+            metadata: Some(LegacyGroupMetadata {
+                name: "Legacy Group".to_string(),
+                description: None,
+                avatar: None,
+                creator_id: "alice.node".to_string(),
+                created_at: 100,
+                updated_at: 200,
+                visibility: LegacyGroupVisibility::InviteOnly,
+                default_role_id: format!("{group_id}:member"),
+                root_thread_id: format!("{group_id}:thread:root"),
+            }),
+        };
+
+        let legacy = LegacyChatStateV2 {
+            profile: UserProfile {
+                name: "alice".to_string(),
+                profile_pic: None,
+            },
+            chats: HashMap::new(),
+            chat_keys: HashMap::new(),
+            settings: Settings::default(),
+            message_sequence_counters: HashMap::new(),
+            groups: HashMap::from([(group_id.clone(), legacy_group)]),
+            group_unread: HashMap::new(),
+            group_notify: HashMap::new(),
+            node_profiles: HashMap::new(),
+        };
+
+        let bytes = rmp_serde::to_vec(&legacy).expect("serialize legacy state via rmp");
+        let restored: ChatState = rmp_serde::from_slice(&bytes).expect("deserialize into new state");
+
+        let restored_group = restored
+            .groups
+            .get(&group_id)
+            .expect("group should deserialize");
+        let restored_visibility = restored_group
+            .metadata
+            .as_ref()
+            .map(|meta| meta.visibility);
+        assert_eq!(restored_visibility, Some(GroupVisibility::Public));
+        assert!(restored.group_join_keys.is_empty());
+    }
 }
 
 #[derive(Clone)]
@@ -370,6 +459,24 @@ impl<'de> Deserialize<'de> for ChatState {
         }
 
         #[derive(Deserialize)]
+        struct ChatStateSerdeV2Legacy {
+            profile: UserProfile,
+            chats: HashMap<String, Chat>,
+            chat_keys: HashMap<String, ChatKey>,
+            settings: Settings,
+            #[serde(default)]
+            message_sequence_counters: HashMap<String, u64>,
+            #[serde(default)]
+            groups: HashMap<GroupId, Group>,
+            #[serde(default)]
+            group_unread: HashMap<GroupId, u32>,
+            #[serde(default)]
+            group_notify: HashMap<GroupId, bool>,
+            #[serde(default)]
+            node_profiles: HashMap<String, UserProfile>,
+        }
+
+        #[derive(Deserialize)]
         #[allow(dead_code)]
         struct ChatStateSerdeV1 {
             profile: UserProfile,
@@ -396,6 +503,7 @@ impl<'de> Deserialize<'de> for ChatState {
         #[serde(untagged)]
         enum ChatStateCompat {
             V2(ChatStateSerdeV2),
+            V2Legacy(ChatStateSerdeV2Legacy),
             V1(ChatStateSerdeV1),
         }
 
@@ -417,6 +525,18 @@ impl<'de> Deserialize<'de> for ChatState {
                     data.chats,
                     data.chat_keys,
                     data.group_join_keys,
+                    data.settings,
+                    data.message_sequence_counters,
+                    data.groups,
+                    data.group_unread,
+                    data.group_notify,
+                    data.node_profiles,
+                ),
+                ChatStateCompat::V2Legacy(data) => (
+                    data.profile,
+                    data.chats,
+                    data.chat_keys,
+                    HashMap::new(),
                     data.settings,
                     data.message_sequence_counters,
                     data.groups,
@@ -477,11 +597,13 @@ impl<'de> Deserialize<'de> for ChatState {
             pubsub: PubSubRegistry::new(),
         };
 
-        if let Err(err) = state.rebuild_group_doc_managers() {
-            crate::log_debug!(
-                "Failed to rebuild group CRDT managers from snapshot: {:?}",
-                err
-            );
+        if !cfg!(test) {
+            if let Err(err) = state.rebuild_group_doc_managers() {
+                crate::log_debug!(
+                    "Failed to rebuild group CRDT managers from snapshot: {:?}",
+                    err
+                );
+            }
         }
 
         Ok(state)
