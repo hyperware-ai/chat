@@ -50,7 +50,9 @@ pub mod test_exports {
     pub use crate::types::{BrokerEnvelope, ChatState, ReplicationKind, ReplicationTask};
 }
 
-use crate::crdt::{GroupId, GroupPermissions, MembershipDecisionStatus, MembershipStatus};
+use crate::crdt::{
+    GroupId, GroupPermissions, GroupVisibility, MembershipDecisionStatus, MembershipStatus, NodeId,
+};
 
 const OUR_PROCESS_ID: (&str, &str, &str) = ("chat", "chat", "ware.hypr");
 // Replication RPC timeout to keep admin/test calls responsive.
@@ -824,6 +826,65 @@ impl ChatState {
         })
     }
 
+    #[http]
+    async fn create_group_join_link(
+        &mut self,
+        req: CreateGroupJoinLinkReq,
+    ) -> Result<CreateGroupJoinLinkRes, String> {
+        self.require_group_permission(&req.group_id, &our().node, GroupPermissions::INVITE_MEMBERS)
+            .map_err(|err| format!("cannot create join link: {}", err))?;
+
+        let visibility = self
+            .groups
+            .get(&req.group_id)
+            .and_then(|group| group.metadata.as_ref().map(|meta| meta.visibility))
+            .unwrap_or(GroupVisibility::Private);
+        if visibility != GroupVisibility::Public {
+            return Err("Group is not public".to_string());
+        }
+
+        for join_key in self.group_join_keys.values_mut() {
+            if join_key.group_id == req.group_id {
+                join_key.is_revoked = true;
+            }
+        }
+
+        let key = format!("{:x}", rand::random::<u128>());
+        let join_key = GroupJoinKey {
+            key: key.clone(),
+            group_id: req.group_id.clone(),
+            created_at: current_timestamp(),
+            is_revoked: false,
+        };
+        self.group_join_keys.insert(key.clone(), join_key);
+
+        let link = format!(
+            "hw://{}/join-group/{}/{}",
+            our().package_id(),
+            our().node,
+            key
+        );
+        Ok(CreateGroupJoinLinkRes { link })
+    }
+
+    #[http]
+    async fn join_group_link(&mut self, req: JoinGroupLinkReq) -> Result<JoinGroupLinkRes, String> {
+        if req.host == our().node {
+            return self.join_group_link_internal(req.key, our().node.clone());
+        }
+
+        let remote_req = JoinGroupLinkRemoteReq { key: req.key };
+        let body = serde_json::to_vec(&serde_json::json!({ "JoinGroupLinkRemote": remote_req }))
+            .map_err(|e| format!("Failed to encode join link request: {:?}", e))?;
+        let target = Address::from((req.host.as_str(), OUR_PROCESS_ID));
+
+        match send::<Result<JoinGroupLinkRes, String>>(Request::to(&target).body(body)).await {
+            Ok(Ok(res)) => Ok(res),
+            Ok(Err(err)) => Err(err),
+            Err(err) => Err(format!("Failed to join group: {:?}", err)),
+        }
+    }
+
     // uncomment #[remote] for tests
     // #[remote]
     #[http]
@@ -955,6 +1016,17 @@ impl ChatState {
             .remove_member(&req.group_id, our().node.clone(), req.member)
             .map_err(|err| err.to_string())?;
         Ok(MembershipDecisionRes { decision })
+    }
+
+    #[remote]
+    async fn join_group_link_remote(
+        &mut self,
+        req: JoinGroupLinkRemoteReq,
+    ) -> Result<JoinGroupLinkRes, String> {
+        let caller = source().node.clone();
+        let res = self.join_group_link_internal(req.key, caller.clone())?;
+        spawn_immediate_snapshot_push(res.group_id.clone(), caller);
+        Ok(res)
     }
 
     // uncomment #[remote] for tests
@@ -3098,6 +3170,26 @@ impl ChatState {
 
 // Helper methods (outside hyperapp impl)
 impl ChatState {
+    // GROUP OPERATIONS
+    fn join_group_link_internal(
+        &mut self,
+        key: String,
+        candidate: NodeId,
+    ) -> Result<JoinGroupLinkRes, String> {
+        let join_key = self
+            .group_join_keys
+            .get(&key)
+            .ok_or_else(|| "Join link not found".to_string())?;
+        if join_key.is_revoked {
+            return Err("Join link revoked".to_string());
+        }
+
+        let group_id = join_key.group_id.clone();
+        self.join_public_group(&group_id, candidate)
+            .map_err(|err| err.to_string())?;
+        Ok(JoinGroupLinkRes { group_id })
+    }
+
     // MESSAGE OPERATIONS
 
     /// MessageStatus lifecycle:

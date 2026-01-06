@@ -65,7 +65,7 @@ impl GroupMetadata {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GroupVisibility {
     Private,
-    InviteOnly,
+    #[serde(alias = "InviteOnly")]
     Public,
 }
 

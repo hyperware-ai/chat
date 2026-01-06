@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import './App.css';
 import './styles/button-selectable.css';
 import { useChatStore } from './store/chat';
@@ -6,6 +6,9 @@ import SplashScreen from './components/SplashScreen/SplashScreen';
 import ChatView from './components/Chat/ChatView';
 import { useGroupStore } from './store/groups';
 import GroupView from './components/Groups/GroupView';
+import GroupJoinModal from './components/Groups/GroupJoinModal';
+import { parseGroupJoinLink } from './utils/groupLinks';
+import type { GroupJoinTarget } from './utils/groupLinks';
 
 function App() {
   const { 
@@ -19,6 +22,7 @@ function App() {
     isLoading
   } = useChatStore();
   const { activeGroup, loadGroups, fetchReplicationState } = useGroupStore();
+  const [pendingJoin, setPendingJoin] = useState<GroupJoinTarget | null>(null);
 
   // Initialize on mount
   useEffect(() => {
@@ -32,6 +36,40 @@ function App() {
       fetchReplicationState(null);
     }
   }, [isConnected, loadGroups, fetchReplicationState]);
+
+  useEffect(() => {
+    const parsed = parseGroupJoinLink(window.location.pathname);
+    if (parsed) {
+      setPendingJoin(parsed);
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      const joinIndex = parts.indexOf('join-group');
+      if (joinIndex !== -1) {
+        const baseParts = parts.slice(0, joinIndex);
+        const basePath = baseParts.length ? `/${baseParts.join('/')}/` : '/';
+        window.history.replaceState(
+          {},
+          '',
+          `${basePath}${window.location.search}${window.location.hash}`,
+        );
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleLinkClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      const anchor = target?.closest('a');
+      const href = anchor?.getAttribute('href');
+      if (!href) return;
+      const parsed = parseGroupJoinLink(href);
+      if (!parsed) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPendingJoin(parsed);
+    };
+    document.addEventListener('click', handleLinkClick, true);
+    return () => document.removeEventListener('click', handleLinkClick, true);
+  }, []);
 
   // Show loading state only if we're truly loading (no cached data and no connection yet)
   // BUT: If we have chats from cache, skip the loading screen entirely
@@ -71,6 +109,14 @@ function App() {
 
       {/* Main app content */}
       {activeGroup ? <GroupView /> : activeChat ? <ChatView /> : <SplashScreen />}
+
+      {pendingJoin && (
+        <GroupJoinModal
+          host={pendingJoin.host}
+          keyValue={pendingJoin.key}
+          onClose={() => setPendingJoin(null)}
+        />
+      )}
     </div>
   );
 }

@@ -306,6 +306,8 @@ interface GroupStore {
   toggleReaction: (messageId: string, emoji: string) => Promise<void>;
   markGroupAsRead: (groupId: string) => void;
   updateGroupSettings: (groupId: string, settings: { notify?: boolean }) => Promise<void>;
+  createGroupJoinLink: (groupId: string) => Promise<string | null>;
+  joinGroupLink: (host: string, key: string) => Promise<string | null>;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
@@ -1052,6 +1054,33 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       }));
     } catch (error) {
       console.error('[GROUPS] Failed to update group settings', error);
+    }
+  },
+
+  createGroupJoinLink: async (groupId: string) => {
+    try {
+      const res = await Chat.create_group_join_link({ group_id: groupId });
+      return res.link;
+    } catch (error) {
+      console.error('[GROUPS] Failed to create join link', error);
+      set({ error: 'Failed to create join link' });
+      return null;
+    }
+  },
+
+  joinGroupLink: async (host: string, key: string) => {
+    try {
+      set({ isLoading: true });
+      const res = await Chat.join_group_link({ host, key });
+      await get().loadGroups();
+      await get().openGroup(res.group_id);
+      return res.group_id;
+    } catch (error) {
+      console.error('[GROUPS] Failed to join group', error);
+      set({ error: 'Failed to join group' });
+      return null;
+    } finally {
+      set({ isLoading: false });
     }
   },
 }));

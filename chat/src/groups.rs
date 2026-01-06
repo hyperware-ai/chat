@@ -1,8 +1,9 @@
 use crate::crdt::{
     compile_membership_rules, Group, GroupId, GroupMember, GroupPermissions, GroupTier,
-    MembershipActionKind, MembershipDecision, MembershipDecisionStatus, MembershipProposal,
-    MembershipRuleBox, MembershipRuleConfig, MembershipRuleError, MembershipStatus, MessageId,
-    MessageMeta, MessageReactionMeta, NodeId, SubscriberSyncState, ThreadId,
+    GroupVisibility, MembershipActionKind, MembershipDecision, MembershipDecisionStatus,
+    MembershipProposal, MembershipRuleBox, MembershipRuleConfig, MembershipRuleError,
+    MembershipStatus, MessageId, MessageMeta, MessageReactionMeta, NodeId, SubscriberSyncState,
+    ThreadId,
 };
 use crate::types::{
     active_member_count, aggregate_rule_decisions, current_timestamp, group_root_thread_id,
@@ -502,6 +503,64 @@ impl ChatState {
         };
         proposal.approvals.insert(proposal.proposer.clone());
         self.process_membership_proposal(group_id, proposal)
+    }
+
+    pub fn join_public_group(
+        &mut self,
+        group_id: &GroupId,
+        candidate: NodeId,
+    ) -> Result<(), crate::MembershipActionError> {
+        let now = current_timestamp();
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| crate::MembershipActionError::GroupNotFound(group_id.clone()))?;
+
+        if let Some(member) = group.members.get(&candidate) {
+            if member.status == MembershipStatus::Active {
+                return Ok(());
+            }
+        }
+
+        let visibility = group
+            .metadata
+            .as_ref()
+            .map(|meta| meta.visibility)
+            .unwrap_or(GroupVisibility::Private);
+        if visibility != GroupVisibility::Public {
+            return Err(crate::MembershipActionError::PermissionDenied(
+                "group is not public".to_string(),
+            ));
+        }
+
+        let default_role_id = group
+            .metadata
+            .as_ref()
+            .map(|meta| meta.default_role_id.clone())
+            .unwrap_or_else(|| format!("{group_id}:member"));
+
+        let entry = group
+            .members
+            .entry(candidate.clone())
+            .or_insert_with(|| {
+                GroupMember::new(
+                    candidate.clone(),
+                    default_role_id.clone(),
+                    MembershipStatus::Active,
+                    now,
+                )
+            });
+        entry.role_id = default_role_id;
+        entry.status = MembershipStatus::Active;
+        entry.last_activity = now;
+
+        if let Some(meta) = group.metadata.as_mut() {
+            meta.updated_at = now;
+        }
+
+        sync_member_membership_sets(group, &candidate, now);
+        self.commit_group_crdt_or_log(group_id, "join_public_group");
+        Ok(())
     }
 
     fn evaluate_membership(

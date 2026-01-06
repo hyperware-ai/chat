@@ -218,16 +218,6 @@ const GroupView: React.FC = () => {
                     ? 'Enable Notifications'
                     : 'Mute Notifications'}
                 </button>
-{/* Settings option hidden for now - keeping wiring for future use
-                <button
-                  onClick={() => {
-                    setShowMenu(false);
-                    setShowSettings(true);
-                  }}
-                >
-                  Settings
-                </button>
-*/}
               </div>
             </>
           )}

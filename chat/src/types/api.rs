@@ -305,6 +305,32 @@ pub struct ListGroupsRes {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct CreateGroupJoinLinkReq {
+    pub group_id: GroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CreateGroupJoinLinkRes {
+    pub link: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JoinGroupLinkReq {
+    pub host: NodeId,
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JoinGroupLinkRemoteReq {
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JoinGroupLinkRes {
+    pub group_id: GroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct InviteGroupMemberReq {
     pub group_id: GroupId,
     pub candidate: NodeId,

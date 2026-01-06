@@ -216,7 +216,7 @@ pub struct DeliveryTx {
     sender: UnboundedSender<QueuedDelivery>,
 }
 
-/// Persisted fields: profile, chats, chat_keys, settings, message_sequence_counters, groups.
+/// Persisted fields: profile, chats, chat_keys, group_join_keys, settings, message_sequence_counters, groups.
 /// Runtime-only state (connections, heartbeats, channels, replication queues, caches, pubsub) is
 /// skipped during serialization and rebuilt on startup.
 #[derive(Serialize)]
@@ -224,6 +224,8 @@ pub struct ChatState {
     pub profile: UserProfile,
     pub chats: HashMap<String, Chat>,
     pub chat_keys: HashMap<String, ChatKey>,
+    #[serde(default)]
+    pub group_join_keys: HashMap<String, GroupJoinKey>,
     pub settings: Settings,
     #[serde(default)]
     pub message_sequence_counters: HashMap<String, u64>,
@@ -293,6 +295,7 @@ impl Default for ChatState {
             profile: UserProfile::default(),
             chats: HashMap::new(),
             chat_keys: HashMap::new(),
+            group_join_keys: HashMap::new(),
             settings: Settings::default(),
             message_sequence_counters: HashMap::new(),
             delivery_tx,
@@ -351,6 +354,8 @@ impl<'de> Deserialize<'de> for ChatState {
             profile: UserProfile,
             chats: HashMap<String, Chat>,
             chat_keys: HashMap<String, ChatKey>,
+            #[serde(default)]
+            group_join_keys: HashMap<String, GroupJoinKey>,
             settings: Settings,
             #[serde(default)]
             message_sequence_counters: HashMap<String, u64>,
@@ -394,12 +399,24 @@ impl<'de> Deserialize<'de> for ChatState {
             V1(ChatStateSerdeV1),
         }
 
-        let (profile, chats, chat_keys, settings, message_sequence_counters, groups, group_unread, group_notify, node_profiles) =
+        let (
+            profile,
+            chats,
+            chat_keys,
+            group_join_keys,
+            settings,
+            message_sequence_counters,
+            groups,
+            group_unread,
+            group_notify,
+            node_profiles,
+        ) =
             match ChatStateCompat::deserialize(deserializer)? {
                 ChatStateCompat::V2(data) => (
                     data.profile,
                     data.chats,
                     data.chat_keys,
+                    data.group_join_keys,
                     data.settings,
                     data.message_sequence_counters,
                     data.groups,
@@ -411,6 +428,7 @@ impl<'de> Deserialize<'de> for ChatState {
                     data.profile,
                     data.chats,
                     data.chat_keys,
+                    HashMap::new(),
                     data.settings,
                     HashMap::new(),
                     HashMap::new(),
@@ -427,6 +445,7 @@ impl<'de> Deserialize<'de> for ChatState {
             profile,
             chats,
             chat_keys,
+            group_join_keys,
             settings,
             message_sequence_counters,
             delivery_tx,

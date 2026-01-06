@@ -343,6 +343,14 @@ pub struct ChatKey {
     pub chat_id: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupJoinKey {
+    pub key: String,
+    pub group_id: GroupId,
+    pub created_at: u64,
+    pub is_revoked: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct UserProfile {
     pub name: String,

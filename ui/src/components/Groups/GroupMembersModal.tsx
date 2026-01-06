@@ -74,6 +74,7 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     refreshActiveGroup,
     removeMember,
     leaveGroup,
+    createGroupJoinLink,
   } = useGroupStore();
   const [candidate, setCandidate] = useState('');
   const [roleId, setRoleId] = useState<string | null>(null);
@@ -81,6 +82,9 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [busyMember, setBusyMember] = useState<string | null>(null);
   const [leaveBusy, setLeaveBusy] = useState(false);
+  const [joinLink, setJoinLink] = useState<string | null>(null);
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const [isCreatingLink, setIsCreatingLink] = useState(false);
 
   const currentNode = (window as any).our?.node || null;
   if (!activeGroup) return null;
@@ -92,6 +96,8 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     myRole &&
     hasGroupPermission(myRole.permissions as unknown as number, 'INVITE_MEMBERS');
   const canRemove = canInvite;
+  const isPublic = activeGroup.metadata.visibility === Chat.GroupVisibility.Public;
+  const visibilityLabel = isPublic ? 'Public' : 'Private';
 
   const roles = useMemo(() => Array.from(activeGroup.roles.values()), [activeGroup.roles]);
   const defaultRoleId =
@@ -175,6 +181,24 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
     onClose();
   };
 
+  const handleCreateLink = async () => {
+    if (!isPublic || !canInvite) return;
+    setIsCreatingLink(true);
+    setJoinError(null);
+    const link = await createGroupJoinLink(activeGroup.id);
+    if (link) {
+      setJoinLink(link);
+    } else {
+      setJoinError('Failed to create join link.');
+    }
+    setIsCreatingLink(false);
+  };
+
+  const handleCopyLink = () => {
+    if (!joinLink) return;
+    navigator.clipboard.writeText(joinLink).catch(() => {});
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content members-modal" onClick={(e) => e.stopPropagation()}>
@@ -189,6 +213,7 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
           <div className="members-section">
             <div className="members-section-header">
               <h4>People ({sortedMembers.length})</h4>
+              <span className="members-visibility">Visibility: {visibilityLabel}</span>
             </div>
             <div className="members-list">
               {sortedMembers.map(([node, member]) => {
@@ -235,6 +260,46 @@ const GroupMembersModal: React.FC<GroupMembersModalProps> = ({ onClose }) => {
                 );
               })}
             </div>
+            {isPublic && (
+              <div className="members-join-link">
+                <div className="members-join-header">
+                  <h4>Join link</h4>
+                  <span className="members-hint">
+                    Anyone with this link can join as a member.
+                  </span>
+                </div>
+                <div className="join-link-actions">
+                  <div className="join-link-row">
+                    <button
+                      className="join-link-button"
+                      onClick={handleCreateLink}
+                      disabled={!canInvite || isCreatingLink}
+                    >
+                      {isCreatingLink ? 'Creating…' : 'Create join link'}
+                    </button>
+                    {!canInvite && (
+                      <span className="join-link-note">
+                        You do not have permission to create join links.
+                      </span>
+                    )}
+                  </div>
+                  {joinLink && (
+                    <div className="join-link-display">
+                      <input
+                        type="text"
+                        value={joinLink}
+                        readOnly
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
+                      />
+                      <button className="join-link-button secondary" onClick={handleCopyLink}>
+                        Copy
+                      </button>
+                    </div>
+                  )}
+                  {joinError && <div className="join-link-error">{joinError}</div>}
+                </div>
+              </div>
+            )}
           </div>
 
           {canInvite && (
