@@ -517,6 +517,11 @@ impl ChatState {
             .ok_or_else(|| crate::MembershipActionError::GroupNotFound(group_id.clone()))?;
 
         if let Some(member) = group.members.get(&candidate) {
+            if member.status == MembershipStatus::Removed {
+                return Err(crate::MembershipActionError::PermissionDenied(
+                    "member was removed from group".to_string(),
+                ));
+            }
             if member.status == MembershipStatus::Active {
                 return Ok(());
             }
@@ -538,6 +543,10 @@ impl ChatState {
             .as_ref()
             .map(|meta| meta.default_role_id.clone())
             .unwrap_or_else(|| format!("{group_id}:member"));
+
+        let invite_proposal_id =
+            membership_proposal_key(group_id, &candidate, MembershipActionKind::Invite);
+        group.membership_proposals.remove(&invite_proposal_id);
 
         let entry = group
             .members
