@@ -15,6 +15,11 @@
   align-self: flex-start;
 }
 
+.message.official-message .message-content {
+  box-shadow: 0 0 0 1px rgba(45, 118, 255, 0.35),
+    0 0 12px rgba(45, 118, 255, 0.25);
+}
+
 .reply-to {
   background: rgba(0, 0, 0, 0.05);
   border-radius: 8px;
