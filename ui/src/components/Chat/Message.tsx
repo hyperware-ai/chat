@@ -25,6 +25,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
   const audioUrlRef = useRef<string | null>(null);
   const { activeChat, settings, setReplyingTo } = useChatStore();
   const messageRef = useRef<HTMLDivElement>(null);
+  const isOfficial = message.sender === 'dao.hypr';
   const startXRef = useRef(0);
   const startYRef = useRef(0);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -590,7 +591,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       <div 
         ref={messageRef}
         id={`message-${message.id}`}
-        className={`message ${isOwn ? 'own' : 'other'} ${isSwiping ? 'swiping' : ''}`}
+        className={`message ${isOwn ? 'own' : 'other'} ${isOfficial ? 'official-message' : ''} ${isSwiping ? 'swiping' : ''}`}
         onContextMenu={handleLongPress}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
@@ -621,7 +622,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
             </div>
           </div>
         )}
-        
+
         <div className="message-content">
           {/* If this is a file/image message with file info, show it specially */}
           {isAudioMessage && message.file_info ? (
