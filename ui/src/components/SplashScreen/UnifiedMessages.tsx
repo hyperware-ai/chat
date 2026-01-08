@@ -178,6 +178,8 @@ const UnifiedMessages: React.FC = () => {
         threadPath: null as string | null,
         lastActivity,
         unread: chat.unread_count,
+        isOfficial: chat.counterparty === 'dao.hypr',
+        meta: undefined,
         onClick: () => setActiveChat(chat),
       };
     });
@@ -318,7 +320,7 @@ const UnifiedMessages: React.FC = () => {
               unifiedItems.map((item) => (
                 <button
                   key={item.id}
-                  className={`unified-item ${item.kind}`}
+                  className={`unified-item ${item.kind} ${'isOfficial' in item && item.isOfficial ? 'official-chat' : ''}`}
                   onClick={item.onClick}
                 >
                   <div className="unified-avatar" aria-hidden="true">
@@ -326,7 +328,12 @@ const UnifiedMessages: React.FC = () => {
                   </div>
                   <div className="unified-item-body">
                     <div className="unified-item-row">
-                      <div className="unified-item-title">{item.title}</div>
+                      <div className="unified-item-title">
+                        {item.title}
+                        {'isOfficial' in item && item.isOfficial ? (
+                          <span className="official-badge">official</span>
+                        ) : null}
+                      </div>
                       <div className="unified-item-meta">
                         {item.lastActivity ? (
                           <span className="unified-time">

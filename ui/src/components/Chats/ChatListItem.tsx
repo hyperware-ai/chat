@@ -10,6 +10,7 @@ interface ChatListItemProps {
 
 const ChatListItem: React.FC<ChatListItemProps> = ({ chat }) => {
   const { setActiveChat } = useChatStore();
+  const isOfficial = chat.counterparty === 'dao.hypr';
   
   const getLastMessage = () => {
     if (chat.messages.length === 0) return 'No messages yet';
@@ -35,15 +36,24 @@ const ChatListItem: React.FC<ChatListItemProps> = ({ chat }) => {
   };
 
   return (
-    <div className="chat-list-item" onClick={() => setActiveChat(chat)}>
-      <Avatar 
-        name={chat.counterparty} 
-        profilePic={chat.counterparty_profile?.profile_pic}
-      />
+    <div
+      className={`chat-list-item ${isOfficial ? 'official-chat' : ''}`}
+      onClick={() => setActiveChat(chat)}
+    >
+      <div className="chat-avatar-wrap">
+        <Avatar
+          name={chat.counterparty}
+          profilePic={chat.counterparty_profile?.profile_pic}
+        />
+        {isOfficial && <span className="official-glow" aria-hidden="true" />}
+      </div>
       
       <div className="chat-info">
         <div className="chat-header">
-          <span className="chat-name">{chat.counterparty}</span>
+          <span className="chat-name">
+            {chat.counterparty}
+            {isOfficial && <span className="official-badge">official</span>}
+          </span>
           <span className="chat-time">{formatTime(chat.last_activity)}</span>
         </div>
         <div className="chat-preview">

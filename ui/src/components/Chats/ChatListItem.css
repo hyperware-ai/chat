@@ -9,6 +9,26 @@
   transition: background 0.2s;
 }
 
+.chat-avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.official-chat .chat-avatar-wrap {
+  filter: drop-shadow(0 0 8px rgba(45, 118, 255, 0.45));
+}
+
+.official-glow {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(45, 118, 255, 0.45),
+    0 0 14px rgba(45, 118, 255, 0.55);
+  pointer-events: none;
+}
+
 .chat-list-item:active {
   background: var(--surface);
 }
@@ -29,6 +49,21 @@
   font-weight: 500;
   font-size: 16px;
   color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.official-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #2d76ff, #6dd5ff);
+  color: #fff;
+  box-shadow: 0 0 8px rgba(45, 118, 255, 0.45);
 }
 
 .chat-time {
