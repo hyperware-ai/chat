@@ -11,6 +11,7 @@ use crate::crdt::{
     SubscriberSyncState, Thread, ThreadParentRef,
 };
 use crate::pubsub::PubSubRegistry;
+use crate::search::SearchIndex;
 use hyperware_crdt::yrs::Encode;
 use hyperware_crdt::CommitteeError;
 use hyperware_process_lib::our;
@@ -365,6 +366,8 @@ pub struct ChatState {
     #[serde(default)]
     pub group_notify: HashMap<GroupId, bool>,
     #[serde(skip)]
+    pub(crate) search_index: SearchIndex,
+    #[serde(skip)]
     pub membership_rule_cache: HashMap<GroupId, Vec<MembershipRuleBox>>,
     #[serde(skip)]
     pub group_doc_managers: HashMap<GroupId, GroupCrdtManager>,
@@ -411,6 +414,7 @@ impl Default for ChatState {
             groups: HashMap::new(),
             group_unread: HashMap::new(),
             group_notify: HashMap::new(),
+            search_index: SearchIndex::default(),
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
@@ -591,6 +595,7 @@ impl<'de> Deserialize<'de> for ChatState {
             groups,
             group_unread,
             group_notify,
+            search_index: SearchIndex::default(),
             membership_rule_cache: HashMap::new(),
             group_doc_managers: HashMap::new(),
             groups_pending_bootstrap: HashSet::new(),
@@ -684,6 +689,30 @@ impl ChatState {
             self.pubsub.rebuild_group(group_id, group);
         } else {
             self.pubsub.remove_group(group_id);
+        }
+    }
+
+    pub fn rebuild_search_index(&mut self) {
+        let our_node = our().node.clone();
+        self.search_index
+            .rebuild(&self.chats, &self.groups, &our_node);
+    }
+
+    pub fn rebuild_chat_search(&mut self, chat_id: &str) {
+        if let Some(chat) = self.chats.get(chat_id) {
+            self.search_index.rebuild_chat(chat_id, chat);
+        } else {
+            self.search_index.remove_chat(chat_id);
+        }
+    }
+
+    pub fn rebuild_group_search(&mut self, group_id: &GroupId) {
+        let our_node = our().node.clone();
+        if let Some(group) = self.groups.get(group_id) {
+            self.search_index
+                .rebuild_group(group_id, group, &our_node);
+        } else {
+            self.search_index.remove_group(group_id);
         }
     }
 
@@ -1136,6 +1165,7 @@ impl ChatState {
         self.groups.insert(group_id.clone(), group);
         self.mark_group_bootstrapped(&group_id);
         self.commit_group_crdt_or_log(&group_id, "create_group");
+        self.rebuild_group_search(&group_id);
 
         Ok(CreateGroupRes { group_id })
     }

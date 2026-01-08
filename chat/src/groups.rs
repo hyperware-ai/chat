@@ -202,6 +202,7 @@ impl ChatState {
             message
         };
         self.commit_group_crdt_or_log(&req.group_id, "send_group_message");
+        self.rebuild_group_search(&req.group_id);
         Ok(crate::SendGroupMessageRes { message })
     }
 
@@ -233,6 +234,7 @@ impl ChatState {
         };
 
         self.commit_group_crdt_or_log(&req.group_id, "edit_group_message");
+        self.rebuild_group_search(&req.group_id);
         Ok(crate::SendGroupMessageRes { message: updated })
     }
 
@@ -273,6 +275,7 @@ impl ChatState {
         }
 
         self.commit_group_crdt_or_log(&req.group_id, "delete_group_message");
+        self.rebuild_group_search(&req.group_id);
         Ok("Message deleted".to_string())
     }
 
@@ -463,6 +466,7 @@ impl ChatState {
             ));
             sync_member_membership_sets(group, &target, now);
             self.commit_group_crdt_or_log(group_id, "leave_group");
+            self.rebuild_group_search(group_id);
             return Ok(MembershipDecision::approved());
         }
 
@@ -569,6 +573,7 @@ impl ChatState {
 
         sync_member_membership_sets(group, &candidate, now);
         self.commit_group_crdt_or_log(group_id, "join_public_group");
+        self.rebuild_group_search(group_id);
         Ok(())
     }
 
@@ -751,6 +756,7 @@ impl ChatState {
         let now = current_timestamp();
         self.apply_membership_decision(group_id, proposal, &decision, now)?;
         self.commit_group_crdt_or_log(group_id, "membership_proposal");
+        self.rebuild_group_search(group_id);
         Ok(decision)
     }
 }

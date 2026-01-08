@@ -40,6 +40,8 @@ const GroupView: React.FC = () => {
     markGroupAsRead,
     groupNotify,
     updateGroupSettings,
+    jumpToMessageId,
+    setJumpToMessageId,
   } = useGroupStore();
   const { nodeId } = useChatStore();
   const [showMembers, setShowMembers] = useState(false);
@@ -270,6 +272,8 @@ const GroupView: React.FC = () => {
               onEdit={editMessage}
               onDelete={deleteMessage}
               onReact={handleReact}
+              jumpToMessageId={jumpToMessageId}
+              onJumpComplete={() => setJumpToMessageId(null)}
             />
           </div>
         </div>

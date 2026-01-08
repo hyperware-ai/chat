@@ -22,6 +22,7 @@ interface ChatStore {
   editingMessage: { id: string; content: string } | null; // Message being edited
   tempIdToRealId: { [tempId: string]: string }; // Map temp IDs to real message IDs
   pendingMessageHashes: { [hash: string]: string }; // Map content hashes to temp IDs for deduplication
+  jumpToMessageId: string | null;
   
   // Actions
   initialize: () => Promise<void>;
@@ -41,6 +42,11 @@ interface ChatStore {
   updateSettings: (settings: api.Settings) => Promise<void>;
   updateProfile: (profile: api.UserProfile) => Promise<void>;
   searchChats: (query: string) => Promise<api.Chat[]>;
+  searchIndex: (
+    query: string,
+    options?: { scope?: api.SearchScope; limit?: number }
+  ) => Promise<api.SearchResultItem[]>;
+  setJumpToMessageId: (messageId: string | null) => void;
   setActiveChat: (chat: api.Chat | null) => void;
   markChatAsRead: (chatId: string) => Promise<void>;
   connectWebSocket: () => void;
@@ -95,6 +101,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   editingMessage: null,
   tempIdToRealId: {},
   pendingMessageHashes: {},
+  jumpToMessageId: null,
 
   // Initialize the app
   initialize: async () => {
@@ -739,9 +746,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
+  // Search index (chats + groups)
+  searchIndex: async (query: string, options = {}) => {
+    try {
+      const res = await api.search_index({
+        query,
+        scope: options.scope ?? api.SearchScope.All,
+        limit: options.limit ?? null,
+      });
+      return res.results ?? [];
+    } catch (error) {
+      set({ error: 'Failed to search' });
+      return [];
+    }
+  },
+
+  setJumpToMessageId: (messageId: string | null) => set({ jumpToMessageId: messageId }),
+
   // Set active chat
   setActiveChat: (chat: api.Chat | null) => {
-    set({ activeChat: chat });
+    set({ activeChat: chat, jumpToMessageId: chat ? get().jumpToMessageId : null });
     // Save active chat ID to IndexedDB
     if (chat) {
       idbStorage.saveMetadata('activeChatId', chat.id);

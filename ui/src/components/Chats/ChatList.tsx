@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Chat as api } from '#caller-utils';
 import { useChatStore } from '../../store/chat';
 import ChatListItem from './ChatListItem';
 import ChatSearch from './ChatSearch';
@@ -7,18 +8,44 @@ import NewChatModal from './NewChatModal';
 import './ChatList.css';
 
 const ChatList: React.FC = () => {
-  const { chats, searchChats } = useChatStore();
+  const { chats, searchIndex } = useChatStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewChat, setShowNewChat] = useState(false);
   const [filteredChats, setFilteredChats] = useState(chats);
 
   useEffect(() => {
-    if (searchQuery) {
-      searchChats(searchQuery).then(setFilteredChats);
-    } else {
-      setFilteredChats(chats);
-    }
-  }, [searchQuery, chats, searchChats]);
+    let cancelled = false;
+
+    const runSearch = async () => {
+      if (!searchQuery.trim()) {
+        setFilteredChats(chats);
+        return;
+      }
+      const results = await searchIndex(searchQuery, {
+        scope: api.SearchScope.Chats,
+        limit: 100,
+      });
+      if (cancelled) return;
+
+      const rankByChat = new Map<string, number>();
+      results.forEach((result, idx) => {
+        if (result.chat_id && !rankByChat.has(result.chat_id)) {
+          rankByChat.set(result.chat_id, idx);
+        }
+      });
+
+      const matches = chats.filter((chat) => rankByChat.has(chat.id));
+      matches.sort(
+        (a, b) => (rankByChat.get(a.id) ?? 0) - (rankByChat.get(b.id) ?? 0),
+      );
+      setFilteredChats(matches);
+    };
+
+    runSearch();
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery, chats, searchIndex]);
 
   return (
     <div className="chat-list-container">

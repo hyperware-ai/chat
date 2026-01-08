@@ -266,6 +266,7 @@ interface GroupStore {
   isSyncing: boolean;
   error: string | null;
   messageBodies: BodyCache;
+  jumpToMessageId: string | null;
   loadGroups: () => Promise<void>;
   openGroup: (groupId: string) => Promise<void>;
   refreshActiveGroup: () => Promise<void>;
@@ -308,6 +309,7 @@ interface GroupStore {
   updateGroupSettings: (groupId: string, settings: { notify?: boolean }) => Promise<void>;
   createGroupJoinLink: (groupId: string) => Promise<string | null>;
   joinGroupLink: (host: string, key: string) => Promise<string | null>;
+  setJumpToMessageId: (messageId: string | null) => void;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
@@ -329,6 +331,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
   isSyncing: false,
   error: null,
   messageBodies: loadBodyCache(),
+  jumpToMessageId: null,
 
   loadGroups: async () => {
     try {
@@ -537,7 +540,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       draftThread: null,
       replyingTo: null,
       isSyncing: false,
+      jumpToMessageId: null,
     }),
+
+  setJumpToMessageId: (messageId: string | null) => set({ jumpToMessageId: messageId }),
 
   setReplyingTo: (message) => set({ replyingTo: message }),
 

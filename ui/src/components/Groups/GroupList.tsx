@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { Chat as api } from '#caller-utils';
 import { useGroupStore } from '../../store/groups';
 import { useChatStore } from '../../store/chat';
 import GroupListItem from './GroupListItem';
@@ -16,9 +17,10 @@ const GroupList: React.FC = () => {
     error,
     fetchReplicationState,
   } = useGroupStore();
-  const { connectionStatus } = useChatStore();
+  const { connectionStatus, searchIndex } = useChatStore();
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const [filteredGroups, setFilteredGroups] = useState(groups);
 
   useEffect(() => {
     if (connectionStatus === 'connected') {
@@ -27,15 +29,41 @@ const GroupList: React.FC = () => {
     }
   }, [connectionStatus]);
 
-  const filteredGroups = useMemo(() => {
-    if (!search) return groups;
-    const term = search.toLowerCase();
-    return groups.filter((group) => {
-      const name = group.metadata?.name?.toLowerCase() || '';
-      const desc = group.metadata?.description?.toLowerCase() || '';
-      return name.includes(term) || desc.includes(term);
-    });
-  }, [groups, search]);
+  useEffect(() => {
+    let cancelled = false;
+
+    const runSearch = async () => {
+      if (!search.trim()) {
+        setFilteredGroups(groups);
+        return;
+      }
+      const results = await searchIndex(search, {
+        scope: api.SearchScope.Groups,
+        limit: 100,
+      });
+      if (cancelled) return;
+
+      const rankByGroup = new Map<string, number>();
+      results.forEach((result, idx) => {
+        if (result.group_id && !rankByGroup.has(result.group_id)) {
+          rankByGroup.set(result.group_id, idx);
+        }
+      });
+
+      const matches = groups.filter((group) => rankByGroup.has(group.group_id));
+      matches.sort(
+        (a, b) =>
+          (rankByGroup.get(a.group_id) ?? 0) -
+          (rankByGroup.get(b.group_id) ?? 0),
+      );
+      setFilteredGroups(matches);
+    };
+
+    runSearch();
+    return () => {
+      cancelled = true;
+    };
+  }, [search, groups, searchIndex]);
 
   return (
     <div className="group-list-container">

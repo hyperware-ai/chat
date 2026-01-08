@@ -38,6 +38,7 @@ mod groups;
 pub mod logging;
 mod pubsub;
 mod replication;
+mod search;
 mod types;
 mod ws;
 
@@ -529,6 +530,8 @@ impl ChatState {
             start_replication_scheduler(wake_rx);
         }
 
+        self.rebuild_search_index();
+
         log_debug!(
             "Chat app initialized on node: {} with {} chats",
             our().node,
@@ -564,7 +567,8 @@ impl ChatState {
             counterparty_profile,
         };
 
-        self.chats.insert(chat_id, chat.clone());
+        self.chats.insert(chat_id.clone(), chat.clone());
+        self.rebuild_chat_search(&chat_id);
 
         // Notify the counterparty about the chat creation and our profile asynchronously
         let target = Address::from((req.counterparty.as_str(), OUR_PROCESS_ID));
@@ -763,6 +767,7 @@ impl ChatState {
             .remove(&req.chat_id)
             .ok_or_else(|| "Chat not found".to_string())?;
         self.message_sequence_counters.remove(&req.chat_id);
+        self.rebuild_chat_search(&req.chat_id);
         Ok("Chat deleted".to_string())
     }
 
@@ -1043,6 +1048,7 @@ impl ChatState {
     async fn edit_message(&mut self, req: EditMessageReq) -> Result<String, String> {
         let mut broadcast_update: Option<WsServerMessage> = None;
         let mut remote_edit: Option<(String, String, String, String)> = None;
+        let mut needs_rebuild = false;
 
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == req.message_id) {
@@ -1050,6 +1056,7 @@ impl ChatState {
                     return Ok("Ignoring edit for remote message".to_string());
                 }
                 message.content = req.new_content.clone();
+                needs_rebuild = true;
                 broadcast_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
                 remote_edit = Some((
                     chat.counterparty.clone(),
@@ -1058,6 +1065,10 @@ impl ChatState {
                     req.new_content.clone(),
                 ));
             }
+        }
+
+        if needs_rebuild {
+            self.rebuild_chat_search(&req.chat_id);
         }
 
         if let Some(update) = &broadcast_update {
@@ -1095,6 +1106,7 @@ impl ChatState {
     async fn delete_message(&mut self, req: DeleteMessageReq) -> Result<String, String> {
         let mut chat_update: Option<WsServerMessage> = None;
         let mut deletion_notice: Option<(String, String, String, bool)> = None;
+        let mut needs_rebuild = false;
 
         if let Some(chat) = self.chats.get_mut(&req.chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == req.message_id) {
@@ -1104,10 +1116,15 @@ impl ChatState {
                 let delete_for_both = req.delete_for_both.unwrap_or(false);
 
                 chat.messages.remove(pos);
+                needs_rebuild = true;
 
                 chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
                 deletion_notice = Some((counterparty, message_id, chat_id, delete_for_both));
             }
+        }
+
+        if needs_rebuild {
+            self.rebuild_chat_search(&req.chat_id);
         }
 
         if let Some(update) = &chat_update {
@@ -1230,6 +1247,7 @@ impl ChatState {
             chat.last_activity = timestamp;
             (chat.counterparty.clone(), chat.clone())
         };
+        self.rebuild_chat_search(&chat_id);
 
         // Send to counterparty if it's a node-to-node chat
         if !chat_id.starts_with("browser:") {
@@ -1992,6 +2010,7 @@ impl ChatState {
             };
 
             self.chats.insert(chat_id.clone(), chat.clone());
+            self.rebuild_chat_search(&chat_id);
             log_debug!("receive_chat_creation: Created chat {}", chat_id);
             created_chat = true;
 
@@ -2244,7 +2263,9 @@ impl ChatState {
             }
         }
 
-        if state_changed {}
+        if state_changed {
+            self.rebuild_chat_search(&chat_id);
+        }
 
         // Send acknowledgment back to sender using generated RPC
         let sender = message.sender.clone();
@@ -2418,6 +2439,7 @@ impl ChatState {
             }
         }
         let mut chat_update: Option<WsServerMessage> = None;
+        let mut needs_rebuild = false;
 
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
@@ -2429,8 +2451,13 @@ impl ChatState {
                     return Err("receive_message_edit rejected unauthorized edit".to_string());
                 }
                 message.content = new_content;
+                needs_rebuild = true;
                 chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
             }
+        }
+
+        if needs_rebuild {
+            self.rebuild_chat_search(&chat_id);
         }
 
         if let Some(update) = chat_update {
@@ -2518,6 +2545,7 @@ impl ChatState {
         );
 
         let mut chat_update: Option<WsServerMessage> = None;
+        let mut needs_rebuild = false;
 
         if let Some(chat) = self.chats.get_mut(&chat_id) {
             if let Some(pos) = chat.messages.iter().position(|m| m.id == message_id) {
@@ -2529,9 +2557,14 @@ impl ChatState {
                     return Err("receive_message_deletion rejected unauthorized delete".to_string());
                 }
                 chat.messages.remove(pos);
+                needs_rebuild = true;
                 log_debug!("Deleted message {} from chat {}", message_id, chat_id);
                 chat_update = Some(WsServerMessage::ChatUpdate(chat.clone()));
             }
+        }
+
+        if needs_rebuild {
+            self.rebuild_chat_search(&chat_id);
         }
 
         if let Some(update) = chat_update {
@@ -2665,6 +2698,14 @@ impl ChatState {
             .collect();
 
         Ok(results)
+    }
+
+    #[http]
+    async fn search_index(&self, req: SearchIndexReq) -> Result<SearchIndexRes, String> {
+        let results = self
+            .search_index
+            .search(&req.query, req.scope, req.limit);
+        Ok(SearchIndexRes { results })
     }
 
     // uncomment #[remote] for tests
@@ -3220,6 +3261,7 @@ impl ChatState {
 
             chat.clone()
         };
+        self.rebuild_chat_search(chat_id);
 
         let counterparty = chat_snapshot.counterparty.clone();
         let stored_message = chat_snapshot
@@ -4045,6 +4087,7 @@ impl ChatState {
             .unwrap_or_default();
 
         group_state.apply_into(self);
+        self.rebuild_group_search(group_id);
 
         // Detect new messages and handle notifications/unread counts
         if let Some(group) = self.groups.get(group_id) {

@@ -179,6 +179,60 @@ pub struct SearchChatsReq {
     pub query: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    Chats,
+    Groups,
+    Messages,
+    All,
+}
+
+impl Default for SearchScope {
+    fn default() -> Self {
+        SearchScope::All
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchResultKind {
+    ChatSummary,
+    ChatMessage,
+    GroupSummary,
+    GroupMessage,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchIndexReq {
+    pub query: String,
+    #[serde(default)]
+    pub scope: SearchScope,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchResultItem {
+    pub kind: SearchResultKind,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<GroupId>,
+    #[serde(default)]
+    pub message_id: Option<MessageId>,
+    #[serde(default)]
+    pub thread_id: Option<ThreadId>,
+    pub title: String,
+    #[serde(default)]
+    pub snippet: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchIndexRes {
+    pub results: Vec<SearchResultItem>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateGroupReq {
     #[serde(default)]
