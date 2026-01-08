@@ -1,37 +1,57 @@
+@import '../../styles/message-bubble.css';
+
 .group-message {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: flex-start;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 .group-message.mine {
+  flex-direction: row-reverse;
+}
+
+.group-message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  max-width: 75%;
+}
+
+.group-message.mine .group-message-content {
   align-items: flex-end;
 }
 
-.group-message-sender {
-  font-size: 12px;
-  color: var(--text-secondary);
-  padding-left: 6px;
+/* Avatar - shows on last message of group */
+.group-message-avatar {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  align-self: flex-end;
 }
 
+/* Spacer when no avatar - keeps messages aligned */
+.group-message-avatar-spacer {
+  width: 32px;
+  flex-shrink: 0;
+}
+
+/* Sender name - shows on first message of group */
+.group-message-sender {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding-left: 2px;
+  margin-bottom: 2px;
+}
+
+/* Bubble - extends shared .message-bubble styles */
 .group-message-bubble {
-  max-width: 85%;
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: var(--message-other, #e5e5ea);
-  color: var(--text-primary);
-  border: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  position: relative;
-}
-
-.group-message.mine .group-message-bubble {
-  background: var(--message-own, #007aff);
-  color: white;
-  border-color: transparent;
 }
 
 .group-message-text {
@@ -59,23 +79,6 @@
   display: block;
 }
 
-.group-audio-wrapper {
-  background: #2c2c2e;
-  border-radius: 12px;
-  padding: 8px 12px;
-  margin: 2px 0;
-}
-
-.group-attachment-audio {
-  width: 100%;
-  min-width: 220px;
-  height: 32px;
-  border: none;
-  outline: none;
-  background: transparent;
-  display: block;
-}
-
 .group-attachment-loading {
   font-size: 12px;
   opacity: 0.7;
@@ -84,17 +87,6 @@
 .group-attachment-size {
   font-size: 12px;
   opacity: 0.8;
-}
-
-
-.group-message-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12px;
-  color: inherit;
-  opacity: 0.8;
-  gap: 8px;
 }
 
 .group-message-status {
@@ -121,13 +113,12 @@
   cursor: default;
 }
 
-.group-message-reactions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
+/* Highlight animation */
+.group-message.highlight {
+  animation: message-highlight-pulse 2s ease-out;
 }
 
+/* Thread indicator (group-specific) */
 .group-message-thread-indicator {
   display: flex;
   align-items: center;
@@ -188,70 +179,4 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 150px;
-}
-
-/* Reply preview */
-.group-message-reply-to {
-  max-width: 85%;
-  background: rgba(128, 128, 128, 0.1);
-  border-radius: 8px;
-  padding: 6px 10px;
-  margin-bottom: 4px;
-  border-left: 3px solid var(--primary-color, #007aff);
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.group-message-reply-to:hover {
-  background: rgba(128, 128, 128, 0.18);
-}
-
-.group-message.mine .group-message-reply-to {
-  align-self: flex-end;
-  background: rgba(255, 255, 255, 0.15);
-  border-left-color: rgba(255, 255, 255, 0.5);
-}
-
-.group-message.mine .group-message-reply-to:hover {
-  background: rgba(255, 255, 255, 0.25);
-}
-
-.group-message-reply-label {
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-bottom: 2px;
-  font-weight: 500;
-}
-
-.group-message.mine .group-message-reply-label {
-  color: rgba(255, 255, 255, 0.8);
-}
-
-.group-message-reply-content {
-  font-size: 13px;
-  color: var(--text-primary);
-  opacity: 0.8;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 200px;
-}
-
-.group-message.mine .group-message-reply-content {
-  color: white;
-  opacity: 0.9;
-}
-
-/* Highlight animation for scrolled-to messages */
-.group-message.highlight .group-message-bubble {
-  animation: highlight-pulse 2s ease-out;
-}
-
-@keyframes highlight-pulse {
-  0% {
-    box-shadow: 0 0 0 3px var(--primary-color, #007aff);
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent;
-  }
 }

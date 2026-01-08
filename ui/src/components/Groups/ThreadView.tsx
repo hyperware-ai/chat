@@ -116,6 +116,20 @@ const ThreadView: React.FC<ThreadViewProps> = ({
     return messages.filter((m) => m.threadId === threadId);
   }, [messages, threadId]);
 
+  // Compute message grouping info for consecutive messages from same sender
+  const messageGroupInfo = useMemo(() => {
+    const info = new Map<string, { isFirstFromSender: boolean; isLastFromSender: boolean }>();
+    filtered.forEach((msg, idx) => {
+      const prev = filtered[idx - 1];
+      const next = filtered[idx + 1];
+      info.set(msg.id, {
+        isFirstFromSender: !prev || prev.sender !== msg.sender,
+        isLastFromSender: !next || next.sender !== msg.sender,
+      });
+    });
+    return info;
+  }, [filtered]);
+
   const rootMessage = useMemo(() => {
     if (!threadMeta?.root_message_id) return null;
     return messages.find((m) => m.id === threadMeta.root_message_id) || null;
@@ -367,6 +381,8 @@ const ThreadView: React.FC<ThreadViewProps> = ({
               isActiveThread={false}
               childThread={messageToChildThread.get(msg.id) || null}
               allMessages={messages}
+              isFirstFromSender={messageGroupInfo.get(msg.id)?.isFirstFromSender}
+              isLastFromSender={messageGroupInfo.get(msg.id)?.isLastFromSender}
             />
           ))
         )}
