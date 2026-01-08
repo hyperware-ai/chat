@@ -153,6 +153,7 @@ impl ChatState {
                             chat.last_activity = timestamp;
                             chat.unread_count += 1;
                         }
+                        self.rebuild_chat_search(&chat_id);
 
                         // Send message to all participants
                         let msg = WsServerMessage::NewMessage(message);

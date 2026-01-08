@@ -179,6 +179,60 @@ pub struct SearchChatsReq {
     pub query: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    Chats,
+    Groups,
+    Messages,
+    All,
+}
+
+impl Default for SearchScope {
+    fn default() -> Self {
+        SearchScope::All
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchResultKind {
+    ChatSummary,
+    ChatMessage,
+    GroupSummary,
+    GroupMessage,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchIndexReq {
+    pub query: String,
+    #[serde(default)]
+    pub scope: SearchScope,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchResultItem {
+    pub kind: SearchResultKind,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub group_id: Option<GroupId>,
+    #[serde(default)]
+    pub message_id: Option<MessageId>,
+    #[serde(default)]
+    pub thread_id: Option<ThreadId>,
+    pub title: String,
+    #[serde(default)]
+    pub snippet: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchIndexRes {
+    pub results: Vec<SearchResultItem>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CreateGroupReq {
     #[serde(default)]
@@ -302,6 +356,32 @@ pub struct UpdateGroupSettingsReq {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ListGroupsRes {
     pub groups: Vec<GroupSummary>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CreateGroupJoinLinkReq {
+    pub group_id: GroupId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CreateGroupJoinLinkRes {
+    pub link: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JoinGroupLinkReq {
+    pub host: NodeId,
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JoinGroupLinkRemoteReq {
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JoinGroupLinkRes {
+    pub group_id: GroupId,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

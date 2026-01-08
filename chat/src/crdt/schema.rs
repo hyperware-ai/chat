@@ -30,6 +30,7 @@ pub struct GroupMetadata {
     pub creator_id: String,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default)]
     pub visibility: GroupVisibility,
     pub default_role_id: String,
     pub root_thread_id: ThreadId,
@@ -65,7 +66,7 @@ impl GroupMetadata {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GroupVisibility {
     Private,
-    InviteOnly,
+    #[serde(alias = "InviteOnly")]
     Public,
 }
 

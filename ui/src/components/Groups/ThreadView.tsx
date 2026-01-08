@@ -45,6 +45,8 @@ interface ThreadViewProps {
   onEdit?: (messageId: string, newContent: string) => void;
   onDelete?: (messageId: string) => void;
   onReact?: (messageId: string, emoji: string) => void;
+  jumpToMessageId?: string | null;
+  onJumpComplete?: () => void;
 }
 
 const ThreadView: React.FC<ThreadViewProps> = ({
@@ -68,12 +70,17 @@ const ThreadView: React.FC<ThreadViewProps> = ({
   onEdit,
   onDelete,
   onReact,
+  jumpToMessageId,
+  onJumpComplete,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
   const prevMessageCountRef = useRef<number>(0);
   const isNearBottomRef = useRef<boolean>(true);
+  const jumpAttemptsRef = useRef<number>(0);
+  const pendingThreadRef = useRef<string | null>(null);
+  const prevThreadIdRef = useRef<string | null>(null);
 
   const threadMeta = useMemo(() => threads.find((t) => t.id === threadId), [threads, threadId]);
   const threadMap = useMemo(() => {
@@ -142,19 +149,79 @@ const ThreadView: React.FC<ThreadViewProps> = ({
 
     // Only scroll if messages were added (not on refresh with same count)
     // and user is near the bottom
+    if (jumpToMessageId) {
+      prevMessageCountRef.current = newCount;
+      return;
+    }
     if (newCount > prevCount && isNearBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
 
     prevMessageCountRef.current = newCount;
-  }, [filtered.length]);
+  }, [filtered.length, jumpToMessageId]);
 
   // Reset scroll state and scroll to bottom when switching threads
   useEffect(() => {
+    if (threadId === prevThreadIdRef.current) {
+      return;
+    }
+    prevThreadIdRef.current = threadId;
     isNearBottomRef.current = true;
     prevMessageCountRef.current = filtered.length;
-    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
-  }, [threadId]);
+    if (!jumpToMessageId) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+    }
+  }, [threadId, filtered.length, jumpToMessageId]);
+
+  useEffect(() => {
+    if (!jumpToMessageId) {
+      jumpAttemptsRef.current = 0;
+      pendingThreadRef.current = null;
+      return;
+    }
+    const messageId = jumpToMessageId;
+    const targetMessage = messages.find((msg) => msg.id === messageId);
+    if (targetMessage && targetMessage.threadId !== threadId) {
+      if (pendingThreadRef.current !== targetMessage.threadId) {
+        pendingThreadRef.current = targetMessage.threadId;
+        onOpenThread(targetMessage.threadId);
+      }
+      return;
+    }
+    pendingThreadRef.current = null;
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const attempt = () => {
+      if (cancelled) return;
+      const element =
+        messageRefs.current.get(messageId) ||
+        document.getElementById(`group-message-${messageId}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        element.classList.add('highlight');
+        window.setTimeout(() => element.classList.remove('highlight'), 2000);
+        jumpAttemptsRef.current = 0;
+        onJumpComplete?.();
+        return;
+      }
+
+      jumpAttemptsRef.current += 1;
+      if (jumpAttemptsRef.current < 10) {
+        timer = window.setTimeout(attempt, 100);
+      } else {
+        jumpAttemptsRef.current = 0;
+        onJumpComplete?.();
+      }
+    };
+
+    timer = window.setTimeout(attempt, 50);
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [jumpToMessageId, filtered.length, messages, threadId, onJumpComplete, onOpenThread]);
 
   const registerMessageRef = (id: string, el: HTMLDivElement | null) => {
     if (!el) {

@@ -40,6 +40,8 @@ const GroupView: React.FC = () => {
     markGroupAsRead,
     groupNotify,
     updateGroupSettings,
+    jumpToMessageId,
+    setJumpToMessageId,
   } = useGroupStore();
   const { nodeId } = useChatStore();
   const [showMembers, setShowMembers] = useState(false);
@@ -218,16 +220,6 @@ const GroupView: React.FC = () => {
                     ? 'Enable Notifications'
                     : 'Mute Notifications'}
                 </button>
-{/* Settings option hidden for now - keeping wiring for future use
-                <button
-                  onClick={() => {
-                    setShowMenu(false);
-                    setShowSettings(true);
-                  }}
-                >
-                  Settings
-                </button>
-*/}
               </div>
             </>
           )}
@@ -280,6 +272,8 @@ const GroupView: React.FC = () => {
               onEdit={editMessage}
               onDelete={deleteMessage}
               onReact={handleReact}
+              jumpToMessageId={jumpToMessageId}
+              onJumpComplete={() => setJumpToMessageId(null)}
             />
           </div>
         </div>

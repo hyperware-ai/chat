@@ -11,7 +11,9 @@ const ChatView: React.FC = () => {
     activeChat,
     markChatAsRead,
     setActiveChat,
-    forceSyncChat
+    forceSyncChat,
+    jumpToMessageId,
+    setJumpToMessageId
   } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -24,6 +26,8 @@ const ChatView: React.FC = () => {
   const startYRef = useRef(0);
   const lastScrollTopRef = useRef(0);
   const isAtBottomRef = useRef(false);
+  const prevMessageCountRef = useRef(0);
+  const prevChatIdRef = useRef<string | null>(null);
   const touchStartYRef = useRef(0);
   const chatViewRef = useRef<HTMLDivElement>(null);
 
@@ -35,8 +39,44 @@ const ChatView: React.FC = () => {
   }, [activeChat, markChatAsRead]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeChat?.messages]);
+    if (!activeChat) return;
+    const messageCount = activeChat.messages.length;
+    const chatChanged = activeChat.id !== prevChatIdRef.current;
+
+    if (jumpToMessageId) {
+      prevMessageCountRef.current = messageCount;
+      prevChatIdRef.current = activeChat.id;
+      return;
+    }
+
+    if (chatChanged) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+    } else if (
+      messageCount > prevMessageCountRef.current &&
+      isAtBottomRef.current
+    ) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    prevMessageCountRef.current = messageCount;
+    prevChatIdRef.current = activeChat.id;
+  }, [activeChat?.id, activeChat?.messages.length, jumpToMessageId]);
+
+  useEffect(() => {
+    if (!activeChat || !jumpToMessageId) return;
+    const messageId = jumpToMessageId;
+    const timer = window.setTimeout(() => {
+      const element = document.getElementById(`message-${messageId}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        element.classList.add('highlight');
+        window.setTimeout(() => element.classList.remove('highlight'), 2000);
+      }
+      setJumpToMessageId(null);
+    }, 50);
+
+    return () => window.clearTimeout(timer);
+  }, [activeChat?.id, activeChat?.messages.length, jumpToMessageId, setJumpToMessageId]);
 
   // Check if scrolled to bottom for scroll button and sync trigger
   useEffect(() => {

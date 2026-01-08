@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Chat as api } from '#caller-utils';
 import { useChatStore } from '../../store/chat';
 import { useGroupStore } from '../../store/groups';
 import ChatSearch from '../Chats/ChatSearch';
@@ -6,8 +7,19 @@ import NewChatModal from '../Chats/NewChatModal';
 import GroupCreateModal from '../Groups/GroupCreateModal';
 import './UnifiedMessages.css';
 
+type UnifiedItem = {
+  id: string;
+  kind: 'dm' | 'group';
+  title: string;
+  subtitle: string;
+  threadPath: string | null;
+  lastActivity: number;
+  unread: number;
+  onClick: () => void;
+};
+
 const UnifiedMessages: React.FC = () => {
-  const { chats, searchChats, connectionStatus, setActiveChat } = useChatStore();
+  const { chats, searchIndex, connectionStatus, setActiveChat, setJumpToMessageId } = useChatStore();
   const {
     groups,
     groupPreviews,
@@ -15,12 +27,14 @@ const UnifiedMessages: React.FC = () => {
     loadGroups,
     fetchReplicationState,
     openGroup,
+    setActiveThread,
+    setJumpToMessageId: setGroupJumpToMessageId,
     isLoading,
     error,
   } = useGroupStore();
 
   const [query, setQuery] = useState('');
-  const [dmResults, setDmResults] = useState(chats);
+  const [searchResults, setSearchResults] = useState<api.SearchResultItem[] | null>(null);
   const [showNewChat, setShowNewChat] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showChooser, setShowChooser] = useState(false);
@@ -34,20 +48,23 @@ const UnifiedMessages: React.FC = () => {
     }
   }, [connectionStatus, loadGroups, fetchReplicationState]);
 
-  // Filter DMs using the server-side search helper
+  // Filter DMs + groups using the search index
   useEffect(() => {
     let cancelled = false;
 
     const runSearch = async () => {
       try {
-        if (query) {
-          const results = await searchChats(query);
-          if (!cancelled) setDmResults(results);
+        if (query.trim()) {
+          const results = await searchIndex(query, {
+            scope: api.SearchScope.All,
+            limit: 100,
+          });
+          if (!cancelled) setSearchResults(results);
         } else {
-          setDmResults(chats);
+          setSearchResults(null);
         }
       } catch (err) {
-        if (!cancelled) setDmResults([]);
+        if (!cancelled) setSearchResults([]);
       }
     };
 
@@ -55,20 +72,101 @@ const UnifiedMessages: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [query, chats, searchChats]);
+  }, [query, searchIndex]);
 
-  const filteredGroups = useMemo(() => {
-    if (!query) return groups;
-    const term = query.toLowerCase();
-    return groups.filter((group) => {
-      const name = group.metadata?.name?.toLowerCase() || '';
-      const desc = group.metadata?.description?.toLowerCase() || '';
-      return name.includes(term) || desc.includes(term);
-    });
-  }, [groups, query]);
+  const formatThreadPath = (threadId?: string | null) => {
+    if (!threadId) return null;
+    const parts = threadId.split(':');
+    const suffix = parts[parts.length - 1] || threadId;
+    return `Thread ${suffix}`;
+  };
 
   const unifiedItems = useMemo(() => {
-    const dmItems = dmResults.map(chat => {
+    if (searchResults) {
+      const chatById = new Map(chats.map((chat) => [chat.id, chat]));
+      const groupById = new Map(groups.map((group) => [group.group_id, group]));
+
+      const items = searchResults.reduce<UnifiedItem[]>((acc, result, idx) => {
+          if (
+            result.kind === api.SearchResultKind.ChatSummary ||
+            result.kind === api.SearchResultKind.ChatMessage
+          ) {
+            const chatId = result.chat_id ?? '';
+            const chat = chatById.get(chatId);
+            if (!chat) return acc;
+            const lastMessage = chat.messages[chat.messages.length - 1];
+            const subtitle =
+              result.snippet ?? lastMessage?.content ?? 'No messages yet';
+            const lastActivity =
+              result.timestamp ?? chat.last_activity ?? lastMessage?.timestamp ?? 0;
+            acc.push({
+              id: result.message_id ? `dm-msg-${result.message_id}` : `dm-${chat.id}-${idx}`,
+              kind: 'dm' as const,
+              title: chat.counterparty || result.title || 'Direct message',
+              subtitle,
+              threadPath: null as string | null,
+              lastActivity,
+              unread: chat.unread_count,
+              onClick: () => {
+                if (result.message_id) {
+                  setJumpToMessageId(result.message_id);
+                }
+                setActiveChat(chat);
+              },
+            });
+            return acc;
+          }
+
+          if (
+            result.kind === api.SearchResultKind.GroupSummary ||
+            result.kind === api.SearchResultKind.GroupMessage
+          ) {
+            const groupId = result.group_id ?? '';
+            const group = groupById.get(groupId);
+            if (!group) return acc;
+            const preview = groupPreviews[group.group_id];
+            const subtitle =
+              result.snippet ??
+              preview?.text ??
+              group.metadata?.description ??
+              'No messages yet';
+            const lastActivity =
+              result.timestamp ??
+              preview?.timestamp ??
+              group.metadata?.updated_at ??
+              0;
+            const threadPath =
+              result.thread_id ? formatThreadPath(result.thread_id) : preview?.threadPath || null;
+            acc.push({
+              id: result.message_id
+                ? `group-msg-${result.message_id}`
+                : `group-${group.group_id}-${idx}`,
+              kind: 'group' as const,
+              title: group.metadata?.name || result.title || 'Untitled group',
+              subtitle,
+              threadPath,
+              lastActivity,
+              unread: groupUnread[group.group_id] || 0,
+              onClick: () => {
+                void openGroup(group.group_id).then(() => {
+                  if (result.thread_id) {
+                    setActiveThread(result.thread_id);
+                  }
+                  if (result.message_id) {
+                    setGroupJumpToMessageId(result.message_id);
+                  }
+                });
+              },
+            });
+            return acc;
+          }
+          return acc;
+        }, []);
+
+      return items;
+    }
+
+    const dmItems = chats.map((chat) => {
       const lastMessage = chat.messages[chat.messages.length - 1];
       const lastActivity = chat.last_activity || lastMessage?.timestamp || 0;
       const preview = lastMessage?.content || 'No messages yet';
@@ -86,7 +184,7 @@ const UnifiedMessages: React.FC = () => {
       };
     });
 
-    const groupItems = filteredGroups.map((group) => {
+    const groupItems = groups.map((group) => {
       const preview = groupPreviews[group.group_id];
       const lastActivity =
         preview?.timestamp || group.metadata?.updated_at || Math.floor(Date.now() / 1000);
@@ -107,7 +205,16 @@ const UnifiedMessages: React.FC = () => {
     return [...dmItems, ...groupItems].sort(
       (a, b) => (b.lastActivity || 0) - (a.lastActivity || 0)
     );
-  }, [dmResults, filteredGroups, openGroup, setActiveChat, groupPreviews]);
+  }, [
+    searchResults,
+    chats,
+    groups,
+    groupPreviews,
+    groupUnread,
+    openGroup,
+    setActiveChat,
+    setActiveThread,
+  ]);
 
   const formatTime = (timestamp?: number | null) => {
     if (!timestamp) return '';

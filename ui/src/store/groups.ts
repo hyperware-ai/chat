@@ -266,6 +266,7 @@ interface GroupStore {
   isSyncing: boolean;
   error: string | null;
   messageBodies: BodyCache;
+  jumpToMessageId: string | null;
   loadGroups: () => Promise<void>;
   openGroup: (groupId: string) => Promise<void>;
   refreshActiveGroup: () => Promise<void>;
@@ -306,6 +307,9 @@ interface GroupStore {
   toggleReaction: (messageId: string, emoji: string) => Promise<void>;
   markGroupAsRead: (groupId: string) => void;
   updateGroupSettings: (groupId: string, settings: { notify?: boolean }) => Promise<void>;
+  createGroupJoinLink: (groupId: string) => Promise<string | null>;
+  joinGroupLink: (host: string, key: string) => Promise<string | null>;
+  setJumpToMessageId: (messageId: string | null) => void;
 }
 
 export const useGroupStore = create<GroupStore>((set, get) => ({
@@ -327,6 +331,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
   isSyncing: false,
   error: null,
   messageBodies: loadBodyCache(),
+  jumpToMessageId: null,
 
   loadGroups: async () => {
     try {
@@ -535,7 +540,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       draftThread: null,
       replyingTo: null,
       isSyncing: false,
+      jumpToMessageId: null,
     }),
+
+  setJumpToMessageId: (messageId: string | null) => set({ jumpToMessageId: messageId }),
 
   setReplyingTo: (message) => set({ replyingTo: message }),
 
@@ -1052,6 +1060,33 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       }));
     } catch (error) {
       console.error('[GROUPS] Failed to update group settings', error);
+    }
+  },
+
+  createGroupJoinLink: async (groupId: string) => {
+    try {
+      const res = await Chat.create_group_join_link({ group_id: groupId });
+      return res.link;
+    } catch (error) {
+      console.error('[GROUPS] Failed to create join link', error);
+      set({ error: 'Failed to create join link' });
+      return null;
+    }
+  },
+
+  joinGroupLink: async (host: string, key: string) => {
+    try {
+      set({ isLoading: true });
+      const res = await Chat.join_group_link({ host, key });
+      await get().loadGroups();
+      await get().openGroup(res.group_id);
+      return res.group_id;
+    } catch (error) {
+      console.error('[GROUPS] Failed to join group', error);
+      set({ error: 'Failed to join group' });
+      return null;
+    } finally {
+      set({ isLoading: false });
     }
   },
 }));

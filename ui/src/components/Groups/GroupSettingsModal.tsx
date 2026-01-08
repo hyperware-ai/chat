@@ -1,7 +1,8 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Chat } from '#caller-utils';
+import { useChatStore } from '../../store/chat';
 import { useGroupStore } from '../../store/groups';
-import { GROUP_PERMISSION_FLAGS, GroupPermissionKey, hasGroupPermission } from '../../constants/group';
+import { GroupPermissionKey, hasGroupPermission } from '../../constants/group';
 import './GroupSettingsModal.css';
 
 interface GroupSettingsModalProps {
@@ -12,8 +13,6 @@ const visibilityLabel = (visibility: Chat.GroupVisibility | null | undefined) =>
   switch (visibility) {
     case Chat.GroupVisibility.Public:
       return 'Public';
-    case Chat.GroupVisibility.InviteOnly:
-      return 'Invite only';
     case Chat.GroupVisibility.Private:
     default:
       return 'Private';
@@ -39,7 +38,11 @@ const permissionLabels: { key: GroupPermissionKey; label: string }[] = [
 ];
 
 const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({ onClose }) => {
-  const { activeGroup } = useGroupStore();
+  const { activeGroup, createGroupJoinLink } = useGroupStore();
+  const { nodeId } = useChatStore();
+  const [joinLink, setJoinLink] = useState<string | null>(null);
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const [isCreatingLink, setIsCreatingLink] = useState(false);
   if (!activeGroup) return null;
 
   const roles = useMemo(() => Array.from(activeGroup.roles.values()), [activeGroup.roles]);
@@ -47,6 +50,30 @@ const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({ onClose }) => {
     roles.find((r) => r.id === activeGroup.metadata.default_role_id) ||
     roles.find((r) => r.tier === Chat.GroupTier.Subscriber) ||
     roles[0];
+  const member = nodeId ? activeGroup.members.get(nodeId) : undefined;
+  const memberRole = member ? activeGroup.roles.get(member.role_id) : undefined;
+  const canInvite =
+    member?.status === Chat.MembershipStatus.Active &&
+    hasGroupPermission(memberRole?.permissions as unknown as number, 'INVITE_MEMBERS');
+  const isPublic = activeGroup.metadata.visibility === Chat.GroupVisibility.Public;
+
+  const handleCreateLink = async () => {
+    if (!isPublic || !canInvite) return;
+    setIsCreatingLink(true);
+    setJoinError(null);
+    const link = await createGroupJoinLink(activeGroup.id);
+    if (link) {
+      setJoinLink(link);
+    } else {
+      setJoinError('Failed to create join link.');
+    }
+    setIsCreatingLink(false);
+  };
+
+  const handleCopyLink = () => {
+    if (!joinLink) return;
+    navigator.clipboard.writeText(joinLink).catch(() => {});
+  };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -89,6 +116,47 @@ const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({ onClose }) => {
               </div>
             )}
           </div>
+
+          {isPublic && (
+            <div className="settings-section join-link-section">
+              <div className="settings-section-header">
+                <h4>Join link</h4>
+                <span className="settings-sub">
+                  Anyone with this link can join as a member.
+                </span>
+              </div>
+              <div className="join-link-actions">
+                <div className="join-link-row">
+                  <button
+                    className="join-link-button"
+                    onClick={handleCreateLink}
+                    disabled={!canInvite || isCreatingLink}
+                  >
+                    {isCreatingLink ? 'Creating…' : 'Create join link'}
+                  </button>
+                  {!canInvite && (
+                    <span className="join-link-note">
+                      You do not have permission to create join links.
+                    </span>
+                  )}
+                </div>
+                {joinLink && (
+                  <div className="join-link-display">
+                    <input
+                      type="text"
+                      value={joinLink}
+                      readOnly
+                      onClick={(e) => (e.target as HTMLInputElement).select()}
+                    />
+                    <button className="join-link-button secondary" onClick={handleCopyLink}>
+                      Copy
+                    </button>
+                  </div>
+                )}
+                {joinError && <div className="join-link-error">{joinError}</div>}
+              </div>
+            </div>
+          )}
 
           <div className="settings-section">
             <div className="settings-section-header">
