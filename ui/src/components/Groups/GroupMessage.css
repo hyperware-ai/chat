@@ -5,7 +5,15 @@
   flex-direction: row;
   align-items: flex-end;
   gap: 8px;
-  margin-bottom: 8px;
+}
+
+/* Time-based spacing */
+.group-message.spacing-tight {
+  margin-top: 2px;
+}
+
+.group-message.spacing-wide {
+  margin-top: 6px;
 }
 
 .group-message.mine {

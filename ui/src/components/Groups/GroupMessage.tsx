@@ -9,6 +9,7 @@ import remarkBreaks from 'remark-breaks';
 import remarkHwProtocol from '../../utils/remarkHwProtocol';
 import { normalizeMessageContent } from '../../utils/normalizeMessageContent';
 import Avatar from '../Common/Avatar';
+import { SpacingClass } from '../../utils/messageSpacing';
 import './GroupMessage.css';
 
 interface ChildThreadInfo {
@@ -30,6 +31,7 @@ interface GroupMessageProps {
   allMessages?: GroupMessageType[];
   isFirstFromSender?: boolean;
   isLastFromSender?: boolean;
+  spacingClass?: SpacingClass;
 }
 
 const formatTime = (timestamp: number) => {
@@ -76,7 +78,7 @@ const parseApiResponse = <T,>(response: any): T => {
 };
 
 const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
-  ({ message, currentNode, onStartThread, onOpenThread, isActiveThread, onReply, onSetEditingMessage, onDelete, onReact, childThread, allMessages, isFirstFromSender = true, isLastFromSender = true }, ref) => {
+  ({ message, currentNode, onStartThread, onOpenThread, isActiveThread, onReply, onSetEditingMessage, onDelete, onReact, childThread, allMessages, isFirstFromSender = true, isLastFromSender = true, spacingClass = 'wide' }, ref) => {
     const isMine = currentNode && message.sender === currentNode;
     const statusLabel =
       message.status === 'sending'
@@ -501,7 +503,7 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
 
     return (
       <>
-        <div className={`group-message ${isMine ? 'mine' : ''}`} ref={ref} id={`group-message-${message.id}`}>
+        <div className={`group-message ${isMine ? 'mine' : ''} spacing-${spacingClass}`} ref={ref} id={`group-message-${message.id}`}>
           {/* Avatar for others - show on last message of consecutive group */}
           {!isMine && isLastFromSender && (
             <div className="group-message-avatar">

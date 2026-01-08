@@ -4,7 +4,15 @@
   flex-direction: column;
   gap: 0;
   position: relative;
-  margin-bottom: 8px;
+}
+
+/* Time-based spacing */
+.message.spacing-tight {
+  margin-top: 2px;
+}
+
+.message.spacing-wide {
+  margin-top: 6px;
 }
 
 .message.own {
