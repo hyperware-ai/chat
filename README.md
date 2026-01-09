@@ -18,8 +18,19 @@ kit build --hyperapp --features "caller-utils"
 
 ## Tests
 
-To run integration tests:
-`kit run-tests`
+A lot of functions have the following comment above them in the app.
+```Rust
+// uncomment #[remote] for tests
+// #[remote]
+```
+Testing suite requires them to be accessible as remote, so that the master testing node can call them.
+So to run integration tests with multiple nodes:
+- uncomment all the commented `#[remote]` functions
+- `kit run-tests`
+Make sure to "re-comment" only those `#[remote]` attributes which have `// uncomment #[remote] for tests` above them, as some `#[remote]` attributes should remain.
 
 To run unit tests at the end of files:
 `cargo test -p chat --tests`
+
+`chat_dev_loop` can be used for integration testing with the UI.
+
