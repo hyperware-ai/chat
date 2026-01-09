@@ -811,6 +811,16 @@ impl ChatState {
         &mut self,
         req: UpdateGroupSettingsReq,
     ) -> Result<GroupSummary, String> {
+        if let Some(visibility) = req.visibility {
+            self.require_group_permission(
+                &req.group_id,
+                &our().node,
+                GroupPermissions::MANAGE_SETTINGS,
+            )
+            .map_err(|err| format!("cannot update group visibility: {}", err))?;
+            self.update_group_visibility(&req.group_id, visibility)?;
+        }
+
         // Verify group exists
         let group = self
             .groups
@@ -4088,6 +4098,20 @@ impl ChatState {
 
         group_state.apply_into(self);
         self.rebuild_group_search(group_id);
+        if let Some(group) = self.groups.get(group_id) {
+            let visibility = group
+                .metadata
+                .as_ref()
+                .map(|meta| meta.visibility)
+                .unwrap_or(GroupVisibility::Private);
+            if visibility == GroupVisibility::Private {
+                for join_key in self.group_join_keys.values_mut() {
+                    if join_key.group_id == *group_id {
+                        join_key.is_revoked = true;
+                    }
+                }
+            }
+        }
 
         // Detect new messages and handle notifications/unread counts
         if let Some(group) = self.groups.get(group_id) {

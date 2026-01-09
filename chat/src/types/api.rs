@@ -350,6 +350,8 @@ fn default_true() -> bool {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UpdateGroupSettingsReq {
     pub group_id: GroupId,
+    #[serde(default)]
+    pub visibility: Option<GroupVisibility>,
     pub notify: Option<bool>,
 }
 

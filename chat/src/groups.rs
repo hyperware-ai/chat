@@ -577,6 +577,39 @@ impl ChatState {
         Ok(())
     }
 
+    pub fn update_group_visibility(
+        &mut self,
+        group_id: &GroupId,
+        visibility: GroupVisibility,
+    ) -> Result<(), String> {
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| "Group not found".to_string())?;
+        let meta = group
+            .metadata
+            .as_mut()
+            .ok_or_else(|| "Group metadata missing".to_string())?;
+        if meta.visibility == visibility {
+            return Ok(());
+        }
+
+        meta.visibility = visibility;
+        meta.updated_at = current_timestamp();
+
+        if visibility == GroupVisibility::Private {
+            for join_key in self.group_join_keys.values_mut() {
+                if join_key.group_id == *group_id {
+                    join_key.is_revoked = true;
+                }
+            }
+        }
+
+        self.commit_group_crdt_or_log(group_id, "update_group_visibility");
+        self.rebuild_group_search(group_id);
+        Ok(())
+    }
+
     fn evaluate_membership(
         &mut self,
         group_id: &GroupId,
