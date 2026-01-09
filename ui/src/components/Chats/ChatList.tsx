@@ -56,8 +56,8 @@ const ChatList: React.FC = () => {
       
       <div className="chat-list">
         {filteredChats.length > 0 ? (
-          filteredChats.map(chat => (
-            <ChatListItem key={chat.id} chat={chat} />
+          filteredChats.map((chat, index) => (
+            <ChatListItem key={chat.id} chat={chat} index={index} />
           ))
         ) : (
           <div className="empty-state">

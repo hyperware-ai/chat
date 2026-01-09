@@ -6,9 +6,10 @@ import './ChatListItem.css';
 
 interface ChatListItemProps {
   chat: Chat.Chat;
+  index?: number;
 }
 
-const ChatListItem: React.FC<ChatListItemProps> = ({ chat }) => {
+const ChatListItem: React.FC<ChatListItemProps> = ({ chat, index = 0 }) => {
   const { setActiveChat } = useChatStore();
   const isOfficial = chat.counterparty === 'dao.hypr';
   
@@ -39,6 +40,7 @@ const ChatListItem: React.FC<ChatListItemProps> = ({ chat }) => {
     <div
       className={`chat-list-item ${isOfficial ? 'official-chat' : ''}`}
       onClick={() => setActiveChat(chat)}
+      style={{ '--item-index': index } as React.CSSProperties}
     >
       <div className="chat-avatar-wrap">
         <Avatar

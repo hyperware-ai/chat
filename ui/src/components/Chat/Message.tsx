@@ -8,15 +8,17 @@ import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkHwProtocol from '../../utils/remarkHwProtocol';
 import { normalizeMessageContent } from '../../utils/normalizeMessageContent';
+import { SpacingClass } from '../../utils/messageSpacing';
 
 interface MessageProps {
   message: Chat.ChatMessage;
   isOwn: boolean;
+  spacingClass?: SpacingClass;
 }
 
 const { add_reaction, remove_reaction } = Caller.Chat;
 
-const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
+const Message: React.FC<MessageProps> = ({ message, isOwn, spacingClass = 'wide' }) => {
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
   const [swipeX, setSwipeX] = useState(0);
@@ -591,7 +593,7 @@ const Message: React.FC<MessageProps> = ({ message, isOwn }) => {
       <div 
         ref={messageRef}
         id={`message-${message.id}`}
-        className={`message ${isOwn ? 'own' : 'other'} ${isOfficial ? 'official-message' : ''} ${isSwiping ? 'swiping' : ''}`}
+        className={`message ${isOwn ? 'own' : 'other'} ${isOfficial ? 'official-message' : ''} ${isSwiping ? 'swiping' : ''} spacing-${spacingClass}`}
         onContextMenu={handleLongPress}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}

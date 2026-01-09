@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Chat } from '#caller-utils';
 import Message from './Message';
+import { getMessageSpacing, isDifferentDay, SpacingClass } from '../../utils/messageSpacing';
 import './MessageList.css';
 
 interface MessageListProps {
@@ -8,6 +9,23 @@ interface MessageListProps {
 }
 
 const MessageList: React.FC<MessageListProps> = ({ messages }) => {
+  // Compute spacing for each message
+  const messageSpacing = useMemo(() => {
+    const spacing = new Map<string, SpacingClass>();
+    messages.forEach((msg, idx) => {
+      const prev = messages[idx - 1];
+      const isNewDate = prev ? isDifferentDay(prev.timestamp, msg.timestamp) : true;
+      spacing.set(msg.id, getMessageSpacing({
+        currentTimestamp: msg.timestamp,
+        currentSender: msg.sender,
+        prevTimestamp: prev?.timestamp,
+        prevSender: prev?.sender,
+        isNewDate,
+      }));
+    });
+    return spacing;
+  }, [messages]);
+
   const formatDate = (timestamp: number) => {
     const date = new Date(timestamp * 1000);
     const today = new Date();
@@ -43,9 +61,10 @@ const MessageList: React.FC<MessageListProps> = ({ messages }) => {
                 <span>{messageDate}</span>
               </div>
             )}
-            <Message 
-              message={message} 
+            <Message
+              message={message}
               isOwn={message.sender === (window as any).our?.node}
+              spacingClass={messageSpacing.get(message.id)}
             />
           </React.Fragment>
         );

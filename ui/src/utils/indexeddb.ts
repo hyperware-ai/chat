@@ -2,19 +2,26 @@ import { Chat } from '#caller-utils';
 export type Chat = Chat.Chat;
 export type ChatMessage = Chat.ChatMessage;
 
-const DB_NAME = 'ChatAppDB';
 const DB_VERSION = 1;
 const CHATS_STORE = 'chats';
 const MESSAGES_STORE = 'messages';
 const METADATA_STORE = 'metadata';
+
+// Get node-scoped DB name for localhost isolation
+function getDBName(): string {
+  const node = (window as any).our?.node || 'default';
+  // Sanitize node name for DB name (keep alphanumeric, dots, dashes, underscores)
+  return `ChatAppDB_${node.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+}
 
 class IndexedDBStorage {
   private db: IDBDatabase | null = null;
 
   async init(): Promise<void> {
     return new Promise((resolve, reject) => {
-      console.log('[IDB] Initializing IndexedDB...');
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      const dbName = getDBName();
+      console.log('[IDB] Initializing IndexedDB:', dbName);
+      const request = indexedDB.open(dbName, DB_VERSION);
 
       request.onerror = () => {
         console.error('[IDB] Failed to open database:', request.error);
@@ -192,6 +199,9 @@ class IndexedDBStorage {
       };
       await this.promisifyRequest(messagesStore.put(messageData));
     }
+
+    // Update sync timestamp to mark cache as fresh
+    await this.saveMetadata('lastSyncTimestamp', Date.now());
   }
 
   // Delete a chat and all its messages

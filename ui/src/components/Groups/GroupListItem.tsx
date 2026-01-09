@@ -7,6 +7,7 @@ interface GroupListItemProps {
   onSelect: (groupId: string) => void;
   replicationState?: Chat.GroupReplicationState;
   isActive?: boolean;
+  index?: number;
 }
 
 const formatTimestamp = (timestamp?: number | null) => {
@@ -28,6 +29,7 @@ const GroupListItem: React.FC<GroupListItemProps> = ({
   replicationState,
   onSelect,
   isActive,
+  index = 0,
 }) => {
   const name = summary.metadata?.name || 'Untitled group';
   const description = summary.metadata?.description || 'No description';
@@ -53,6 +55,7 @@ const GroupListItem: React.FC<GroupListItemProps> = ({
     <button
       className={`group-list-item ${isActive ? 'active' : ''}`}
       onClick={() => onSelect(summary.group_id)}
+      style={{ '--item-index': index } as React.CSSProperties}
     >
       <div className="group-list-title-row">
         <div className="group-avatar">

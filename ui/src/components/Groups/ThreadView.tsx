@@ -3,6 +3,7 @@ import { Chat } from '#caller-utils';
 import GroupMessage from './GroupMessage';
 import GroupMessageInput from './GroupMessageInput';
 import { GroupMessage as GroupMessageType } from '../../types/groups';
+import { getMessageSpacing, isDifferentDay, SpacingClass } from '../../utils/messageSpacing';
 import './ThreadView.css';
 
 type ThreadWithId = Chat.Thread & { id: string };
@@ -115,6 +116,36 @@ const ThreadView: React.FC<ThreadViewProps> = ({
     // Don't include the root message here since it's shown separately
     return messages.filter((m) => m.threadId === threadId);
   }, [messages, threadId]);
+
+  // Compute message grouping info for consecutive messages from same sender
+  const messageGroupInfo = useMemo(() => {
+    const info = new Map<string, {
+      isFirstFromSender: boolean;
+      isLastFromSender: boolean;
+      spacingClass: SpacingClass;
+    }>();
+
+    filtered.forEach((msg, idx) => {
+      const prev = filtered[idx - 1];
+      const next = filtered[idx + 1];
+
+      const isFirstFromSender = !prev || prev.sender !== msg.sender;
+      const isLastFromSender = !next || next.sender !== msg.sender;
+
+      const isNewDate = prev ? isDifferentDay(prev.timestamp, msg.timestamp) : true;
+      const spacingClass = getMessageSpacing({
+        currentTimestamp: msg.timestamp,
+        currentSender: msg.sender,
+        prevTimestamp: prev?.timestamp,
+        prevSender: prev?.sender,
+        isNewDate,
+      });
+
+      info.set(msg.id, { isFirstFromSender, isLastFromSender, spacingClass });
+    });
+
+    return info;
+  }, [filtered]);
 
   const rootMessage = useMemo(() => {
     if (!threadMeta?.root_message_id) return null;
@@ -367,6 +398,9 @@ const ThreadView: React.FC<ThreadViewProps> = ({
               isActiveThread={false}
               childThread={messageToChildThread.get(msg.id) || null}
               allMessages={messages}
+              isFirstFromSender={messageGroupInfo.get(msg.id)?.isFirstFromSender}
+              isLastFromSender={messageGroupInfo.get(msg.id)?.isLastFromSender}
+              spacingClass={messageGroupInfo.get(msg.id)?.spacingClass}
             />
           ))
         )}

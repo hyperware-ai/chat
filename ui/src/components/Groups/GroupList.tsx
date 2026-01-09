@@ -101,13 +101,14 @@ const GroupList: React.FC = () => {
         {isLoading && groups.length === 0 ? (
           <div className="group-empty">Loading groups…</div>
         ) : filteredGroups.length > 0 ? (
-          filteredGroups.map((group) => (
+          filteredGroups.map((group, index) => (
             <GroupListItem
               key={group.group_id}
               summary={group}
               replicationState={replication[group.group_id]}
               isActive={group.group_id === activeGroupId}
               onSelect={(id) => openGroup(id)}
+              index={index}
             />
           ))
         ) : (

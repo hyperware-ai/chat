@@ -181,8 +181,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const ageMinutes = ageMs / (1000 * 60);
           console.log('[INIT] Cache age:', ageMinutes.toFixed(1), 'minutes');
           
-          // Sync in background if data is older than 1 minute
-          if (ageMinutes > 1) {
+          // Sync in background if data is older than 5 minutes
+          if (ageMinutes > 5) {
             setTimeout(() => get().syncWithServer(), 1000);
           }
         } else {
@@ -533,9 +533,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // Save the updated chat to IndexedDB
         const updatedChat = updatedChats.find(c => c.id === chatId);
         if (updatedChat) {
-          idbStorage.saveChat(updatedChat);
+          idbStorage.saveChat(updatedChat).catch(err =>
+            console.error('[IDB] Failed to save chat after send:', updatedChat.id, err)
+          );
         }
-        
+
         const updatedActiveChat = state.activeChat?.id === chatId 
           ? { 
               ...state.activeChat, 
@@ -629,16 +631,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // Save the updated chat to IndexedDB
         const updatedChat = updatedChats.find(c => c.id === chatId);
         if (updatedChat) {
-          idbStorage.saveChat(updatedChat);
+          idbStorage.saveChat(updatedChat).catch(err =>
+            console.error('[IDB] Failed to save chat after delete:', updatedChat.id, err)
+          );
         }
-        
+
         return {
           chats: updatedChats,
           // Also update activeChat if it's the same chat
-          activeChat: state.activeChat?.id === chatId 
-            ? { 
-                ...state.activeChat, 
-                messages: state.activeChat.messages.filter(msg => msg.id !== messageId) 
+          activeChat: state.activeChat?.id === chatId
+            ? {
+                ...state.activeChat,
+                messages: state.activeChat.messages.filter(msg => msg.id !== messageId)
               }
             : state.activeChat
         };
@@ -666,16 +670,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Save the updated chat to IndexedDB
       const updatedChat = updatedChats.find(c => c.id === chatId);
       if (updatedChat) {
-        idbStorage.saveChat(updatedChat);
+        idbStorage.saveChat(updatedChat).catch(err =>
+          console.error('[IDB] Failed to save chat after local delete:', updatedChat.id, err)
+        );
       }
-      
+
       return {
         chats: updatedChats,
         // Also update activeChat if it's the same chat
-        activeChat: state.activeChat?.id === chatId 
-          ? { 
-              ...state.activeChat, 
-              messages: state.activeChat.messages.filter(msg => msg.id !== messageId) 
+        activeChat: state.activeChat?.id === chatId
+          ? {
+              ...state.activeChat,
+              messages: state.activeChat.messages.filter(msg => msg.id !== messageId)
             }
           : state.activeChat
       };
@@ -931,10 +937,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // Save updated chat to IndexedDB
         const changedChat = newChats.find(c => c.id === serverChat.id);
         if (changedChat) {
-          idbStorage.saveChat(changedChat);
+          idbStorage.saveChat(changedChat).catch(err =>
+            console.error('[IDB] Failed to save chat after ChatUpdate:', changedChat.id, err)
+          );
         }
-        
-        return { 
+
+        return {
           chats: newChats,
           activeChat: updatedActiveChat
         };
@@ -1007,11 +1015,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           
           // Save updated chat to IndexedDB
           if (foundChat) {
-            const chatToSave = updatedChats.find(c => 
+            const chatToSave = updatedChats.find(c =>
               c.counterparty === newMsg.sender || c.id.includes(newMsg.sender)
             );
             if (chatToSave) {
-              idbStorage.saveChat(chatToSave);
+              idbStorage.saveChat(chatToSave).catch(err =>
+                console.error('[IDB] Failed to save chat after NewMessage:', chatToSave.id, err)
+              );
             }
           }
           

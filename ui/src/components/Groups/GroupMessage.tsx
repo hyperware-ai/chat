@@ -8,6 +8,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkHwProtocol from '../../utils/remarkHwProtocol';
 import { normalizeMessageContent } from '../../utils/normalizeMessageContent';
+import Avatar from '../Common/Avatar';
+import { SpacingClass } from '../../utils/messageSpacing';
 import './GroupMessage.css';
 
 interface ChildThreadInfo {
@@ -27,6 +29,9 @@ interface GroupMessageProps {
   onReact?: (messageId: string, emoji: string) => void;
   childThread?: ChildThreadInfo | null;
   allMessages?: GroupMessageType[];
+  isFirstFromSender?: boolean;
+  isLastFromSender?: boolean;
+  spacingClass?: SpacingClass;
 }
 
 const formatTime = (timestamp: number) => {
@@ -73,7 +78,7 @@ const parseApiResponse = <T,>(response: any): T => {
 };
 
 const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
-  ({ message, currentNode, onStartThread, onOpenThread, isActiveThread, onReply, onSetEditingMessage, onDelete, onReact, childThread, allMessages }, ref) => {
+  ({ message, currentNode, onStartThread, onOpenThread, isActiveThread, onReply, onSetEditingMessage, onDelete, onReact, childThread, allMessages, isFirstFromSender = true, isLastFromSender = true, spacingClass = 'wide' }, ref) => {
     const isMine = currentNode && message.sender === currentNode;
     const statusLabel =
       message.status === 'sending'
@@ -498,120 +503,143 @@ const GroupMessage = React.forwardRef<HTMLDivElement, GroupMessageProps>(
 
     return (
       <>
-        <div className={`group-message ${isMine ? 'mine' : ''}`} ref={ref} id={`group-message-${message.id}`}>
-          {!isMine && <div className="group-message-sender">{message.sender}</div>}
-          {replyToMessage && (
-            <div className="group-message-reply-to" onClick={handleReplyClick}>
-              <div className="group-message-reply-label">↩ Reply to {replyToMessage.sender}</div>
-              <div className="group-message-reply-content">{replyToMessage.content}</div>
+        <div className={`group-message ${isMine ? 'mine' : ''} spacing-${spacingClass}`} ref={ref} id={`group-message-${message.id}`}>
+          {/* Avatar for others - show on last message of consecutive group */}
+          {!isMine && isLastFromSender && (
+            <div className="group-message-avatar">
+              <Avatar name={message.sender} size="small" />
             </div>
           )}
-          <div
-            className="group-message-bubble"
-            onContextMenu={handleContextMenu}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-          >
-            <div className="group-message-text">
-              {hasAttachments && (
-                <div className="group-attachments">
-                  {message.attachments.map((attachment) => {
-                    const isImage = attachment.mime_type?.startsWith('image/');
-                    const isAudio = isVoiceNote && attachment.mime_type?.startsWith('audio/');
-                    const previewUrl = attachmentUrls[attachment.attachment_id];
-                    const filename = attachment.filename || attachment.attachment_id;
+          {!isMine && !isLastFromSender && (
+            <div className="group-message-avatar-spacer" />
+          )}
 
-                    return (
-                      <div key={attachment.attachment_id} className="group-attachment">
-                        {isImage && settings?.show_images && previewUrl && (
-                          <img
-                            src={previewUrl}
-                            alt={filename}
-                            className="group-attachment-image"
-                            onClick={() => handleAttachmentDownload(attachment)}
-                          />
-                        )}
-                        {isImage && settings?.show_images && !previewUrl && (
-                          <div className="group-attachment-loading">Loading image…</div>
-                        )}
-                        {isAudio && previewUrl && (
-                          <div className="group-audio-wrapper">
-                            <audio
-                              controls
-                              src={previewUrl}
-                              className="group-attachment-audio"
-                            />
-                          </div>
-                        )}
-                        {isAudio && !previewUrl && (
-                          <div className="group-audio-wrapper">
-                            <div className="group-attachment-loading">Loading audio…</div>
-                          </div>
-                        )}
-                        {isAudio ? null : (
-                          <>
-                            <a
-                              href={attachment.uri || '#'}
-                              onClick={(e) => {
-                                e.preventDefault();
-                                handleAttachmentDownload(attachment);
-                              }}
-                              style={{
-                                color: attachmentLinkColor,
-                                textDecoration: 'underline',
-                                textUnderlineOffset: '2px',
-                                display: 'inline-block',
-                              }}
-                            >
-                              {filename}
-                            </a>
-                            <div className="group-attachment-size">
-                              {formatFileSize(attachment.size_bytes)}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {shouldRenderText && renderMessageContent}
-            </div>
-            <div className="group-message-meta">
-              <span>{formatTime(message.timestamp)}</span>
-              {statusLabel && <span className="group-message-status">{statusLabel}</span>}
-            </div>
-            {message.reactions && message.reactions.length > 0 && (
-              <div className="group-message-reactions">
-                {Object.entries(groupedReactions).map(([emoji, users]) => (
-                  <button
-                    key={emoji}
-                    className={`reaction ${
-                      users.includes(viewerId) ? 'reacted' : ''
-                    }`}
-                    onClick={() => handleReaction(emoji)}
-                    title={users.join(', ')}
-                  >
-                    {emoji} {users.length > 1 && users.length}
-                  </button>
-                ))}
+          <div className="group-message-content">
+            {/* Sender name - show on first message of consecutive group */}
+            {!isMine && isFirstFromSender && (
+              <div className="group-message-sender">{message.sender}</div>
+            )}
+
+            {/* Reply preview */}
+            {replyToMessage && (
+              <div className={`message-bubble__reply ${isMine ? '' : ''}`} onClick={handleReplyClick}>
+                <div className="message-bubble__reply-label">↩ Reply to {replyToMessage.sender}</div>
+                <div className="message-bubble__reply-content">{replyToMessage.content}</div>
               </div>
             )}
-            {childThread && onOpenThread && (
-              <button
-                type="button"
-                className="group-message-thread-indicator has-thread"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onOpenThread(childThread.id);
-                }}
-              >
-                <span className="thread-icon">↳</span>
-                <span className="thread-label">Thread</span>
-              </button>
-            )}
+
+            <div
+              className={`group-message-bubble message-bubble ${isMine ? 'message-bubble--own' : 'message-bubble--other'}`}
+              onContextMenu={handleContextMenu}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+            >
+              <div className="group-message-text">
+                {hasAttachments && (
+                  <div className="group-attachments">
+                    {message.attachments.map((attachment) => {
+                      const isImage = attachment.mime_type?.startsWith('image/');
+                      const isAudio = isVoiceNote && attachment.mime_type?.startsWith('audio/');
+                      const previewUrl = attachmentUrls[attachment.attachment_id];
+                      const filename = attachment.filename || attachment.attachment_id;
+
+                      return (
+                        <div key={attachment.attachment_id} className="group-attachment">
+                          {isImage && settings?.show_images && previewUrl && (
+                            <img
+                              src={previewUrl}
+                              alt={filename}
+                              className="group-attachment-image"
+                              onClick={() => handleAttachmentDownload(attachment)}
+                            />
+                          )}
+                          {isImage && settings?.show_images && !previewUrl && (
+                            <div className="group-attachment-loading">Loading image…</div>
+                          )}
+                          {isAudio && previewUrl && (
+                            <div className="message-bubble__audio">
+                              <audio
+                                controls
+                                src={previewUrl}
+                              />
+                            </div>
+                          )}
+                          {isAudio && !previewUrl && (
+                            <div className="message-bubble__audio">
+                              <div className="group-attachment-loading">Loading audio…</div>
+                            </div>
+                          )}
+                          {isAudio ? null : (
+                            <>
+                              <a
+                                href={attachment.uri || '#'}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  handleAttachmentDownload(attachment);
+                                }}
+                                style={{
+                                  color: attachmentLinkColor,
+                                  textDecoration: 'underline',
+                                  textUnderlineOffset: '2px',
+                                  display: 'inline-block',
+                                }}
+                              >
+                                {filename}
+                              </a>
+                              <div className="group-attachment-size">
+                                {formatFileSize(attachment.size_bytes)}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {shouldRenderText && renderMessageContent}
+              </div>
+
+              {/* Timestamp inside bubble */}
+              <div className="message-bubble__footer">
+                <span>{formatTime(message.timestamp)}</span>
+                {statusLabel && <span className="group-message-status">{statusLabel}</span>}
+              </div>
+
+              {/* Reactions inside bubble */}
+              {message.reactions && message.reactions.length > 0 && (
+                <div className="message-bubble__reactions">
+                  {Object.entries(groupedReactions).map(([emoji, users]) => (
+                    <button
+                      key={emoji}
+                      className={`reaction ${
+                        users.includes(viewerId) ? 'reacted' : ''
+                      }`}
+                      onClick={() => handleReaction(emoji)}
+                      title={users.join(', ')}
+                    >
+                      {emoji} {users.length > 1 && users.length}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Thread indicator */}
+              {childThread && onOpenThread && (
+                <button
+                  type="button"
+                  className="group-message-thread-indicator has-thread"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpenThread(childThread.id);
+                  }}
+                >
+                  <span className="thread-icon">↳</span>
+                  <span className="thread-label">Thread</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
         {menuPosition && (
