@@ -100,7 +100,7 @@ const GroupSettingsModal: React.FC<GroupSettingsModalProps> = ({ onClose }) => {
             <div className="settings-card">
               <div className="settings-label">Visibility</div>
               <div className="settings-value">{visibilityLabel(activeGroup.metadata.visibility)}</div>
-              <div className="settings-sub">Set when creating the group</div>
+              <div className="settings-sub">Managed in Members</div>
             </div>
             <div className="settings-card">
               <div className="settings-label">Governance</div>

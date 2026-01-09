@@ -307,6 +307,7 @@ interface GroupStore {
   toggleReaction: (messageId: string, emoji: string) => Promise<void>;
   markGroupAsRead: (groupId: string) => void;
   updateGroupSettings: (groupId: string, settings: { notify?: boolean }) => Promise<void>;
+  updateGroupVisibility: (groupId: string, visibility: Chat.GroupVisibility) => Promise<boolean>;
   createGroupJoinLink: (groupId: string) => Promise<string | null>;
   joinGroupLink: (host: string, key: string) => Promise<string | null>;
   setJumpToMessageId: (messageId: string | null) => void;
@@ -1051,6 +1052,7 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     try {
       const res = await Chat.update_group_settings({
         group_id: groupId,
+        visibility: null,
         notify: settings.notify ?? null,
       });
 
@@ -1060,6 +1062,39 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
       }));
     } catch (error) {
       console.error('[GROUPS] Failed to update group settings', error);
+    }
+  },
+
+  updateGroupVisibility: async (groupId: string, visibility: Chat.GroupVisibility) => {
+    try {
+      const res = await Chat.update_group_settings({
+        group_id: groupId,
+        notify: null,
+        visibility,
+      });
+      set((state) => {
+        const updatedGroups = state.groups.map((group) =>
+          group.group_id === groupId
+            ? { ...group, metadata: res.metadata ?? group.metadata }
+            : group,
+        );
+        const updatedActiveGroup =
+          state.activeGroup && state.activeGroup.id === groupId
+            ? {
+                ...state.activeGroup,
+                metadata: res.metadata ?? state.activeGroup.metadata,
+              }
+            : state.activeGroup;
+        return {
+          groups: updatedGroups,
+          activeGroup: updatedActiveGroup,
+        };
+      });
+      return true;
+    } catch (error) {
+      console.error('[GROUPS] Failed to update group visibility', error);
+      set({ error: 'Failed to update group visibility' });
+      return false;
     }
   },
 
