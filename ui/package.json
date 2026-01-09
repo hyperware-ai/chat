@@ -14,6 +14,7 @@
     "@hyperware-ai/hw-protocol-watcher": "^1.0.1",
     "@types/mdast": "^4.0.4",
     "fix-webm-duration": "^1.0.6",
+    "framer-motion": "^12.24.12",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
